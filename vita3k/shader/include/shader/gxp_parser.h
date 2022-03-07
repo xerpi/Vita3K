@@ -17,7 +17,7 @@
 
 #pragma once
 
-#include <gxm/types.h>
+#include <gxm/public_types.h>
 #include <shader/usse_translator_types.h>
 #include <shader/usse_types.h>
 

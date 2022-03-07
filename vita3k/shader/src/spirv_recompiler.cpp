@@ -22,7 +22,7 @@
 #include <shader/usse_utilities.h>
 
 #include <gxm/functions.h>
-#include <gxm/types.h>
+#include <gxm/public_types.h>
 #include <shader/gxp_parser.h>
 #include <shader/profile.h>
 #include <shader/usse_translator_entry.h>
@@ -1114,7 +1114,7 @@ static spv::Function *make_vert_finalize_function(spv::Builder &b, const SpirvSh
     spv::Function *vert_fin_func = b.makeFunctionEntry(spv::NoPrecision, b.makeVoidType(), "vert_output_finalize", {},
         decorations, &vert_fin_block);
 
-    SceGxmVertexOutputTexCoordInfos coord_infos = {};
+    gxp::GxmVertexOutputTexCoordInfos coord_infos = {};
     SceGxmVertexProgramOutputs vertex_outputs = gxp::get_vertex_outputs(program, &coord_infos);
 
     static const auto calculate_copy_comp_count = [](uint8_t info) {

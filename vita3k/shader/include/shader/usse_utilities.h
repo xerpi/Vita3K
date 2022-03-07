@@ -22,7 +22,7 @@
 #include <shader/usse_translator_types.h>
 #include <shader/usse_types.h>
 
-#include <gxm/types.h>
+#include <gxm/public_types.h>
 
 struct FeatureState;
 

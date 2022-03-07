@@ -17,7 +17,7 @@
 
 #include <shader/usse_translator_entry.h>
 
-#include <gxm/types.h>
+#include <gxm/public_types.h>
 #include <shader/decoder_detail.h>
 #include <shader/matcher.h>
 #include <shader/usse_disasm.h>
