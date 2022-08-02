@@ -256,11 +256,13 @@ spv::StorageClass reg_type_to_spv_storage_class(usse::RegisterBank reg_type) {
     return spv::StorageClassMax;
 }
 
-static spv::Id create_param_sampler(spv::Builder &b, const std::string &name, const spv::Dim dim_type) {
+static spv::Id create_param_sampler(spv::Builder &b, const std::string &name, const spv::Dim dim_type, TranslationState &translation_state) {
     spv::Id sampled_type = b.makeFloatType(32);
     spv::Id image_type = b.makeImageType(sampled_type, dim_type, false, false, false, 1, spv::ImageFormatUnknown);
     spv::Id sampled_image_type = b.makeSampledImageType(image_type);
-    return b.createVariable(spv::NoPrecision, spv::StorageClassUniformConstant, sampled_image_type, name.c_str());
+    spv::Id sampler = b.createVariable(spv::NoPrecision, spv::StorageClassUniformConstant, sampled_image_type, name.c_str());
+    translation_state.interfaces.push_back(sampler);
+    return sampler;
 }
 
 static spv::Id create_input_variable(spv::Builder &b, SpirvShaderParameters &parameters, utils::SpirvUtilFunctions &utils, const FeatureState &features, const char *name, const RegisterBank bank, const std::uint32_t offset, spv::Id type, const std::uint32_t size, spv::Id force_id = spv::NoResult, DataType dtype = DataType::F32) {
@@ -609,7 +611,8 @@ static void create_fragment_inputs(spv::Builder &b, SpirvShaderParameters &param
 
             if (anonymous && (samplers.find(sampler_resource_index) == samplers.end())) {
                 // Probably not gonna be used in future, just for non-dependent queries
-                tex_query_info.sampler = create_param_sampler(b, (program.is_vertex() ? "vertTex_" : "fragTex_") + tex_name, dim_type);
+
+                tex_query_info.sampler = create_param_sampler(b, (program.is_vertex() ? "vertTex_" : "fragTex_") + tex_name, dim_type, translation_state);
 
                 b.addDecoration(tex_query_info.sampler, spv::DecorationBinding, sampler_resource_index);
                 samplers[sampler_resource_index] = tex_query_info.sampler;
@@ -821,6 +824,14 @@ static SpirvShaderParameters create_parameters(spv::Builder &b, const SceGxmProg
     spv_params.indexes = b.createVariable(spv::NoPrecision, spv::StorageClassPrivate, index_arr_type, "idx");
     spv_params.outs = b.createVariable(spv::NoPrecision, spv::StorageClassPrivate, o_arr_type, "outs");
 
+    translation_state.interfaces.push_back(spv_params.ins);
+    translation_state.interfaces.push_back(spv_params.uniforms);
+    translation_state.interfaces.push_back(spv_params.internals);
+    translation_state.interfaces.push_back(spv_params.temps);
+    translation_state.interfaces.push_back(spv_params.predicates);
+    translation_state.interfaces.push_back(spv_params.indexes);
+    translation_state.interfaces.push_back(spv_params.outs);
+
     SamplerMap samplers;
 
     spv::Id ite_copy = b.createVariable(spv::NoPrecision, spv::StorageClassFunction, i32_type, "i");
@@ -867,10 +878,12 @@ static SpirvShaderParameters create_parameters(spv::Builder &b, const SceGxmProg
             is_vert ? "vertexDataType" : "fragmentDataType");
 
         b.addDecoration(buffer_container_type, spv::DecorationBlock);
-        b.addDecoration(buffer_container_type, spv::DecorationGLSLShared);
+        // b.addDecoration(buffer_container_type, spv::DecorationGLSLShared);
 
         spv_params.buffer_container = b.createVariable(spv::NoPrecision, spv::StorageClassStorageBuffer, buffer_container_type,
             is_vert ? "vertexData" : "fragmentData");
+
+        translation_state.interfaces.push_back(spv_params.buffer_container);
 
         b.addDecoration(spv_params.buffer_container, spv::DecorationRestrict);
         b.addDecoration(spv_params.buffer_container, spv::DecorationNonWritable);
@@ -959,7 +972,7 @@ static SpirvShaderParameters create_parameters(spv::Builder &b, const SceGxmProg
     };
 
     for (const auto &sampler : program_input.samplers) {
-        const auto sampler_spv_var = create_param_sampler(b, (program.is_vertex() ? "vertTex_" : "fragTex_") + sampler.name, (sampler.is_cube ? spv::DimCube : spv::Dim2D));
+        const auto sampler_spv_var = create_param_sampler(b, (program.is_vertex() ? "vertTex_" : "fragTex_") + sampler.name, (sampler.is_cube ? spv::DimCube : spv::Dim2D), translation_state);
         samplers.emplace(sampler.index, sampler_spv_var);
 
         // Prefer smaller slot index for fragments since they are gonna be used frequently.
@@ -1095,7 +1108,7 @@ static SpirvShaderParameters create_parameters(spv::Builder &b, const SceGxmProg
         // Create the default reg uniform buffer
         spv::Id render_buf_type = b.makeStructType({ v4, f32, f32, f32, texture_format_arr }, "GxmRenderVertBufferBlock");
         b.addDecoration(render_buf_type, spv::DecorationBlock);
-        b.addDecoration(render_buf_type, spv::DecorationGLSLShared);
+        // b.addDecoration(render_buf_type, spv::DecorationGLSLShared);
 
         b.addMemberDecoration(render_buf_type, 0, spv::DecorationOffset, 0);
         b.addMemberDecoration(render_buf_type, 1, spv::DecorationOffset, 16);
@@ -1110,6 +1123,7 @@ static SpirvShaderParameters create_parameters(spv::Builder &b, const SceGxmProg
         b.addMemberName(render_buf_type, 4, "integral_query_formats");
 
         translation_state.render_info_id = b.createVariable(spv::NoPrecision, spv::StorageClassUniform, render_buf_type, "renderVertInfo");
+        translation_state.interfaces.push_back(translation_state.render_info_id);
 
         b.addDecoration(translation_state.render_info_id, spv::DecorationBinding, 2);
     }
@@ -1118,7 +1132,7 @@ static SpirvShaderParameters create_parameters(spv::Builder &b, const SceGxmProg
         spv::Id render_buf_type = b.makeStructType({ f32, f32, f32, f32, texture_format_arr, i32 }, "GxmRenderFragBufferBlock");
 
         b.addDecoration(render_buf_type, spv::DecorationBlock);
-        b.addDecoration(render_buf_type, spv::DecorationGLSLShared);
+        // b.addDecoration(render_buf_type, spv::DecorationGLSLShared);
 
         b.addMemberDecoration(render_buf_type, 0, spv::DecorationOffset, 0);
         b.addMemberDecoration(render_buf_type, 1, spv::DecorationOffset, 4);
@@ -1136,6 +1150,7 @@ static SpirvShaderParameters create_parameters(spv::Builder &b, const SceGxmProg
         b.addMemberName(render_buf_type, 5, "res_multiplier");
 
         translation_state.render_info_id = b.createVariable(spv::NoPrecision, spv::StorageClassUniform, render_buf_type, "renderFragInfo");
+        translation_state.interfaces.push_back(translation_state.render_info_id);
 
         b.addDecoration(translation_state.render_info_id, spv::DecorationBinding, 3);
 
@@ -1414,6 +1429,8 @@ static spv::Function *make_frag_initialize_function(spv::Builder &b, Translation
     spv::Id zero = b.makeFloatConstant(0.0f);
 
     spv::Id front_facing = b.createVariable(spv::NoPrecision, spv::StorageClassInput, booltype, "gl_FrontFacing");
+    translate_state.interfaces.push_back(front_facing);
+
     spv::Id front_disabled = b.createAccessChain(spv::StorageClassUniform, translate_state.render_info_id, { b.makeIntConstant(1) });
     spv::Id back_disabled = b.createAccessChain(spv::StorageClassUniform, translate_state.render_info_id, { b.makeIntConstant(0) });
     b.addDecoration(front_facing, spv::DecorationBuiltIn, spv::BuiltInFrontFacing);
@@ -1459,7 +1476,7 @@ static SpirvCode convert_gxp_to_spirv_impl(const SceGxmProgram &program, const s
     SceGxmProgramType program_type = program.get_type();
 
     spv::SpvBuildLogger spv_logger;
-    spv::Builder b(/* SPV_VERSION*/ 0x10300, 0x1337 << 12, &spv_logger);
+    spv::Builder b(spv::Spv_1_5, 0x1337 << 12, &spv_logger);
     b.setSourceFile(shader_hash);
     b.setEmitOpLines();
     b.addSourceExtension("gxp");
