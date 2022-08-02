@@ -1236,6 +1236,7 @@ static spv::Function *make_frag_finalize_function(spv::Builder &b, const SpirvSh
         }
     }
 
+#if 0
     // Discard masked fragments
     spv::Id current_coord = translate_state.frag_coord_id;
     spv::Id i32 = b.makeIntegerType(32, true);
@@ -1259,6 +1260,7 @@ static spv::Function *make_frag_finalize_function(spv::Builder &b, const SpirvSh
     spv::Builder::If cond_builder(pred2, spv::SelectionControlMaskNone, b);
     b.makeDiscard();
     cond_builder.makeEndIf();
+#endif
 
     b.makeReturn(false);
     b.setBuildPoint(last_build_point);
