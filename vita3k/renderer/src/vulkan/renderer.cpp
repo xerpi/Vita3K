@@ -1250,7 +1250,7 @@ bool VKState::map_memory(MemState &mem, Ptr<void> address, uint32_t size) {
         vk::BufferDeviceAddressInfoKHR address_info{
             .buffer = buffer.buffer
         };
-        const uintptr_t buffer_address = device.getBufferAddress(address_info) + buffer_offset;
+        const uint64_t buffer_address = device.getBufferAddress(address_info) + buffer_offset;
         const vk::Buffer mapped_buffer = buffer.buffer;
 
         add_external_mapping(mem, address.address(), size, static_cast<uint8_t *>(buffer.mapped_data));

@@ -549,7 +549,7 @@ static void signal_handler(int sig, siginfo_t *info, void *uct) noexcept {
     // TODO: handle ARM exceptions
     const bool is_executing = false;
     const bool is_writing = false;
-    LOG_CRITICAL("Unhandled ARM access violation at {}", log_hex(*reinterpret_cast<uintptr_t *>(&info->si_addr)));
+    LOG_CRITICAL("Unhandled ARM access violation at {}", log_hex(reinterpret_cast<uintptr_t>(info->si_addr)));
     raise(SIGTRAP);
     return;
 #elif __aarch64__
