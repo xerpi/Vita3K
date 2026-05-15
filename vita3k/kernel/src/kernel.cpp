@@ -188,10 +188,29 @@ void KernelState::request_process_exit(int res, std::optional<AppLaunchRequest> 
 void KernelState::process_exit() {
     {
         std::lock_guard<std::mutex> lock(mutex);
+
+        // Phase 1: mark all threads for removal so threads woken from sync prim
+        // waits immediately see to_do == remove and terminate without running
+        // more guest code.
+        for (auto &[_, thread] : threads)
+            thread->mark_exit();
+
+        // Phase 2: mark all sync primitives as deleted and wake their waiters.
+        for (auto &[_, prim] : simple_events) delete_and_wake_waiters(prim);
+        for (auto &[_, prim] : semaphores) delete_and_wake_waiters(prim);
+        for (auto &[_, prim] : mutexes) delete_and_wake_waiters(prim);
+        for (auto &[_, prim] : lwmutexes) delete_and_wake_waiters(prim);
+        for (auto &[_, prim] : rwlocks) delete_and_wake_waiters(prim);
+        for (auto &[_, prim] : eventflags) delete_and_wake_waiters(prim);
+        for (auto &[_, prim] : condvars) delete_and_wake_waiters(prim);
+        for (auto &[_, prim] : lwcondvars) delete_and_wake_waiters(prim);
         for (auto &[_, timer] : timers)
             timer->condvar.notify_all();
+
+        // Phase 3: wake dormant and running threads (sync prim waiters already
+        // woken above).
         for (auto &[_, thread] : threads)
-            thread->exit_delete(false);
+            thread->finish_exit();
     }
 
     std::unique_lock<std::mutex> lock(mutex);

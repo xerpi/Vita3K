@@ -18,6 +18,7 @@
 #pragma once
 
 #include <kernel/thread/thread_data_queue.h>
+#include <kernel/thread/thread_state.h>
 #include <kernel/types.h>
 #include <util/byte_ring_buffer.h>
 
@@ -81,6 +82,7 @@ struct SyncPrimitive {
     uint32_t attr{};
     std::mutex mutex;
     char name[KERNELOBJECT_MAX_NAME_LENGTH + 1];
+    bool deleted = false;
     virtual ~SyncPrimitive() = default;
 };
 
@@ -204,6 +206,21 @@ enum class SyncWeight {
     Light, // lightweight
     Heavy // 'heavy'weight
 };
+
+// Mark a sync primitive as deleted and wake its waiting threads so they return WAIT_DELETE.
+// Entries are popped while waking so no dangling was_canceled pointers remain.
+// Must be called with kernel.mutex held; caller also erases the primitive from the kernel map.
+template <typename PrimPtr>
+inline void delete_and_wake_waiters(PrimPtr &prim) {
+    std::lock_guard pl(prim->mutex);
+    prim->deleted = true;
+    while (!prim->waiting_threads->empty()) {
+        const auto data = *prim->waiting_threads->begin();
+        const std::lock_guard tl(data.thread->mutex);
+        data.thread->update_status(ThreadStatus::run);
+        prim->waiting_threads->pop();
+    }
+}
 
 // simple events
 SceUID simple_event_create(KernelState &kernel, MemState &mem, const char *export_name, const char *name, SceUID thread_id, SceUInt32 attr, SceUInt32 init_pattern);

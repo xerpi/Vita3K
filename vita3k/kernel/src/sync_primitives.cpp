@@ -169,6 +169,9 @@ SceInt32 simple_event_waitorpoll(KernelState &kernel, const char *export_name, S
 
     std::unique_lock<std::mutex> event_lock(event->mutex);
 
+    if (event->deleted)
+        return RET_ERROR(SCE_KERNEL_ERROR_WAIT_DELETE);
+
     if (result_pattern)
         *result_pattern = event->pattern;
 
@@ -196,6 +199,8 @@ SceInt32 simple_event_waitorpoll(KernelState &kernel, const char *export_name, S
         thread_lock.unlock();
 
         const int err = handle_timeout(kernel, thread, thread_lock, event_lock, event->waiting_threads, data_it, export_name, timeout);
+        if (event->deleted)
+            return RET_ERROR(SCE_KERNEL_ERROR_WAIT_DELETE);
         if (err < 0) {
             // set it only if a timeout occurs
             // otherwise set in simple_event_setorpulse
@@ -295,12 +300,10 @@ SceInt32 simple_event_delete(KernelState &kernel, const char *export_name, SceUI
             export_name, event->uid, thread_id, event->name, event->attr, event->pattern, event->waiting_threads->size());
     }
 
-    if (event->waiting_threads->empty()) {
+    {
         const std::lock_guard<std::mutex> kernel_lock(kernel.mutex);
-        kernel.eventflags.erase(event_id);
-    } else {
-        // TODO:
-        LOG_WARN("Can't delete sync object, it has waiting threads.");
+        delete_and_wake_waiters(event);
+        kernel.simple_events.erase(event_id);
     }
 
     return SCE_KERNEL_OK;
@@ -628,6 +631,9 @@ inline static int mutex_lock_impl(KernelState &kernel, MemState &mem, const char
 
     std::unique_lock<std::mutex> mutex_lock(mutex->mutex);
 
+    if (mutex->deleted)
+        return RET_ERROR(SCE_KERNEL_ERROR_WAIT_DELETE);
+
     bool is_recursive = (mutex->attr & SCE_KERNEL_MUTEX_ATTR_RECURSIVE);
 
     // Already owned
@@ -669,6 +675,9 @@ inline static int mutex_lock_impl(KernelState &kernel, MemState &mem, const char
         thread_lock.unlock();
 
         int res = handle_timeout(kernel, thread, thread_lock, mutex_lock, mutex->waiting_threads, data_it, export_name, timeout);
+
+        if (mutex->deleted)
+            return RET_ERROR(SCE_KERNEL_ERROR_WAIT_DELETE);
 
         if (weight == SyncWeight::Light) {
             mutex->workarea.get(mem)->lockCount = mutex->lock_count;
@@ -778,12 +787,10 @@ int mutex_delete(KernelState &kernel, const char *export_name, SceUID thread_id,
             mutex->waiting_threads->size());
     }
 
-    if (mutex->waiting_threads->empty()) {
+    {
         const std::lock_guard<std::mutex> kernel_guard(kernel.mutex);
+        delete_and_wake_waiters(mutex);
         mutexes->erase(mutexid);
-    } else {
-        // TODO:
-        LOG_WARN("Can't delete sync object, it has waiting threads.");
     }
 
     return SCE_KERNEL_OK;
@@ -852,6 +859,9 @@ SceInt32 rwlock_lock(KernelState &kernel, MemState &mem, const char *export_name
 
     std::unique_lock<std::mutex> rwlock_lock(rwlock->mutex);
 
+    if (rwlock->deleted)
+        return RET_ERROR(SCE_KERNEL_ERROR_WAIT_DELETE);
+
     // if it is a read lock, it is always recursive
     bool is_recursive = !is_write || (rwlock->attr & SCE_KERNEL_MUTEX_ATTR_RECURSIVE);
 
@@ -875,7 +885,6 @@ SceInt32 rwlock_lock(KernelState &kernel, MemState &mem, const char *export_name
         return RET_ERROR(SCE_KERNEL_ERROR_RW_LOCK_RECURSIVE);
     } else {
         // we need to wait
-
         std::unique_lock<std::mutex> thread_lock(thread->mutex);
         thread->update_status(ThreadStatus::wait, ThreadStatus::run);
 
@@ -887,7 +896,10 @@ SceInt32 rwlock_lock(KernelState &kernel, MemState &mem, const char *export_name
         const auto data_it = rwlock->waiting_threads->push(data);
         thread_lock.unlock();
 
-        return handle_timeout(kernel, thread, thread_lock, rwlock_lock, rwlock->waiting_threads, data_it, export_name, timeout);
+        int res = handle_timeout(kernel, thread, thread_lock, rwlock_lock, rwlock->waiting_threads, data_it, export_name, timeout);
+        if (rwlock->deleted)
+            return RET_ERROR(SCE_KERNEL_ERROR_WAIT_DELETE);
+        return res;
     }
 }
 
@@ -966,12 +978,10 @@ SceInt32 rwlock_delete(KernelState &kernel, MemState &mem, const char *export_na
             rwlock->waiting_threads->size());
     }
 
-    if (rwlock->waiting_threads->empty()) {
+    {
         const std::lock_guard<std::mutex> kernel_guard(kernel.mutex);
+        delete_and_wake_waiters(rwlock);
         kernel.rwlocks.erase(lock_id);
-    } else {
-        // TODO:
-        LOG_WARN("Can't delete sync object, it has waiting threads.");
     }
 
     return SCE_KERNEL_OK;
@@ -1050,6 +1060,9 @@ SceInt32 semaphore_wait(KernelState &kernel, const char *export_name, SceUID thr
 
     std::unique_lock<std::mutex> semaphore_lock(semaphore->mutex);
 
+    if (semaphore->deleted)
+        return RET_ERROR(SCE_KERNEL_ERROR_WAIT_DELETE);
+
     if (semaphore->val < needCount) {
         std::unique_lock<std::mutex> thread_lock(thread->mutex);
         thread->update_status(ThreadStatus::wait, ThreadStatus::run);
@@ -1066,6 +1079,8 @@ SceInt32 semaphore_wait(KernelState &kernel, const char *export_name, SceUID thr
         thread_lock.unlock();
 
         auto res = handle_timeout(kernel, thread, thread_lock, semaphore_lock, semaphore->waiting_threads, data_it, export_name, pTimeout);
+        if (semaphore->deleted)
+            return RET_ERROR(SCE_KERNEL_ERROR_WAIT_DELETE);
         if (was_canceled)
             res = SCE_KERNEL_ERROR_WAIT_CANCEL;
         return res;
@@ -1132,12 +1147,10 @@ int semaphore_delete(KernelState &kernel, const char *export_name, SceUID thread
             semaphore->waiting_threads->size());
     }
 
-    if (semaphore->waiting_threads->empty()) {
+    {
         const std::lock_guard<std::mutex> kernel_lock(kernel.mutex);
+        delete_and_wake_waiters(semaphore);
         kernel.semaphores.erase(semaid);
-    } else {
-        // TODO:
-        LOG_WARN("Can't delete sync object, it has waiting threads.");
     }
 
     return SCE_KERNEL_OK;
@@ -1249,6 +1262,9 @@ int condvar_wait(KernelState &kernel, MemState &mem, const char *export_name, Sc
     if (auto error = mutex_unlock_impl(kernel, export_name, thread_id, 1, condvar->associated_mutex))
         return error;
 
+    if (condvar->deleted)
+        return RET_ERROR(SCE_KERNEL_ERROR_WAIT_DELETE);
+
     std::unique_lock<std::mutex> thread_lock(thread->mutex);
     thread->update_status(ThreadStatus::wait, ThreadStatus::run);
 
@@ -1261,6 +1277,9 @@ int condvar_wait(KernelState &kernel, MemState &mem, const char *export_name, Sc
 
     if (auto error = handle_timeout(kernel, thread, thread_lock, condition_variable_lock, condvar->waiting_threads, data_it, export_name, timeout))
         return error;
+
+    if (condvar->deleted)
+        return RET_ERROR(SCE_KERNEL_ERROR_WAIT_DELETE);
 
     condition_variable_lock.unlock();
     return mutex_lock_impl(kernel, mem, export_name, thread_id, 1, condvar->associated_mutex, weight, timeout, false);
@@ -1327,12 +1346,10 @@ int condvar_delete(KernelState &kernel, const char *export_name, SceUID thread_i
             condvar->waiting_threads->size());
     }
 
-    if (condvar->waiting_threads->empty()) {
-        const std::lock_guard<std::mutex> kernel_lock(kernel.mutex);
+    {
+        const std::lock_guard<std::mutex> kernel_guard(kernel.mutex);
+        delete_and_wake_waiters(condvar);
         condvars->erase(condid);
-    } else {
-        // TODO:
-        LOG_WARN("Can't delete sync object, it has waiting threads.");
     }
 
     return SCE_KERNEL_OK;
@@ -1432,6 +1449,9 @@ static int eventflag_waitorpoll(KernelState &kernel, const char *export_name, Sc
 
     std::unique_lock<std::mutex> event_lock(event->mutex);
 
+    if (event->deleted)
+        return RET_ERROR(SCE_KERNEL_ERROR_WAIT_DELETE);
+
     bool condition;
     if (wait & SCE_EVENT_WAITOR) {
         condition = event->flags & flags;
@@ -1471,6 +1491,8 @@ static int eventflag_waitorpoll(KernelState &kernel, const char *export_name, Sc
         thread_lock.unlock();
 
         int err = handle_timeout(kernel, thread, thread_lock, event_lock, event->waiting_threads, data_it, export_name, timeout);
+        if (event->deleted)
+            return RET_ERROR(SCE_KERNEL_ERROR_WAIT_DELETE);
         if (err < 0 && outBits) {
             // set it only if a timeout occurs
             // otherwise set in eventflag_set
@@ -1604,12 +1626,10 @@ int eventflag_delete(KernelState &kernel, const char *export_name, SceUID thread
             export_name, event->uid, thread_id, event->name, event->attr, event->flags, event->waiting_threads->size());
     }
 
-    if (event->waiting_threads->empty()) {
+    {
         const std::lock_guard<std::mutex> kernel_lock(kernel.mutex);
+        delete_and_wake_waiters(event);
         kernel.eventflags.erase(event_id);
-    } else {
-        // TODO:
-        LOG_WARN("Can't delete sync object, it has waiting threads.");
     }
 
     return SCE_KERNEL_OK;

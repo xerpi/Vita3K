@@ -191,6 +191,21 @@ void ThreadState::exit_delete(bool exit) {
     signal.send();
 }
 
+void ThreadState::mark_exit() {
+    std::lock_guard<std::mutex> lock(mutex);
+    run_end_callback = false;
+    to_do = ThreadToDo::remove;
+}
+
+void ThreadState::finish_exit() {
+    std::lock_guard<std::mutex> lock(mutex);
+    something_to_do.notify_one();
+    stop(*cpu);
+    if (status == ThreadStatus::wait)
+        update_status(ThreadStatus::run);
+    signal.send();
+}
+
 bool ThreadState::run_loop() {
     int res = 0;
     int run_level = std::max(call_level, 1);
