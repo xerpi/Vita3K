@@ -508,7 +508,6 @@ void deinit(EmuEnvState &state) {
     state.main_thread_id = 0;
     state.drop_inputs = false;
     state.missing_nids.clear();
-    state.clear_app_launch_request();
 
     state.ctrl.reset_runtime();
 

@@ -16,6 +16,7 @@
 // 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
 #include <app/functions.h>
+#include <kernel/state.h>
 
 #include <camera/camera.h>
 #include <config/functions.h>
@@ -365,7 +366,12 @@ void request_in_process_launch(EmuEnvState &emuenv, AppLaunchRequest request) {
     if (request.app_path.empty())
         request.app_path = emuenv.io.app_path;
 
-    emuenv.post_app_launch_request(std::move(request));
+    emuenv.kernel.push_event(KernelLoadExecEvent{
+        .exit_code = 0,
+        .app_path = std::move(request.app_path),
+        .self_path = std::move(request.self_path),
+        .argv = std::move(request.argv),
+    });
     if (emuenv.renderer)
         emuenv.renderer->should_display = true;
 }

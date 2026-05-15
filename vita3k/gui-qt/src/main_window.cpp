@@ -58,6 +58,7 @@
 #include <interface.h>
 #include <io/state.h>
 #include <kernel/state.h>
+#include <util/overloaded.h>
 #include <motion/event_handler.h>
 #include <np/state.h>
 #include <packages/functions.h>
@@ -780,25 +781,25 @@ void MainWindow::apply_log_gui_settings() {
     m_log_widget->set_log_font_family(m_gui_settings->get_value(gui::l_fontFamily).toString());
 }
 
-std::optional<AppLaunchRequest> MainWindow::take_pending_app_launch_request() {
-    auto request = emuenv.take_app_launch_request();
-    if (request)
-        LOG_INFO("Handling in-process app relaunch for {} ({})", request->self_path, request->app_path);
-
-    return request;
-}
-
-bool MainWindow::handle_pending_app_launch_request() {
+bool MainWindow::handle_pending_kernel_event() {
     if (!m_game_window)
         return false;
 
-    auto request = take_pending_app_launch_request();
-    if (!request)
+    auto event = emuenv.kernel.pop_event();
+    if (!event)
         return false;
 
-    on_game_closed();
-    if (request->reason != AppLaunchReason::ProcessExit)
-        boot_game(*request, false);
+    std::visit(overloaded{
+        [&](const KernelProcessExitEvent &) {
+            on_game_closed();
+        },
+        [&](const KernelLoadExecEvent &e) {
+            LOG_INFO("LoadExec: {} ({})", e.self_path, e.app_path);
+            on_game_closed();
+            boot_game(AppLaunchRequest{ .app_path = e.app_path, .self_path = e.self_path, .argv = e.argv, .reason = AppLaunchReason::LoadExec }, false);
+        },
+    }, *event);
+
     return true;
 }
 
@@ -1091,9 +1092,11 @@ std::optional<AppLaunchRequest> MainWindow::boot_game_once(const AppLaunchReques
     connect(m_kb_filter, &CtrlKeyboardFilter::screenshot_requested,
         this, [this]() { take_screenshot(emuenv); });
 
-    if (auto next_request = take_pending_app_launch_request()) {
+    if (auto event = emuenv.kernel.pop_event()) {
         on_game_closed();
-        return next_request;
+        if (auto *e = std::get_if<KernelLoadExecEvent>(&*event))
+            return AppLaunchRequest{ .app_path = e->app_path, .self_path = e->self_path, .argv = e->argv, .reason = AppLaunchReason::LoadExec };
+        return std::nullopt;
     }
 
     m_game_window->start_ui_updates();
@@ -1318,7 +1321,7 @@ void MainWindow::pump_sdl_events() {
     discordrpc::run_callbacks();
 #endif
 
-    if (handle_pending_app_launch_request())
+    if (handle_pending_kernel_event())
         return;
 
     SDL_Event event;

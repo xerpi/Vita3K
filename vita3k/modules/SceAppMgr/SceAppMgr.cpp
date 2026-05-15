@@ -435,7 +435,7 @@ EXPORT(SceInt32, _sceAppMgrLoadExec, const char *appPath, Ptr<char> const argv[]
                 return RET_ERROR(SCE_APPMGR_ERROR_TOO_LONG_ARGV);
         }
 
-        emuenv.kernel.request_process_exit(0, AppLaunchRequest{ .app_path = emuenv.io.app_path, .self_path = std::move(exec_path), .argv = std::move(exec_argv), .reason = AppLaunchReason::LoadExec });
+        emuenv.kernel.push_event(KernelLoadExecEvent{ .exit_code = 0, .app_path = emuenv.io.app_path, .self_path = std::move(exec_path), .argv = std::move(exec_argv) });
 
         return SCE_KERNEL_OK;
     }

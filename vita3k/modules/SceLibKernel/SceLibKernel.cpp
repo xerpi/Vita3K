@@ -1290,7 +1290,7 @@ EXPORT(int, sceKernelDeleteLwMutex, Ptr<SceKernelLwMutexWork> workarea) {
 
 EXPORT(int, sceKernelExitProcess, int res) {
     TRACY_FUNC(sceKernelExitProcess, res);
-    emuenv.kernel.request_process_exit(res);
+    emuenv.kernel.push_event(KernelProcessExitEvent{ res });
     return SCE_KERNEL_OK;
 }
 

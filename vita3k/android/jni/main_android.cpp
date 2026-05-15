@@ -19,6 +19,7 @@
 #include "interface.h"
 
 #include <app/functions.h>
+#include <kernel/events.h>
 #include <audio/state.h>
 #include <config/settings.h>
 #include <ctrl/functions.h>
@@ -418,8 +419,9 @@ SDLMAIN_DECLSPEC int SDL_main(int argc, char *argv[]) {
             break;
         }
 
-        if (auto request = emuenv->take_app_launch_request())
-            pending_launch_request = std::move(request);
+        if (auto event = emuenv->kernel.pop_event())
+            if (auto *e = std::get_if<KernelLoadExecEvent>(&*event))
+                pending_launch_request = AppLaunchRequest{ .app_path = e->app_path, .self_path = e->self_path, .argv = e->argv, .reason = AppLaunchReason::LoadExec };
 
         LOG_INFO("Game started: {} ({})", emuenv->current_app_title, launch_request.app_path);
         app::LaunchRuntimeMetrics runtime_metrics{};
@@ -487,8 +489,9 @@ SDLMAIN_DECLSPEC int SDL_main(int argc, char *argv[]) {
             }
 
             if (!pending_launch_request) {
-                if (auto request = emuenv->take_app_launch_request()) {
-                    pending_launch_request = std::move(request);
+                if (auto event = emuenv->kernel.pop_event()) {
+                    if (auto *e = std::get_if<KernelLoadExecEvent>(&*event))
+                        pending_launch_request = AppLaunchRequest{ .app_path = e->app_path, .self_path = e->self_path, .argv = e->argv, .reason = AppLaunchReason::LoadExec };
                     running = false;
                 }
             }

@@ -18,16 +18,18 @@
 #pragma once
 
 #include <string>
+#include <variant>
 #include <vector>
 
-enum class AppLaunchReason {
-    User,
-    LoadExec,
+struct KernelProcessExitEvent {
+    int exit_code;
 };
 
-struct AppLaunchRequest {
-    std::string app_path{};
-    std::string self_path{};
-    std::vector<std::string> argv{};
-    AppLaunchReason reason = AppLaunchReason::User;
+struct KernelLoadExecEvent {
+    int exit_code;
+    std::string app_path;
+    std::string self_path;
+    std::vector<std::string> argv;
 };
+
+using KernelEvent = std::variant<KernelProcessExitEvent, KernelLoadExecEvent>;

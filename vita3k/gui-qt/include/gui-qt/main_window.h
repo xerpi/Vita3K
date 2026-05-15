@@ -119,8 +119,7 @@ private:
     void boot_game(const std::string &title_id);
     void boot_game(const AppLaunchRequest &launch_request, bool prompt_before_closing_existing = true);
     std::optional<AppLaunchRequest> boot_game_once(const AppLaunchRequest &launch_request, bool prompt_before_closing_existing);
-    std::optional<AppLaunchRequest> take_pending_app_launch_request();
-    bool handle_pending_app_launch_request();
+    bool handle_pending_kernel_event();
     static QImage load_app_background(const std::string &app_path,
         const std::string &pref_path);
 

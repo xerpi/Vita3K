@@ -21,8 +21,6 @@
 #include <util/fs.h>
 
 #include <memory>
-#include <mutex>
-#include <optional>
 #include <set>
 #include <string>
 #include <utility>
@@ -114,8 +112,6 @@ private:
     std::unique_ptr<HTTPState> _http;
     std::unique_ptr<CameraState> _camera;
     std::unique_ptr<CompatState> _compat;
-    mutable std::mutex _launch_request_mutex;
-    std::optional<AppLaunchRequest> _pending_launch_request;
 
 public:
     // App info contained in its `param.sfo` file
@@ -181,25 +177,6 @@ public:
 
     std::unique_ptr<overlay::display_manager> overlay_manager;
 
-    void post_app_launch_request(AppLaunchRequest request) {
-        std::scoped_lock lock(_launch_request_mutex);
-        _pending_launch_request = std::move(request);
-    }
-
-    std::optional<AppLaunchRequest> take_app_launch_request() {
-        std::scoped_lock lock(_launch_request_mutex);
-        if (!_pending_launch_request)
-            return std::nullopt;
-
-        auto request = std::move(_pending_launch_request);
-        _pending_launch_request.reset();
-        return request;
-    }
-
-    void clear_app_launch_request() {
-        std::scoped_lock lock(_launch_request_mutex);
-        _pending_launch_request.reset();
-    }
 
     Root get_root_paths() const {
         Root r;

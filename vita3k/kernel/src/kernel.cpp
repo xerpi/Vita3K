@@ -180,9 +180,18 @@ Ptr<Ptr<void>> KernelState::get_thread_tls_addr(MemState &mem, SceUID thread_id,
     return address;
 }
 
-void KernelState::request_process_exit(int res, std::optional<AppLaunchRequest> relaunch) {
-    if (process_exit_callback)
-        process_exit_callback(res, std::move(relaunch));
+void KernelState::push_event(KernelEvent event) {
+    std::lock_guard<std::mutex> lock(events_mutex);
+    pending_events.push(std::move(event));
+}
+
+std::optional<KernelEvent> KernelState::pop_event() {
+    std::lock_guard<std::mutex> lock(events_mutex);
+    if (pending_events.empty())
+        return std::nullopt;
+    auto event = std::move(pending_events.front());
+    pending_events.pop();
+    return event;
 }
 
 void KernelState::process_exit() {
@@ -273,6 +282,9 @@ void KernelState::deinit(MemState &mem) {
     next_uid = 1;
 
     paused_threads_status.clear();
+
+    std::lock_guard<std::mutex> events_lock(events_mutex);
+    pending_events = {};
 }
 
 SceKernelModuleInfo *KernelState::find_module_by_addr(Address address) {
