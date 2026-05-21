@@ -128,13 +128,10 @@ EXPORT(int, sceAudiodecClearContext, SceAudiodecCtrl *ctrl) {
     }
 
     const DecoderPtr &decoder = lock_and_find(ctrl->handle, state->decoders, state->mutex);
-
-    if (decoder) {
-        decoder->flush();
-    } else {
+    if (!decoder)
         return SCE_AUDIODEC_ERROR_NOT_HANDLE_IN_USE;
-    }
 
+    decoder->flush();
     return 0;
 }
 

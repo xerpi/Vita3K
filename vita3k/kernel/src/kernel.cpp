@@ -63,8 +63,8 @@ static int SDLCALL thread_function(void *data) {
     SDL_SignalSemaphore(params.host_may_destroy_params);
     const ThreadStatePtr thread = params.kernel->get_thread(params.thid);
 #ifdef TRACY_ENABLE
-    if (!thread->name.empty()) {
-        tracy::SetThreadName(thread->name.c_str());
+    if (thread->name[0] != '\0') {
+        tracy::SetThreadName(thread->name);
     } else {
         std::string th_name = "TID:" + std::to_string(thread->id);
         tracy::SetThreadName(th_name.c_str());
@@ -80,6 +80,7 @@ static int SDLCALL thread_function(void *data) {
         params.kernel->corenum_allocator.free_corenum(get_processor_id(*thread->cpu));
         params.kernel->thread_deleted_cond.notify_all();
     }
+    thread->notify_host_thread_exited();
 
     return r0;
 }
@@ -142,11 +143,11 @@ ThreadStatePtr KernelState::get_thread(SceUID thread_id) {
     return lock_and_find(thread_id, threads, mutex);
 }
 
-ThreadStatePtr KernelState::create_thread(MemState &mem, const char *name, Ptr<const void> entry_point) {
+ThreadStatePtr KernelState::create_thread(MemState &mem, std::string_view name, Ptr<const void> entry_point) {
     return create_thread(mem, name, entry_point, SCE_KERNEL_DEFAULT_PRIORITY, SCE_KERNEL_THREAD_CPU_AFFINITY_MASK_DEFAULT, SCE_KERNEL_STACK_SIZE_USER_MAIN, nullptr);
 }
 
-ThreadStatePtr KernelState::create_thread(MemState &mem, const char *name, Ptr<const void> entry_point, int init_priority, SceInt32 affinity_mask, int stack_size, const SceKernelThreadOptParam *option) {
+ThreadStatePtr KernelState::create_thread(MemState &mem, std::string_view name, Ptr<const void> entry_point, int init_priority, SceInt32 affinity_mask, int stack_size, const SceKernelThreadOptParam *option) {
     ThreadStatePtr thread = std::make_shared<ThreadState>(get_next_uid(), *this, mem);
     if (thread->init(name, entry_point, init_priority, affinity_mask, stack_size, option) < 0)
         return nullptr;
@@ -161,7 +162,7 @@ ThreadStatePtr KernelState::create_thread(MemState &mem, const char *name, Ptr<c
     params.thid = thread->id;
 
     params.host_may_destroy_params = SDL_CreateSemaphore(0);
-    SDL_DetachThread(SDL_CreateThread(&thread_function, thread->name.c_str(), &params));
+    SDL_DetachThread(SDL_CreateThread(&thread_function, thread->name, &params));
     SDL_WaitSemaphore(params.host_may_destroy_params);
     SDL_DestroySemaphore(params.host_may_destroy_params);
 
@@ -189,9 +190,9 @@ void KernelState::process_exit() {
     {
         std::lock_guard<std::mutex> lock(mutex);
         for (auto &[_, timer] : timers)
-            timer->condvar.notify_all();
+            timer->notify_all_waiters();
         for (auto &[_, thread] : threads)
-            thread->exit_delete(false);
+            thread->request_destroy();
     }
 
     std::unique_lock<std::mutex> lock(mutex);
@@ -202,7 +203,7 @@ void KernelState::pause_threads() {
     const std::lock_guard<std::mutex> lock(mutex);
     for (auto &[_, thread] : threads) {
         paused_threads_status[thread->id] = thread->status;
-        if (thread->status == ThreadStatus::run)
+        if (thread->status == ThreadStatus::running)
             thread->suspend();
     }
 }
@@ -210,7 +211,7 @@ void KernelState::pause_threads() {
 void KernelState::resume_threads() {
     const std::lock_guard<std::mutex> lock(mutex);
     for (auto &[_, thread] : threads) {
-        if (paused_threads_status[thread->id] == ThreadStatus::run)
+        if (paused_threads_status[thread->id] == ThreadStatus::running)
             thread->resume();
     }
     paused_threads_status.clear();

@@ -29,7 +29,7 @@ struct MemState;
 // Shared SysmemState definition used by SceSysmem and kubridge HLE.
 
 struct KernelMemBlock : SceKernelMemBlockInfo {
-    char name[KERNELOBJECT_MAX_NAME_LENGTH + 1];
+    char name[SCE_UID_NAMELEN + 1];
 };
 
 typedef std::shared_ptr<KernelMemBlock> KernelMemBlockPtr;

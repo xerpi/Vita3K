@@ -61,19 +61,12 @@ static void vblank_sync_thread(EmuEnvState &emuenv) {
 
             // Notify Vblank callback in each VBLANK start
             for (auto &[_, cb] : display.vblank_callbacks)
-                cb->event_notify(cb->get_notifier_id());
+                cb->notify(emuenv.kernel, SCE_UID_INVALID_UID, 0);
 
-            for (std::size_t i = 0; i < display.vblank_wait_infos.size();) {
-                auto &vblank_wait_info = display.vblank_wait_infos[i];
-                if (vblank_wait_info.target_vcount <= display.vblank_count) {
-                    ThreadStatePtr target_wait = vblank_wait_info.target_thread;
-
-                    target_wait->update_status(ThreadStatus::run);
-                    display.vblank_wait_infos.erase(display.vblank_wait_infos.begin() + i);
-                } else {
-                    i++;
-                }
-            }
+            const uint64_t current = display.vblank_count;
+            display.vblank_waiters.wake_many([&](VblankWaitEntry &e) {
+                return e.target_vcount <= current;
+            });
         }
         const auto time_ms = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
         const auto time_left = TARGET_MICRO_PER_FRAME - (time_ms % TARGET_MICRO_PER_FRAME);
@@ -86,35 +79,25 @@ void start_sync_thread(EmuEnvState &emuenv) {
 }
 
 void wait_vblank(DisplayState &display, KernelState &kernel, const ThreadStatePtr &wait_thread, const uint64_t target_vcount, const bool is_cb) {
-    if (!wait_thread) {
+    if (!wait_thread)
         return;
+
+    std::unique_lock<std::mutex> lock(display.mutex);
+    if (target_vcount > display.vblank_count) {
+        VblankWaitEntry entry;
+        entry.thread = wait_thread;
+        entry.priority = wait_thread->enter_wait({ .type = SCE_KERNEL_WAITTYPE_EVENT, .reason = "vblank" });
+        entry.target_vcount = target_vcount;
+        display.vblank_waiters.push(&entry);
+        (void)display.vblank_waiters.wait(lock, entry, Deadline::max(), is_cb,
+            { .type = SCE_KERNEL_WAITTYPE_EVENT, .reason = "vblank" });
     }
-
-    {
-        auto thread_lock = std::unique_lock(wait_thread->mutex);
-
-        {
-            const std::lock_guard<std::mutex> guard(display.mutex);
-
-            if (target_vcount <= display.vblank_count)
-                return;
-
-            wait_thread->update_status(ThreadStatus::wait);
-            display.vblank_wait_infos.push_back({ wait_thread, target_vcount });
-        }
-
-        wait_thread->status_cond.wait(thread_lock, [&]() {
-            return wait_thread->status == ThreadStatus::run;
-        });
-    }
+    lock.unlock();
 
     if (is_cb) {
         for (auto &[_, cb] : display.vblank_callbacks) {
-            if (cb->get_owner_thread_id() == wait_thread->id) {
-                std::string name = cb->get_name();
-                cb->execute(kernel, [name]() {
-                });
-            }
+            if (cb->get_owner_thread_id() == wait_thread->id)
+                cb->execute(*wait_thread);
         }
     }
 }
@@ -228,7 +211,7 @@ void DisplayState::deinit() {
 
     {
         const std::lock_guard<std::mutex> guard(mutex);
-        vblank_wait_infos.clear();
+        vblank_waiters.drain_with_error(SCE_KERNEL_ERROR_WAIT_DELETE);
         vblank_callbacks.clear();
     }
 
