@@ -80,6 +80,7 @@ static int SDLCALL thread_function(void *data) {
         params.kernel->corenum_allocator.free_corenum(get_processor_id(*thread->cpu));
         params.kernel->thread_deleted_cond.notify_all();
     }
+    thread->notify_host_thread_exited();
 
     return r0;
 }
@@ -189,9 +190,9 @@ void KernelState::process_exit() {
     {
         std::lock_guard<std::mutex> lock(mutex);
         for (auto &[_, timer] : timers)
-            timer->condvar.notify_all();
+            timer->notify_all_waiters();
         for (auto &[_, thread] : threads)
-            thread->exit_delete(false);
+            thread->request_destroy();
     }
 
     std::unique_lock<std::mutex> lock(mutex);
@@ -202,7 +203,7 @@ void KernelState::pause_threads() {
     const std::lock_guard<std::mutex> lock(mutex);
     for (auto &[_, thread] : threads) {
         paused_threads_status[thread->id] = thread->status;
-        if (thread->status == ThreadStatus::run)
+        if (thread->status == ThreadStatus::running)
             thread->suspend();
     }
 }
@@ -210,7 +211,7 @@ void KernelState::pause_threads() {
 void KernelState::resume_threads() {
     const std::lock_guard<std::mutex> lock(mutex);
     for (auto &[_, thread] : threads) {
-        if (paused_threads_status[thread->id] == ThreadStatus::run)
+        if (paused_threads_status[thread->id] == ThreadStatus::running)
             thread->resume();
     }
     paused_threads_status.clear();

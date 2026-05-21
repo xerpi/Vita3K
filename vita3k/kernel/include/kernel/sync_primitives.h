@@ -17,252 +17,469 @@
 
 #pragma once
 
-#include <kernel/thread/thread_data_queue.h>
+#include <kernel/thread/thread_state.h>
+#include <kernel/thread/wait_queue.h>
 #include <kernel/types.h>
 #include <util/byte_ring_buffer.h>
 
+#include <map>
+#include <memory>
+#include <optional>
+#include <string>
+#include <type_traits>
+#include <variant>
+
 struct KernelState;
+struct MemState;
 
-struct WaitingThreadData {
-    ThreadStatePtr thread;
-    int32_t priority;
-    bool *was_canceled;
+// Shared base for every kernel sync object. Per-primitive teardown lives in
+// each class's mark_deleted() because the drain code is queue-typed.
+struct SyncObjectBase {
+    std::mutex mutex;
+    SceUID uid = 0;
+    std::string name;
+    SceUInt32 attr = 0;
+    bool being_deleted = false;
 
-    // additional fields for each primitive
-    union {
-        struct { // mutex
-            int32_t lock_count;
+    SyncObjectBase(SceUID uid, std::string name, SceUInt32 attr)
+        : uid(uid)
+        , name(std::move(name))
+        , attr(attr) {}
+};
+
+
+struct SemaWaitEntry : WaitEntryBase {
+    int need_count = 0;
+};
+
+class Semaphore : public SyncObjectBase {
+public:
+    Semaphore(SceUID uid, std::string name, SceUInt32 attr,
+        int init_val, int max_val)
+        : SyncObjectBase(uid, std::move(name), attr)
+        , init_val(init_val)
+        , val(init_val)
+        , max_val(max_val)
+        , waiters(wait_order_from_attr(attr)) {}
+
+    WaitResult wait_for(ThreadStatePtr t, int n, Deadline d, bool cb);
+    SceInt32 poll(int n);
+    SceInt32 signal(int n);
+    SceUInt32 cancel(SceInt32 setCount);
+    void mark_deleted();
+
+    int initial_value() const { return init_val; }
+    int current_value() const { return val; }
+    int max_value() const { return max_val; }
+    std::size_t num_waiters() const { return waiters.size(); }
+
+private:
+    WaitInfo wait_info(bool cb) const {
+        return {
+            .type = cb ? SCE_KERNEL_WAITTYPE_SEMAPHORE_CB : SCE_KERNEL_WAITTYPE_SEMAPHORE,
+            .uid = uid,
+            .reason = "semaphore"
         };
-        struct { // rwlock
-            bool is_write;
+    }
+
+    int init_val;
+    int val;
+    int max_val;
+    WaitQueue<SemaWaitEntry> waiters;
+};
+using SemaphorePtr = std::shared_ptr<Semaphore>;
+using SemaphorePtrs = std::map<SceUID, SemaphorePtr>;
+
+// Heavy and Light variants share one template. The Light specialization mirrors
+// lockCount/owner into a guest SceKernelLwMutexWork for the SDK fast-path and
+// has no cancel() API.
+
+enum class SyncWeight {
+    Heavy,
+    Light
+};
+
+struct MutexWaitEntry : WaitEntryBase {
+    int lock_count = 0;
+};
+
+template <SyncWeight W>
+class MutexT : public SyncObjectBase {
+public:
+    static constexpr bool is_lw = (W == SyncWeight::Light);
+
+    MutexT(SceUID uid, std::string name, SceUInt32 attr, int init_count)
+        requires(!is_lw)
+        : SyncObjectBase(uid, std::move(name), attr)
+        , init_count(init_count)
+        , waiters(wait_order_from_attr(attr)) {}
+
+    MutexT(SceUID uid, std::string name, SceUInt32 attr,
+        int init_count, Ptr<SceKernelLwMutexWork> workarea)
+        requires(is_lw)
+        : SyncObjectBase(uid, std::move(name), attr)
+        , init_count(init_count)
+        , workarea(workarea)
+        , waiters(wait_order_from_attr(attr)) {}
+
+    WaitResult lock(ThreadStatePtr t, int n, Deadline d, MemState &mem, bool cb);
+    SceInt32 try_lock(ThreadStatePtr t, int n, MemState &mem);
+    SceInt32 unlock(ThreadStatePtr t, int n, MemState &mem);
+    SceUInt32 cancel(ThreadStatePtr caller, SceInt32 newCount)
+        requires(!is_lw);
+    void mark_deleted();
+
+    SceUID current_owner_id() const { return owner ? owner->id : 0; }
+    int current_lock_count() const { return lock_count; }
+    int initial_count() const { return init_count; }
+    std::size_t num_waiters() const { return waiters.size(); }
+    Ptr<SceKernelLwMutexWork> get_workarea() const
+        requires(is_lw)
+    { return workarea; }
+
+private:
+    // Attempts to acquire the mutex. nullopt = would block; otherwise the
+    // syscall return (SCE_KERNEL_OK or a negative error).
+    std::optional<SceInt32> try_acquire_locked(ThreadStatePtr t, int n, MemState &mem);
+    void publish_to_workarea_if_lw(MemState &mem) {
+        if constexpr (is_lw) {
+            if (!workarea)
+                return;
+            auto *wa = workarea.get(mem);
+            wa->lockCount = lock_count;
+            wa->owner = owner ? owner->id : 0;
+        }
+    }
+
+    static constexpr SceInt32 delete_error_code = is_lw
+        ? SCE_KERNEL_ERROR_WAIT_DELETE_LW_MUTEX
+        : SCE_KERNEL_ERROR_WAIT_DELETE_MUTEX;
+    static constexpr SceInt32 recursive_error_code = is_lw
+        ? SCE_KERNEL_ERROR_LW_MUTEX_RECURSIVE
+        : SCE_KERNEL_ERROR_MUTEX_RECURSIVE;
+    static constexpr SceInt32 lock_ovf_error_code = is_lw
+        ? SCE_KERNEL_ERROR_LW_MUTEX_LOCK_OVF
+        : SCE_KERNEL_ERROR_MUTEX_LOCK_OVF;
+    static constexpr SceInt32 unlock_udf_error_code = is_lw
+        ? SCE_KERNEL_ERROR_LW_MUTEX_UNLOCK_UDF
+        : SCE_KERNEL_ERROR_MUTEX_UNLOCK_UDF;
+    static constexpr SceInt32 not_owned_error_code = is_lw
+        ? SCE_KERNEL_ERROR_LW_MUTEX_NOT_OWNED
+        : SCE_KERNEL_ERROR_MUTEX_NOT_OWNED;
+    static constexpr SceInt32 failed_to_own_error_code = is_lw
+        ? SCE_KERNEL_ERROR_LW_MUTEX_FAILED_TO_OWN
+        : SCE_KERNEL_ERROR_MUTEX_FAILED_TO_OWN;
+
+    WaitInfo wait_info(bool cb) const {
+        constexpr SceUInt32 type = is_lw ? SCE_KERNEL_WAITTYPE_LW_MUTEX : SCE_KERNEL_WAITTYPE_MUTEX;
+        constexpr SceUInt32 type_cb = is_lw ? SCE_KERNEL_WAITTYPE_LW_MUTEX_CB : SCE_KERNEL_WAITTYPE_MUTEX_CB;
+        return {
+            .type = cb ? type_cb : type,
+            .uid = uid,
+            .reason = is_lw ? "lwmutex" : "mutex"
         };
-        struct { // semaphore
-            int32_t signal;
+    }
+
+    int init_count;
+    int lock_count = 0;
+    ThreadStatePtr owner;
+    [[no_unique_address]] std::conditional_t<is_lw,
+        Ptr<SceKernelLwMutexWork>, std::monostate>
+        workarea{};
+    WaitQueue<MutexWaitEntry> waiters;
+};
+
+using Mutex = MutexT<SyncWeight::Heavy>;
+using LwMutex = MutexT<SyncWeight::Light>;
+using MutexPtr = std::shared_ptr<Mutex>;
+using LwMutexPtr = std::shared_ptr<LwMutex>;
+using MutexPtrs = std::map<SceUID, MutexPtr>;
+using LwMutexPtrs = std::map<SceUID, LwMutexPtr>;
+
+// Same Heavy/Light split as Mutex; differs only in the paired mutex type.
+
+struct CondvarWaitEntry : WaitEntryBase {};
+
+struct CondvarSignalTarget {
+    enum class Type {
+        Any,
+        Specific,
+        All
+    } type;
+    SceUID thread_id; // for Specific
+    explicit CondvarSignalTarget(Type type)
+        : type(type)
+        , thread_id(0) {}
+    CondvarSignalTarget(Type type, SceUID thread_id)
+        : type(type)
+        , thread_id(thread_id) {}
+};
+
+template <SyncWeight W>
+class CondvarT : public SyncObjectBase {
+public:
+    static constexpr bool is_lw = (W == SyncWeight::Light);
+
+    using PairedMutex = std::conditional_t<is_lw, LwMutex, Mutex>;
+    using PairedMutexPtr = std::shared_ptr<PairedMutex>;
+    using SignalTarget = CondvarSignalTarget;
+
+    CondvarT(SceUID uid, std::string name, SceUInt32 attr, PairedMutexPtr associated_mutex)
+        : SyncObjectBase(uid, std::move(name), attr)
+        , associated_mutex(std::move(associated_mutex))
+        , waiters(wait_order_from_attr(this->associated_mutex->attr)) {}
+
+    WaitResult wait(ThreadStatePtr t, Deadline d, MemState &mem, bool cb);
+    SceInt32 signal(SignalTarget target);
+    void mark_deleted();
+
+    const PairedMutexPtr &mutex_obj() const { return associated_mutex; }
+    std::size_t num_waiters() const { return waiters.size(); }
+
+private:
+    static constexpr SceInt32 delete_error_code = is_lw
+        ? SCE_KERNEL_ERROR_WAIT_DELETE_LW_COND
+        : SCE_KERNEL_ERROR_WAIT_DELETE_COND;
+
+    WaitInfo wait_info(bool cb) const {
+        constexpr SceUInt32 type = is_lw ? SCE_KERNEL_WAITTYPE_LW_COND_SIGNAL : SCE_KERNEL_WAITTYPE_COND_SIGNAL;
+        constexpr SceUInt32 type_cb = is_lw ? SCE_KERNEL_WAITTYPE_LW_COND_SIGNAL_CB : SCE_KERNEL_WAITTYPE_COND_SIGNAL_CB;
+        return {
+            .type = cb ? type_cb : type,
+            .uid = uid,
+            .reason = is_lw ? "lwcond" : "cond"
         };
-        struct { // simple events
-            int32_t pattern;
-            uint32_t *result_pattern;
-            uint64_t *user_data;
+    }
+
+    PairedMutexPtr associated_mutex;
+    WaitQueue<CondvarWaitEntry> waiters;
+};
+
+using Condvar = CondvarT<SyncWeight::Heavy>;
+using LwCondVar = CondvarT<SyncWeight::Light>;
+using CondvarPtr = std::shared_ptr<Condvar>;
+using LwCondVarPtr = std::shared_ptr<LwCondVar>;
+using CondvarPtrs = std::map<SceUID, CondvarPtr>;
+using LwCondVarPtrs = std::map<SceUID, LwCondVarPtr>;
+
+
+struct EventFlagWaitEntry : WaitEntryBase {
+    SceUInt32 bit_pattern = 0;
+    SceUInt32 wait_mode = 0;
+    SceUInt32 *out_bits = nullptr; // signaler writes the pre-clear pattern here
+};
+
+class EventFlag : public SyncObjectBase {
+public:
+    EventFlag(SceUID uid, std::string name, SceUInt32 attr, SceUInt32 initial_pattern)
+        : SyncObjectBase(uid, std::move(name), attr)
+        , pattern(initial_pattern)
+        , waiters(wait_order_from_attr(attr)) {}
+
+    WaitResult wait(ThreadStatePtr t, SceUInt32 bits, SceUInt32 wait_mode,
+        SceUInt32 *p_result, Deadline d, bool cb);
+    SceInt32 poll(SceUInt32 bits, SceUInt32 wait_mode, SceUInt32 *p_result);
+    SceInt32 set(SceUInt32 bits);
+    SceInt32 clear(SceUInt32 bits);
+    SceUInt32 cancel(SceUInt32 new_pattern);
+    void mark_deleted();
+
+    SceUInt32 current_pattern() const { return pattern; }
+    std::size_t num_waiters() const { return waiters.size(); }
+
+private:
+    static bool satisfies(SceUInt32 cur, SceUInt32 bits, SceUInt32 mode);
+    void apply_clear_locked(SceUInt32 wait_mode, SceUInt32 bits);
+    bool single_attr() const { return (attr & 0x1000) != 0; }
+
+    WaitInfo wait_info(bool cb) const {
+        return {
+            .type = cb ? SCE_KERNEL_WAITTYPE_EVENTFLAG_CB : SCE_KERNEL_WAITTYPE_EVENTFLAG,
+            .uid = uid,
+            .reason = "eventflag"
         };
-        struct { // event flags
-            int32_t wait;
-            int32_t flags;
-            uint32_t *outBits;
-        };
-        // struct { }; // condvar
-        struct { // msgpipe
-            SceSize request_size;
-        } mp;
+    }
+
+    SceUInt32 pattern;
+    WaitQueue<EventFlagWaitEntry> waiters;
+};
+using EventFlagPtr = std::shared_ptr<EventFlag>;
+using EventFlagPtrs = std::map<SceUID, EventFlagPtr>;
+
+
+struct RWLockWaitEntry : WaitEntryBase {
+    bool is_write = false;
+};
+
+class RWLock : public SyncObjectBase {
+public:
+    RWLock(SceUID uid, std::string name, SceUInt32 attr)
+        : SyncObjectBase(uid, std::move(name), attr)
+        , waiters(wait_order_from_attr(attr)) {}
+
+    struct CancelCounts {
+        SceUInt32 read;
+        SceUInt32 write;
     };
 
-    bool operator<(const WaitingThreadData &rhs) const {
-        return priority < rhs.priority;
+    WaitResult lock(ThreadStatePtr t, bool is_write, Deadline d);
+    SceInt32 try_lock(ThreadStatePtr t, bool is_write);
+    SceInt32 unlock(ThreadStatePtr t, bool is_write);
+    CancelCounts cancel(ThreadStatePtr caller, SceInt32 flag);
+    void mark_deleted();
+
+private:
+    enum class State {
+        Unlocked,
+        ReadLocked,
+        WriteLocked,
+    };
+
+    std::optional<SceInt32> try_acquire_locked(ThreadStatePtr t, bool is_write);
+
+    WaitInfo wait_info() const {
+        return {
+            .type = SCE_KERNEL_WAITTYPE_RW_LOCK,
+            .uid = uid,
+            .reason = "rwlock"
+        };
     }
 
-    bool operator>(const WaitingThreadData &rhs) const {
-        return priority > rhs.priority;
-    }
+    State state = State::Unlocked;
+    std::map<ThreadStatePtr, int> owners;
+    WaitQueue<RWLockWaitEntry> waiters;
+};
+using RWLockPtr = std::shared_ptr<RWLock>;
+using RWLockPtrs = std::map<SceUID, RWLockPtr>;
 
-    bool operator==(const WaitingThreadData &rhs) const {
-        return thread == rhs.thread;
-    }
 
-    bool operator==(const ThreadStatePtr &rhs) const {
-        return thread == rhs;
-    }
+struct SimpleEventWaitEntry : WaitEntryBase {
+    SceUInt32 wait_pattern = 0;
+    SceUInt32 *result_pattern = nullptr;
+    SceUInt64 *user_data = nullptr;
 };
 
-typedef std::unique_ptr<ThreadDataQueue<WaitingThreadData>> WaitingThreadQueuePtr;
+class SimpleEvent : public SyncObjectBase {
+public:
+    SimpleEvent(SceUID uid, std::string name, SceUInt32 attr, SceUInt32 init_pattern)
+        : SyncObjectBase(uid, std::move(name), attr)
+        , pattern(init_pattern)
+        , auto_reset((attr & SCE_KERNEL_EVENT_ATTR_AUTO_RESET) != 0)
+        , waiters(wait_order_from_attr(attr)) {}
 
-// NOTE: uid is copied to sync primitives here for debugging,
-//       not really needed since they are put in std::map's
-struct SyncPrimitive {
-    SceUID uid{};
-    uint32_t attr{};
-    std::mutex mutex;
-    char name[KERNELOBJECT_MAX_NAME_LENGTH + 1];
-    virtual ~SyncPrimitive() = default;
-};
+    WaitResult wait_or_poll(ThreadStatePtr t, SceUInt32 wait_pattern, SceUInt32 *result_pattern,
+        SceUInt64 *user_data, Deadline d, bool is_wait, bool alertable);
+    SceInt32 set_or_pulse(SceUInt32 pattern_to_set, SceUInt64 user_data, bool is_set);
+    SceInt32 clear(SceUInt32 clear_pattern);
+    SceUInt32 cancel();
+    void mark_deleted();
 
-struct SimpleEvent : SyncPrimitive {
-    WaitingThreadQueuePtr waiting_threads;
+    SceUInt32 current_pattern() const { return pattern; }
+
+private:
+    WaitInfo wait_info(bool cb) const {
+        return {
+            .type = cb ? SCE_KERNEL_WAITTYPE_EVENT_CB : SCE_KERNEL_WAITTYPE_EVENT,
+            .uid = uid,
+            .reason = "event"
+        };
+    }
+
     SceUInt32 pattern;
-    SceUInt64 last_user_data;
-
+    SceUInt64 user_data = 0;
     bool auto_reset;
-    bool cb_wakeup_only;
+    WaitQueue<SimpleEventWaitEntry> waiters;
 };
+using SimpleEventPtr = std::shared_ptr<SimpleEvent>;
+using SimpleEventPtrs = std::map<SceUID, SimpleEventPtr>;
 
-typedef std::shared_ptr<SimpleEvent> SimpleEventPtr;
-typedef std::map<SceUID, SimpleEventPtr> SimpleEventPtrs;
 
-struct Timer : SyncPrimitive {
-    WaitingThreadQueuePtr waiting_threads;
+// Uses an internal condvar instead of WaitQueue / park because timer waits
+// are bounded by the timer's next_event deadline, which advances on each tick.
+class Timer : public SyncObjectBase {
+public:
+    Timer(SceUID uid, std::string name, SceUInt32 attr)
+        : SyncObjectBase(uid, std::move(name), attr) {}
+
+    SceInt32 set(SceInt32 type, SceKernelSysClock *interval, SceInt32 repeats);
+    SceInt32 wait_or_poll(ThreadStatePtr t, SceUInt32 *result_pattern,
+        SceUInt64 *user_data, bool is_wait, bool alertable);
+    SceInt32 clear();
+    SceInt32 start();
+    SceInt32 stop();
+    void mark_deleted();
+
+    uint64_t start_time() const { return time; }
+    void set_start_time(uint64_t t) { time = t; }
+
+    // Wakes every parked waiter. Used by process_exit on emulator shutdown.
+    void notify_all_waiters() { condvar.notify_all(); }
+
+private:
+    void schedule_next_event_locked();
+
     std::condition_variable condvar;
-
     bool is_started = false;
     bool is_repeat = false;
     bool is_pulse = false;
     bool event_set = false;
     uint64_t time = 0;
-    uint64_t next_event;
+    uint64_t next_event = 0;
     uint64_t event_interval = 0;
 };
+using TimerPtr = std::shared_ptr<Timer>;
+using TimerPtrs = std::map<SceUID, TimerPtr>;
 
-typedef std::shared_ptr<Timer> TimerPtr;
-typedef std::map<SceUID, TimerPtr> TimerPtrs;
 
-struct Semaphore : SyncPrimitive {
-    WaitingThreadQueuePtr waiting_threads;
-    int max;
-    int val;
-    int init_val;
+struct MsgPipeRecvWaitEntry : WaitEntryBase {
+    SceSize request_size = 0; // ASAP = 1, FULL = recv_size
+};
+struct MsgPipeSendWaitEntry : WaitEntryBase {
+    SceSize request_size = 0;
 };
 
-typedef std::shared_ptr<Semaphore> SemaphorePtr;
-typedef std::map<SceUID, SemaphorePtr> SemaphorePtrs;
+class MsgPipe : public SyncObjectBase {
+public:
+    MsgPipe(SceUID uid, std::string name, SceUInt32 attr, SceSize buf_size)
+        : SyncObjectBase(uid, std::move(name), attr)
+        , data_buffer(buf_size)
+        , receivers(wait_order_from_attr(attr))
+        , senders(WaitOrder::FIFO) {} // senders always FIFO. Receivers honor attr
 
-struct Mutex : SyncPrimitive {
-    int init_count;
-    int lock_count;
-    ThreadStatePtr owner;
-    WaitingThreadQueuePtr waiting_threads;
-    Ptr<SceKernelLwMutexWork> workarea;
-};
-
-typedef std::shared_ptr<Mutex> MutexPtr;
-typedef std::map<SceUID, MutexPtr> MutexPtrs;
-
-enum class RWLockState {
-    Unlocked,
-    ReadLocked,
-    WriteLocked,
-};
-
-// the int value is the lock count for recursive locks
-typedef std::map<ThreadStatePtr, int> RWLockOwners;
-
-struct RWLock : SyncPrimitive {
-    RWLockState state;
-    RWLockOwners owners;
-    WaitingThreadQueuePtr waiting_threads;
-};
-
-typedef std::shared_ptr<RWLock> RWLockPtr;
-typedef std::map<SceUID, RWLockPtr> RWLockPtrs;
-
-struct EventFlag : SyncPrimitive {
-    WaitingThreadQueuePtr waiting_threads;
-    int flags;
-};
-
-typedef std::shared_ptr<EventFlag> EventFlagPtr;
-typedef std::map<SceUID, EventFlagPtr> EventFlagPtrs;
-
-struct Condvar : SyncPrimitive {
-    struct SignalTarget {
-        enum class Type {
-            Any, // signal any one waiting thread
-            Specific, // signal a specific waiting thread (target_thread)
-            All, // signal all waiting threads
-        } type;
-
-        SceUID thread_id; // for Type::One
-
-        explicit SignalTarget(Type type)
-            : type(type)
-            , thread_id(0) {}
-        SignalTarget(Type type, SceUID thread_id)
-            : type(type)
-            , thread_id(thread_id) {}
+    struct CancelCounts {
+        SceUInt32 send;
+        SceUInt32 recv;
     };
 
-    WaitingThreadQueuePtr waiting_threads;
-    MutexPtr associated_mutex;
-};
-typedef std::shared_ptr<Condvar> CondvarPtr;
-typedef std::map<SceUID, CondvarPtr> CondvarPtrs;
+    std::expected<SceSize, ExitSignal> recv(ThreadStatePtr t, void *p_recv,
+        SceSize recv_size, SceUInt32 wait_mode, Deadline d, bool cb);
+    std::expected<SceSize, ExitSignal> send(ThreadStatePtr t, const void *p_send,
+        SceSize send_size, SceUInt32 wait_mode, Deadline d, bool cb);
+    CancelCounts cancel();
+    SceInt32 mark_deleted_and_drain();
 
-struct MsgPipe : SyncPrimitive {
-    MsgPipe(std::size_t bufSize)
-        : data_buffer(bufSize) {}
+private:
+    void wake_one_receiver_locked();
+    void wake_one_sender_locked();
 
-    WaitingThreadQueuePtr senders;
-    WaitingThreadQueuePtr receivers;
+    WaitInfo recv_wait_info(bool cb) const {
+        return {
+            .type = cb ? SCE_KERNEL_WAITTYPE_MSG_PIPE_CB : SCE_KERNEL_WAITTYPE_MSG_PIPE,
+            .uid = uid,
+            .reason = "msgpipe_recv"
+        };
+    }
+    WaitInfo send_wait_info(bool cb) const {
+        return {
+            .type = cb ? SCE_KERNEL_WAITTYPE_MSG_PIPE_CB : SCE_KERNEL_WAITTYPE_MSG_PIPE,
+            .uid = uid,
+            .reason = "msgpipe_send"
+        };
+    }
+
     ByteRingBuffer data_buffer;
-
-    bool beingDeleted = false;
-    std::atomic<std::size_t> remainingThreads = { 0 };
-
-    ~MsgPipe() override = default;
+    WaitQueue<MsgPipeRecvWaitEntry> receivers;
+    WaitQueue<MsgPipeSendWaitEntry> senders;
 };
-
-typedef std::shared_ptr<MsgPipe> MsgPipePtr;
-typedef std::map<SceUID, MsgPipePtr> MsgPipePtrs;
-
-enum class SyncWeight {
-    Light, // lightweight
-    Heavy // 'heavy'weight
-};
-
-// simple events
-SceUID simple_event_create(KernelState &kernel, MemState &mem, const char *export_name, const char *name, SceUID thread_id, SceUInt32 attr, SceUInt32 init_pattern);
-SceInt32 simple_event_waitorpoll(KernelState &kernel, const char *export_name, SceUID thread_id, SceUID event_id, SceUInt32 wait_pattern, SceUInt32 *result_pattern, SceUInt64 *user_data, SceUInt32 *timeout, bool is_wait);
-SceInt32 simple_event_setorpulse(KernelState &kernel, const char *export_name, SceUID thread_id, SceUID event_id, SceUInt32 pattern, SceUInt64 user_data, bool is_set);
-SceInt32 simple_event_clear(KernelState &kernel, const char *export_name, SceUID thread_id, SceUID event_id, SceUInt32 clear_pattern);
-SceInt32 simple_event_delete(KernelState &kernel, const char *export_name, SceUID thread_id, SceUID event_id);
-
-// Timer
-SceUID timer_create(KernelState &kernel, MemState &mem, const char *export_name, const char *name, SceUID thread_id, SceUInt32 attr);
-SceUID timer_find(KernelState &kernel, const char *export_name, const char *pName);
-SceInt32 timer_waitorpoll(KernelState &kernel, const char *export_name, SceUID thread_id, SceUID event_id, SceUInt32 bit_pattern, SceUInt32 *result_pattern, SceUInt64 *user_data, SceUInt32 *timeout, bool is_wait);
-SceInt32 timer_clear(KernelState &kernel, const char *export_name, SceUID thread_id, SceUID event_id, SceUInt32 clear_pattern);
-SceInt32 timer_set(KernelState &kernel, const char *export_name, SceUID thread_id, SceUID timer_handle, SceUID type, SceKernelSysClock *interval, SceInt32 repeats);
-SceInt32 timer_start(KernelState &kernel, const char *export_name, SceUID thread_id, SceUID timer_handle);
-SceInt32 timer_stop(KernelState &kernel, const char *export_name, SceUID thread_id, SceUID timer_handle);
-
-// Mutex
-SceUID mutex_create(SceUID *uid_out, KernelState &kernel, MemState &mem, const char *export_name, const char *name, SceUID thread_id, SceUInt attr, int init_count, Ptr<SceKernelLwMutexWork> workarea, SyncWeight weight);
-SceUID mutex_find(KernelState &kernel, const char *export_name, const char *pName);
-int mutex_lock(KernelState &kernel, MemState &mem, const char *export_name, SceUID thread_id, SceUID mutexid, int lock_count, unsigned int *timeout, SyncWeight weight);
-int mutex_try_lock(KernelState &kernel, MemState &mem, const char *export_name, SceUID thread_id, SceUID mutexid, int lock_count, SyncWeight weight);
-int mutex_unlock(KernelState &kernel, const char *export_name, SceUID thread_id, SceUID mutexid, int unlock_count, SyncWeight weight);
-int mutex_delete(KernelState &kernel, const char *export_name, SceUID thread_id, SceUID mutexid, SyncWeight weight);
-MutexPtr mutex_get(KernelState &kernel, const char *export_name, SceUID thread_id, SceUID mutexid, SyncWeight weight);
-
-// RWLock
-SceUID rwlock_create(KernelState &kernel, MemState &mem, const char *export_name, const char *name, SceUID thread_id, SceUInt32 attr);
-SceInt32 rwlock_lock(KernelState &kernel, MemState &mem, const char *export_name, SceUID thread_id, SceUID lock_id, uint32_t *timeout, bool is_write);
-SceInt32 rwlock_unlock(KernelState &kernel, MemState &mem, const char *export_name, SceUID thread_id, SceUID lock_id, bool is_write);
-SceInt32 rwlock_delete(KernelState &kernel, MemState &mem, const char *export_name, SceUID thread_id, SceUID lock_id);
-
-// Semaphore
-SceUID semaphore_create(KernelState &kernel, const char *export_name, const char *name, SceUID thread_id, SceUInt attr, int init_val, int max_val);
-SceUID semaphore_find(KernelState &kernel, const char *export_name, const char *pName);
-SceInt32 semaphore_wait(KernelState &kernel, const char *export_name, SceUID thread_id, SceUID semaId, SceInt32 needCount, SceUInt32 *pTimeout);
-int semaphore_signal(KernelState &kernel, const char *export_name, SceUID thread_id, SceUID semaid, int signal);
-int semaphore_delete(KernelState &kernel, const char *export_name, SceUID thread_id, SceUID semaid);
-int semaphore_cancel(KernelState &kernel, const char *export_name, SceUID thread_id, SceUID semaid, SceInt32 setCount, SceUInt32 *pNumWaitThreads);
-
-// Condition Variable
-SceUID condvar_create(SceUID *uid_out, KernelState &kernel, const char *export_name, const char *name, SceUID thread_id, SceUInt attr, SceUID assoc_mutexid, SyncWeight weight);
-int condvar_wait(KernelState &kernel, MemState &mem, const char *export_name, SceUID thread_id, SceUID condid, SceUInt *timeout, SyncWeight weight);
-int condvar_signal(KernelState &kernel, const char *export_name, SceUID thread_id, SceUID condid, Condvar::SignalTarget signal_target, SyncWeight weight);
-int condvar_delete(KernelState &kernel, const char *export_name, SceUID thread_id, SceUID condid, SyncWeight weight);
-
-// Event Flag
-SceUID eventflag_clear(KernelState &kernel, const char *export_name, SceUID evfId, SceUInt32 bitPattern);
-SceUID eventflag_create(KernelState &kernel, const char *export_name, SceUID thread_id, const char *pName, SceUInt32 attr, SceUInt32 initPattern);
-SceUID eventflag_find(KernelState &kernel, const char *export_name, const char *pName);
-SceInt32 eventflag_wait(KernelState &kernel, const char *export_name, SceUID thread_id, SceUID evfId, SceUInt32 bitPattern, SceUInt32 waitMode, SceUInt32 *pResultPat, SceUInt32 *pTimeout);
-int eventflag_poll(KernelState &kernel, const char *export_name, SceUID thread_id, SceUID event_id, unsigned int flags, unsigned int wait, unsigned int *outBits);
-SceInt32 eventflag_set(KernelState &kernel, const char *export_name, SceUID thread_id, SceUID evfId, SceUInt32 bitPattern);
-SceInt32 eventflag_cancel(KernelState &kernel, const char *export_name, SceUID thread_id, SceUID event_id, SceUInt32 pattern, SceUInt32 *num_wait_threads);
-int eventflag_delete(KernelState &kernel, const char *export_name, SceUID thread_id, SceUID event_id);
-
-// Message Pipe
-SceUID msgpipe_create(KernelState &kernel, const char *export_name, const char *name, SceUID thread_id, SceUInt attr, SceSize bufSize);
-SceUID msgpipe_find(KernelState &kernel, const char *export_name, const char *pName);
-SceSize msgpipe_recv(KernelState &kernel, const char *export_name, SceUID thread_id, SceUID msgPipeId, SceUInt32 waitMode, void *pRecvBuf, SceSize recvSize, SceUInt32 *pTimeout);
-SceSize msgpipe_send(KernelState &kernel, const char *export_name, SceUID thread_id, SceUID msgPipeId, SceUInt32 waitMode, const void *pSendBuf, SceSize sendSize, SceUInt32 *pTimeout);
-SceInt32 msgpipe_delete(KernelState &kernel, const char *export_name, SceUID thread_id, SceUID msgpipe_id);
+using MsgPipePtr = std::shared_ptr<MsgPipe>;
+using MsgPipePtrs = std::map<SceUID, MsgPipePtr>;

@@ -210,19 +210,23 @@ void DebugWidget::refresh_current_tab() {
     }
 }
 
-static QString thread_status_string(ThreadStatus status) {
-    switch (status) {
-    case ThreadStatus::run:
-        return QStringLiteral("Running");
-    case ThreadStatus::wait:
-        return QStringLiteral("Waiting");
-    case ThreadStatus::dormant:
-        return QStringLiteral("Dormant");
-    case ThreadStatus::suspend:
-        return QStringLiteral("Suspended");
-    default:
+static QString thread_status_string(SceUInt32 bits) {
+    // Lifecycle bits are mutually exclusive. SUSPENDED is the only overlay.
+    QString label;
+    if (bits & SCE_KERNEL_THREAD_STATUS_RUNNING)
+        label = QStringLiteral("Running");
+    else if (bits & SCE_KERNEL_THREAD_STATUS_WAITING)
+        label = QStringLiteral("Waiting");
+    else if (bits & SCE_KERNEL_THREAD_STATUS_DORMANT)
+        label = QStringLiteral("Dormant");
+    else if (bits & SCE_KERNEL_THREAD_STATUS_DEAD)
+        label = QStringLiteral("Dead");
+    else
         return QStringLiteral("Unknown");
-    }
+
+    if (bits & SCE_KERNEL_THREAD_STATUS_SUSPENDED)
+        label += QStringLiteral("|Suspended");
+    return label;
 }
 
 void DebugWidget::refresh_threads() {
@@ -235,7 +239,7 @@ void DebugWidget::refresh_threads() {
         item->setData(0, Qt::UserRole, static_cast<uint>(id));
         item->setText(0, QStringLiteral("0x%1").arg(id, 8, 16, QLatin1Char('0')).toUpper());
         item->setText(1, QString::fromStdString(th->name));
-        item->setText(2, thread_status_string(th->status));
+        item->setText(2, thread_status_string(th->vita_status()));
         item->setText(3, QStringLiteral("0x%1").arg(th->stack.get(), 8, 16, QLatin1Char('0')).toUpper());
     }
 }
@@ -248,11 +252,11 @@ void DebugWidget::refresh_mutexes() {
     for (const auto &[id, mutex] : emuenv.kernel.mutexes) {
         auto *item = new QTreeWidgetItem(m_mutexes_tree);
         item->setText(0, QStringLiteral("0x%1").arg(id, 8, 16, QLatin1Char('0')).toUpper());
-        item->setText(1, QString::fromUtf8(mutex->name));
-        item->setText(2, QString::number(mutex->lock_count));
+        item->setText(1, QString::fromUtf8(mutex->name.c_str()));
+        item->setText(2, QString::number(mutex->current_lock_count()));
         item->setText(3, QString::number(mutex->attr));
-        item->setText(4, QString::number(mutex->waiting_threads ? mutex->waiting_threads->size() : 0));
-        item->setText(5, mutex->owner ? QString::fromStdString(mutex->owner->name) : tr("not owned"));
+        item->setText(4, QString::number(mutex->num_waiters()));
+        item->setText(5, mutex->current_owner_id() ? QStringLiteral("0x%1").arg(mutex->current_owner_id(), 8, 16, QLatin1Char('0')) : tr("not owned"));
     }
 }
 
@@ -264,11 +268,11 @@ void DebugWidget::refresh_lw_mutexes() {
     for (const auto &[id, mutex] : emuenv.kernel.lwmutexes) {
         auto *item = new QTreeWidgetItem(m_lw_mutexes_tree);
         item->setText(0, QStringLiteral("0x%1").arg(id, 8, 16, QLatin1Char('0')).toUpper());
-        item->setText(1, QString::fromUtf8(mutex->name));
-        item->setText(2, QString::number(mutex->lock_count));
+        item->setText(1, QString::fromUtf8(mutex->name.c_str()));
+        item->setText(2, QString::number(mutex->current_lock_count()));
         item->setText(3, QString::number(mutex->attr));
-        item->setText(4, QString::number(mutex->waiting_threads ? mutex->waiting_threads->size() : 0));
-        item->setText(5, mutex->owner ? QString::fromStdString(mutex->owner->name) : tr("not owned"));
+        item->setText(4, QString::number(mutex->num_waiters()));
+        item->setText(5, mutex->current_owner_id() ? QStringLiteral("0x%1").arg(mutex->current_owner_id(), 8, 16, QLatin1Char('0')) : tr("not owned"));
     }
 }
 
@@ -280,9 +284,9 @@ void DebugWidget::refresh_condvars() {
     for (const auto &[id, cv] : emuenv.kernel.condvars) {
         auto *item = new QTreeWidgetItem(m_condvars_tree);
         item->setText(0, QStringLiteral("0x%1").arg(id, 8, 16, QLatin1Char('0')).toUpper());
-        item->setText(1, QString::fromUtf8(cv->name));
+        item->setText(1, QString::fromUtf8(cv->name.c_str()));
         item->setText(2, QString::number(cv->attr));
-        item->setText(3, QString::number(cv->waiting_threads ? cv->waiting_threads->size() : 0));
+        item->setText(3, QString::number(cv->num_waiters()));
     }
 }
 
@@ -294,9 +298,9 @@ void DebugWidget::refresh_lw_condvars() {
     for (const auto &[id, cv] : emuenv.kernel.lwcondvars) {
         auto *item = new QTreeWidgetItem(m_lw_condvars_tree);
         item->setText(0, QStringLiteral("0x%1").arg(id, 8, 16, QLatin1Char('0')).toUpper());
-        item->setText(1, QString::fromUtf8(cv->name));
+        item->setText(1, QString::fromUtf8(cv->name.c_str()));
         item->setText(2, QString::number(cv->attr));
-        item->setText(3, QString::number(cv->waiting_threads ? cv->waiting_threads->size() : 0));
+        item->setText(3, QString::number(cv->num_waiters()));
     }
 }
 
@@ -308,10 +312,10 @@ void DebugWidget::refresh_semaphores() {
     for (const auto &[id, sema] : emuenv.kernel.semaphores) {
         auto *item = new QTreeWidgetItem(m_semaphores_tree);
         item->setText(0, QStringLiteral("0x%1").arg(id, 8, 16, QLatin1Char('0')).toUpper());
-        item->setText(1, QString::fromUtf8(sema->name));
-        item->setText(2, QStringLiteral("%1 / %2").arg(sema->val).arg(sema->max));
-        item->setText(3, QString::number(sema->max));
-        item->setText(4, QString::number(sema->waiting_threads ? sema->waiting_threads->size() : 0));
+        item->setText(1, QString::fromUtf8(sema->name.c_str()));
+        item->setText(2, QStringLiteral("%1 / %2").arg(sema->current_value()).arg(sema->max_value()));
+        item->setText(3, QString::number(sema->max_value()));
+        item->setText(4, QString::number(sema->num_waiters()));
     }
 }
 
@@ -323,10 +327,10 @@ void DebugWidget::refresh_event_flags() {
     for (const auto &[id, ef] : emuenv.kernel.eventflags) {
         auto *item = new QTreeWidgetItem(m_event_flags_tree);
         item->setText(0, QStringLiteral("0x%1").arg(id, 8, 16, QLatin1Char('0')).toUpper());
-        item->setText(1, QString::fromUtf8(ef->name));
-        item->setText(2, QStringLiteral("0x%1").arg(static_cast<uint>(ef->flags), 8, 16, QLatin1Char('0')).toUpper());
+        item->setText(1, QString::fromUtf8(ef->name.c_str()));
+        item->setText(2, QStringLiteral("0x%1").arg(static_cast<uint>(ef->current_pattern()), 8, 16, QLatin1Char('0')).toUpper());
         item->setText(3, QString::number(ef->attr));
-        item->setText(4, QString::number(ef->waiting_threads ? ef->waiting_threads->size() : 0));
+        item->setText(4, QString::number(ef->num_waiters()));
     }
 }
 
@@ -390,7 +394,7 @@ void DebugWidget::on_thread_double_clicked(QTreeWidgetItem *item, int /*column*/
     };
 
     form->addRow(tr("Name:"), new QLabel(QString::fromStdString(thread->name), dlg));
-    form->addRow(tr("Status:"), new QLabel(thread_status_string(thread->status), dlg));
+    form->addRow(tr("Status:"), new QLabel(thread_status_string(thread->vita_status()), dlg));
     form->addRow(tr("PC:"), new QLabel(make_hex(pc), dlg));
     form->addRow(tr("SP:"), new QLabel(make_hex(sp), dlg));
     form->addRow(tr("LR:"), new QLabel(make_hex(lr), dlg));

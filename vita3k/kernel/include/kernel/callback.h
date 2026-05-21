@@ -26,105 +26,58 @@ struct KernelState;
 struct ThreadState;
 typedef std::shared_ptr<ThreadState> ThreadStatePtr;
 
+// A guest-installed callback. Pending notifications are coalesced (count +
+// last notifier_id + last notify_arg). The owning thread drains them at
+// callback-aware boundaries (process_callbacks).
 struct Callback {
-    /**
-     * @brief Creates a Callback object
-     *
-     * @param name Name of the callback
-     * @param cb_func Pointer to the callback function
-     * @param pCommon User-provided parameter
-     */
-    Callback(SceUID thread_id, std::string &name, Ptr<SceKernelCallbackFunction> cb_func, Ptr<void> pCommon)
+    Callback(SceUID thread_id, std::string name, Ptr<SceKernelCallbackFunction> cb_func, Ptr<void> pCommon)
         : thread_id(thread_id)
-        , name(name)
+        , name(std::move(name))
         , cb_func(cb_func)
         , userdata(pCommon) {}
 
-    /**
-     * @return UID of the thread that created and owns this callback
-     */
-    SceUID get_owner_thread_id() const { return this->thread_id; }
+    // Immutable, set at construction. No locking needed.
+    SceUID get_owner_thread_id() const { return thread_id; }
+    const std::string &get_name() const { return name; }
+    Ptr<SceKernelCallbackFunction> get_callback_function() const { return cb_func; }
+    Ptr<void> get_user_common_ptr() const { return userdata; }
 
-    /**
-     * @return Name of the callback
-     */
-    const std::string &get_name() const { return this->name; }
+    // Snapshot of the mutable state for sceKernelGetCallbackInfo /
+    // sceKernelGetCallbackCount.
+    struct Info {
+        SceUID notifier_id;
+        SceInt32 notify_arg;
+        uint32_t num_notifications;
+    };
+    Info info();
 
-    /**
-     * @return Callback function
-     */
-    Ptr<SceKernelCallbackFunction> get_callback_function() const { return this->cb_func; }
+    // Coalesce a notification. notifier_id == SCE_UID_INVALID_UID for direct
+    // (non-event) notifications from sceKernelNotifyCallback. Wakes the owning
+    // thread via callbacks_pending + unpark.
+    void notify(KernelState &kernel, SceUID notifier_id, SceInt32 notify_arg);
 
-    /**
-     * @return UID of the event that notified the callback last
-     */
-    SceUID get_notifier_id();
-
-    /**
-     * @return notifyArg from last time callback was notified
-     */
-    SceInt32 get_notify_arg();
-
-    /**
-     * @return User-provided common argument
-     */
-    Ptr<void> get_user_common_ptr() const { return this->userdata; }
-
-    /**
-     * @brief Notify this callback
-     * @param notifier_id UID of the notifying event
-     * @param notify_arg User-specified notification argument
-     */
-    void notify(SceUID notifier_id, SceInt32 notify_arg);
-
-    /**
-     * @brief Notify this callback from an event, without notification argument
-     * @param notifier_id UID of the event that notifies this callback
-     */
-    void event_notify(SceUID notifier_id);
-
-    /**
-     * @brief Notify this callback directly (not from event)
-     * @param notify_arg User-specified notification argument
-     */
-    void direct_notify(SceInt32 notify_arg);
-
-    /**
-     * @brief Cancels every notification sent to this callback
-     */
+    // Discard pending notifications. Does not interrupt an in-progress run.
     void cancel();
 
-    /**
-     * @return true if the callback can be executed, false otherwise
-     */
-    bool is_executable();
-
-    /**
-     * @return Number of times callback has been notified since last execution
-     */
-    uint32_t get_num_notifications();
-
-    /**
-     * @brief Runs callback in the context of creator thread
-     * @note Calling this method when Callback.executable() == false returns false and does nothing
-     * @note This should be called only in the creator thread
-     */
-    void execute(KernelState &kernel, const std::function<void()> &deleter);
+    enum class ExecuteResult {
+        not_pending, // No notifications coalesced, nothing ran.
+        handled, // Ran, function returned 0.
+        delete_self, // Ran, function returned non-zero (auto-delete contract).
+    };
+    // Drain coalesced notifications by invoking the guest function on the
+    // owning thread. Resets the pending state regardless of the return value.
+    ExecuteResult execute(ThreadState &thread);
 
 private:
-    void reset();
-    bool is_notified() const;
-    std::mutex _mutex;
+    const SceUID thread_id;
+    const std::string name;
+    const Ptr<SceKernelCallbackFunction> cb_func;
+    const Ptr<void> userdata;
 
-    const SceUID thread_id; // UID of the thread that created this callback
-    const std::string name; // Name of the callback
-    const Ptr<SceKernelCallbackFunction> cb_func; // Function to execute when the callback should run
-    const Ptr<void> userdata; // User-provided data - passed as pCommon
-
-    uint32_t num_notifications = 0; // Number of times this callback has been notified - reset every time it is run
-    SceInt32 notification_arg = 0; // User-specified argument passed by sceKernelNotifyCallback
-    SceUID notifier_id = SCE_UID_INVALID_UID; // UID of the last event that notified this thread - SCE_UID_INVALID_UID if not an event
+    std::mutex mutex;
+    uint32_t num_notifications = 0;
+    SceInt32 notification_arg = 0;
+    SceUID notifier_id = SCE_UID_INVALID_UID;
 };
 
 typedef std::shared_ptr<Callback> CallbackPtr;
-uint32_t process_callbacks(KernelState &kernel, SceUID thread_id);

@@ -61,14 +61,14 @@ static void vblank_sync_thread(EmuEnvState &emuenv) {
 
             // Notify Vblank callback in each VBLANK start
             for (auto &[_, cb] : display.vblank_callbacks)
-                cb->event_notify(cb->get_notifier_id());
+                cb->notify(emuenv.kernel, SCE_UID_INVALID_UID, 0);
 
             for (std::size_t i = 0; i < display.vblank_wait_infos.size();) {
                 auto &vblank_wait_info = display.vblank_wait_infos[i];
                 if (vblank_wait_info.target_vcount <= display.vblank_count) {
                     ThreadStatePtr target_wait = vblank_wait_info.target_thread;
 
-                    target_wait->update_status(ThreadStatus::run);
+                    target_wait->unpark();
                     display.vblank_wait_infos.erase(display.vblank_wait_infos.begin() + i);
                 } else {
                     i++;
@@ -90,31 +90,29 @@ void wait_vblank(DisplayState &display, KernelState &kernel, const ThreadStatePt
         return;
     }
 
-    {
-        auto thread_lock = std::unique_lock(wait_thread->mutex);
-
+    while (true) {
         {
             const std::lock_guard<std::mutex> guard(display.mutex);
-
             if (target_vcount <= display.vblank_count)
-                return;
-
-            wait_thread->update_status(ThreadStatus::wait);
+                break;
+            for (std::size_t i = 0; i < display.vblank_wait_infos.size();) {
+                if (display.vblank_wait_infos[i].target_thread == wait_thread)
+                    display.vblank_wait_infos.erase(display.vblank_wait_infos.begin() + i);
+                else
+                    i++;
+            }
+            wait_thread->enter_wait({ .type = SCE_KERNEL_WAITTYPE_EVENT, .reason = "vblank" });
             display.vblank_wait_infos.push_back({ wait_thread, target_vcount });
         }
 
-        wait_thread->status_cond.wait(thread_lock, [&]() {
-            return wait_thread->status == ThreadStatus::run;
-        });
+        wait_thread->park();
+        wait_thread->leave_wait();
     }
 
     if (is_cb) {
         for (auto &[_, cb] : display.vblank_callbacks) {
-            if (cb->get_owner_thread_id() == wait_thread->id) {
-                std::string name = cb->get_name();
-                cb->execute(kernel, [name]() {
-                });
-            }
+            if (cb->get_owner_thread_id() == wait_thread->id)
+                cb->execute(*wait_thread);
         }
     }
 }
