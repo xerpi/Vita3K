@@ -140,7 +140,7 @@ EXPORT(SceUID, kuKernelMemReserve, Ptr<Ptr<void>> addr, SceSize size, SceKernelM
     block->mappedBase = Ptr<void>(allocated_addr);
     block->mappedSize = size;
     block->size = sizeof(SceKernelMemBlockInfo);
-    std::strncpy(block->name, "kubridge_reserve", KERNELOBJECT_MAX_NAME_LENGTH);
+    std::strcpy(block->name, "kubridge_reserve");
     state->vm_blocks.emplace(uid, block);
 
     LOG_DEBUG("kuKernelMemReserve: addr=0x{:08X} size={} type=0x{:08X} uid=0x{:08X}",

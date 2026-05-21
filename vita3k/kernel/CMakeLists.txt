@@ -1,7 +1,7 @@
 set(SOURCE_LIST
 	include/kernel/state.h
 	include/kernel/types.h
-	include/kernel/thread/thread_data_queue.h
+	include/kernel/thread/wait_queue.h
 	include/kernel/thread/thread_state.h
 	include/kernel/sync_primitives.h
 	include/kernel/relocation.h

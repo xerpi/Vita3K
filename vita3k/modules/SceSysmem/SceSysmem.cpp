@@ -105,7 +105,11 @@ EXPORT(int, sceKernelAllocMemBlockForVM, const char *pName, SceSize size) {
     sceKernelMemBlock->mappedBase = address;
     sceKernelMemBlock->mappedSize = size;
     sceKernelMemBlock->size = sizeof(SceKernelMemBlockInfo);
-    std::strncpy(sceKernelMemBlock->name, pName, KERNELOBJECT_MAX_NAME_LENGTH);
+    std::size_t name_len = std::strlen(pName);
+    if (name_len > SCE_UID_NAMELEN)
+        name_len = SCE_UID_NAMELEN;
+    std::memcpy(sceKernelMemBlock->name, pName, name_len);
+    sceKernelMemBlock->name[name_len] = '\0';
     state->blocks.emplace(uid, sceKernelMemBlock);
     state->vm_blocks.emplace(uid, sceKernelMemBlock);
     state->allocated_user += size;
@@ -262,7 +266,7 @@ EXPORT(SceUID, sceKernelOpenMemBlock, const char *pName, int flags) {
     const std::lock_guard<std::mutex> memblock_lock(state->mutex);
 
     const auto it = std::find_if(state->blocks.begin(), state->blocks.end(), [=](const auto &block) {
-        return strncmp(block.second->name, pName, KERNELOBJECT_MAX_NAME_LENGTH) == 0;
+        return std::strcmp(block.second->name, pName) == 0;
     });
 
     if (it != state->blocks.end())

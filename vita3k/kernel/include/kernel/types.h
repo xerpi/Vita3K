@@ -40,6 +40,55 @@
 #define SCE_KERNEL_HIGHEST_PRIORITY_USER 64
 #define SCE_KERNEL_LOWEST_PRIORITY_USER 191
 
+#define SCE_KERNEL_THREAD_STATUS_RUNNING 0x00000001U
+#define SCE_KERNEL_THREAD_STATUS_READY 0x00000002U
+#define SCE_KERNEL_THREAD_STATUS_STANDBY 0x00000004U
+#define SCE_KERNEL_THREAD_STATUS_WAITING 0x00000008U
+#define SCE_KERNEL_THREAD_STATUS_DORMANT 0x00000010U
+#define SCE_KERNEL_THREAD_STATUS_DELETED 0x00000020U
+#define SCE_KERNEL_THREAD_STATUS_DEAD 0x00000040U
+#define SCE_KERNEL_THREAD_STATUS_STAGNANT 0x00000080U
+#define SCE_KERNEL_THREAD_STATUS_SUSPENDED 0x00000100U
+#define SCE_KERNEL_THREAD_STATUS_MASK 0x0000FFFFU
+
+#define SCE_KERNEL_WAITTYPE_DELAY 0x00000001U
+#define SCE_KERNEL_WAITTYPE_WAITTHEND 0x00000002U
+#define SCE_KERNEL_WAITTYPE_SIGNAL 0x00000004U
+#define SCE_KERNEL_WAITTYPE_WAITTHSUSPEND 0x00000008U
+#define SCE_KERNEL_WAITTYPE_EVENTFLAG 0x00000010U
+#define SCE_KERNEL_WAITTYPE_SEMAPHORE 0x00000020U
+#define SCE_KERNEL_WAITTYPE_MUTEX 0x00000040U
+#define SCE_KERNEL_WAITTYPE_RW_LOCK 0x00000080U
+#define SCE_KERNEL_WAITTYPE_COND_SIGNAL 0x00000100U
+#define SCE_KERNEL_WAITTYPE_COND_MUTEX 0x00000200U
+#define SCE_KERNEL_WAITTYPE_FAST_MUTEX 0x00001000U
+#define SCE_KERNEL_WAITTYPE_FAST_MUTEX_SPIN 0x00002000U
+#define SCE_KERNEL_WAITTYPE_EVENT 0x00010000U
+#define SCE_KERNEL_WAITTYPE_MP_EVENTS 0x00020000U
+#define SCE_KERNEL_WAITTYPE_MSG_PIPE 0x00040000U
+#define SCE_KERNEL_WAITTYPE_LW_MUTEX 0x00100000U
+#define SCE_KERNEL_WAITTYPE_LW_COND_SIGNAL 0x00200000U
+#define SCE_KERNEL_WAITTYPE_LW_COND_LW_MUTEX 0x00400000U
+
+#define SCE_KERNEL_WAITTYPE_DELAY_CB 0x80000001U
+#define SCE_KERNEL_WAITTYPE_WAITTHEND_CB 0x80000002U
+#define SCE_KERNEL_WAITTYPE_SIGNAL_CB 0x80000004U
+#define SCE_KERNEL_WAITTYPE_WAITTHSUSPEND_CB 0x80000008U
+#define SCE_KERNEL_WAITTYPE_EVENTFLAG_CB 0x80000010U
+#define SCE_KERNEL_WAITTYPE_SEMAPHORE_CB 0x80000020U
+#define SCE_KERNEL_WAITTYPE_MUTEX_CB 0x80000040U
+#define SCE_KERNEL_WAITTYPE_RW_LOCK_CB 0x80000080U
+#define SCE_KERNEL_WAITTYPE_COND_SIGNAL_CB 0x80000100U
+#define SCE_KERNEL_WAITTYPE_COND_MUTEX_CB 0x80000200U
+#define SCE_KERNEL_WAITTYPE_FAST_MUTEX_CB 0x80001000U
+#define SCE_KERNEL_WAITTYPE_FAST_MUTEX_SPIN_CB 0x80002000U
+#define SCE_KERNEL_WAITTYPE_EVENT_CB 0x80010000U
+#define SCE_KERNEL_WAITTYPE_MP_EVENTS_CB 0x80020000U
+#define SCE_KERNEL_WAITTYPE_MSG_PIPE_CB 0x80040000U
+#define SCE_KERNEL_WAITTYPE_LW_MUTEX_CB 0x80100000U
+#define SCE_KERNEL_WAITTYPE_LW_COND_SIGNAL_CB 0x80200000U
+#define SCE_KERNEL_WAITTYPE_LW_COND_LW_MUTEX_CB 0x80400000U
+
 #define SCE_KERNEL_CPU_MASK_USER_ALL 0x70000
 #define SCE_KERNEL_THREAD_CPU_AFFINITY_MASK_DEFAULT 0
 
@@ -72,7 +121,10 @@
 #define SCE_KERNEL_LW_MUTEX_ATTR_TH_FIFO SCE_KERNEL_ATTR_TH_FIFO
 #define SCE_KERNEL_LW_MUTEX_ATTR_TH_PRIO SCE_KERNEL_ATTR_TH_PRIO
 
-#define KERNELOBJECT_MAX_NAME_LENGTH 31
+#define SCE_KERNEL_RW_LOCK_CANCEL_WITH_WRITE_LOCK 0x00000001U
+
+#define SCE_UID_NAMELEN 31
+#define SCE_KERNEL_ATTR_OPENABLE 0x00000080U
 
 #define SCE_UID_INVALID_UID (SceUID)(0xFFFFFFFF)
 
@@ -688,7 +740,7 @@ static_assert(sizeof(SceKernelLwMutexWork) == 32, "Incorrect size");
 struct SceKernelLwMutexInfo {
     SceSize size; /**< Size of this structure (sizeof(SceKernelLwMutexInfo)) */
     SceUID uid; /**< Lightweight mutex identifier */
-    char name[KERNELOBJECT_MAX_NAME_LENGTH + 1]; /**< Name of the mutex specified by sceKernelCreateLwMutex() */
+    char name[SCE_UID_NAMELEN + 1]; /**< Name of the mutex specified by sceKernelCreateLwMutex() */
     SceUInt32 attr; /**< Mutex attributes specified with sceKernelCreateLwMutex() */
     Ptr<SceKernelLwMutexWork> pWork; /**< Mutex work area specified by sceKernelCreateLwMutex() */
     SceInt32 initCount; /**< Initial number of lw mutex locks specified by sceKernelCreateLwMutex() */
@@ -736,7 +788,7 @@ struct SceKernelMsgPipeInfo {
     /** Size of the structure */
     SceSize size;
     SceUID id;
-    char name[KERNELOBJECT_MAX_NAME_LENGTH + 1];
+    char name[SCE_UID_NAMELEN + 1];
     /** == 0x00000100U if msgpipe uses openLimit */
     uint32_t attr;
     SceSize bufferSize;
@@ -749,7 +801,7 @@ struct SceKernelMsgPipeInfo {
 struct SceKernelCondInfo {
     SceSize size;
     SceUID condId;
-    char name[KERNELOBJECT_MAX_NAME_LENGTH + 1];
+    char name[SCE_UID_NAMELEN + 1];
     SceUInt32 attr;
     SceUID mutexId;
     SceUInt32 numWaitThreads;
@@ -758,7 +810,7 @@ struct SceKernelCondInfo {
 struct SceKernelEventFlagInfo {
     SceSize size;
     SceUID evfId;
-    char name[KERNELOBJECT_MAX_NAME_LENGTH + 1];
+    char name[SCE_UID_NAMELEN + 1];
     SceUInt32 attr;
     SceUInt32 initPattern;
     SceUInt32 currentPattern;
@@ -768,7 +820,7 @@ struct SceKernelEventFlagInfo {
 struct SceKernelMutexInfo {
     SceSize size;
     SceUID mutexId;
-    char name[KERNELOBJECT_MAX_NAME_LENGTH + 1];
+    char name[SCE_UID_NAMELEN + 1];
     SceUInt32 attr;
     SceUInt32 initCount;
     SceUInt32 currentCount;
@@ -786,7 +838,7 @@ struct SceKernelRWLockInfo {
     /** The UID of the rwlock */
     SceUID rwLockId;
     /** NULL-terminated name of the rwlock */
-    char name[KERNELOBJECT_MAX_NAME_LENGTH + 1];
+    char name[SCE_UID_NAMELEN + 1];
     /** Attributes */
     SceUInt32 attr;
     /** The current lock count */
@@ -802,7 +854,7 @@ struct SceKernelRWLockInfo {
 struct SceKernelSemaInfo {
     SceSize size;
     SceUID semaId;
-    char name[KERNELOBJECT_MAX_NAME_LENGTH + 1];
+    char name[SCE_UID_NAMELEN + 1];
     SceUInt32 attr;
     SceInt32 initCount;
     SceInt32 currentCount;
@@ -816,7 +868,7 @@ struct SceKernelThreadInfo {
     /** The UID of the process where the thread belongs */
     SceUID processId;
     /** Nul terminated name of the thread */
-    char name[KERNELOBJECT_MAX_NAME_LENGTH + 1];
+    char name[SCE_UID_NAMELEN + 1];
     /** Thread attributes */
     SceUInt32 attr;
     /** Thread status */
@@ -913,7 +965,7 @@ typedef SceInt32(SceKernelCallbackFunction)(SceUID notifyId, SceInt32 notifyCoun
 struct SceKernelCallbackInfo {
     SceSize size;
     SceUID callbackId;
-    char name[KERNELOBJECT_MAX_NAME_LENGTH + 1];
+    char name[SCE_UID_NAMELEN + 1];
     SceUInt32 attr;
     SceUID threadId;
     Ptr<SceKernelCallbackFunction> callbackFunc;

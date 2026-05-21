@@ -149,7 +149,11 @@ EXPORT(SceUID, ksceKernelAllocMemBlock, const char *name, SceKernelMemBlockType 
     block->mappedBase = address;
     block->mappedSize = size;
     block->size = sizeof(SceKernelMemBlockInfo);
-    std::strncpy(block->name, name, KERNELOBJECT_MAX_NAME_LENGTH);
+    std::size_t name_len = std::strlen(name);
+    if (name_len > SCE_UID_NAMELEN)
+        name_len = SCE_UID_NAMELEN;
+    std::memcpy(block->name, name, name_len);
+    block->name[name_len] = '\0';
     state->blocks.emplace(uid, block);
 
     switch (type) {

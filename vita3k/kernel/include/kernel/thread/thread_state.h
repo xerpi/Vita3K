@@ -19,123 +19,163 @@
 
 #include <cpu/state.h>
 #include <kernel/callback.h>
+#include <kernel/thread/wait_queue.h>
 #include <kernel/types.h>
 #include <mem/block.h>
 #include <mem/ptr.h>
 
+#include <chrono>
 #include <condition_variable>
+#include <expected>
+#include <list>
 #include <mutex>
 #include <optional>
 #include <string>
+#include <string_view>
+#include <vector>
 
 struct CPUContext;
 
-struct ThreadState;
 struct ThreadParams;
-struct KernelState;
 
 typedef std::unique_ptr<CPUState, std::function<void(CPUState *)>> CPUStatePtr;
 typedef std::function<void(CPUState &, uint32_t, SceUID)> CallImport;
 typedef std::function<std::string(Address)> ResolveNIDName;
 
+// is_suspended is orthogonal and ORs the SUSPEND bit on top in vita_status().
 enum class ThreadStatus {
-    run, // Running
-    dormant, // Waiting for a job
-    suspend, // Suspended by debugger
-    wait, // Waiting to be awaken by sync object or operation
+    running, // Running guest code (or about to)
+    waiting, // Parked in a WaitQueue
+    dormant, // No active guest call, ready to be (re)started
+    dead, // Terminal: JIT error
 };
 
-struct ThreadSignal {
-    ThreadSignal() = default;
-    ~ThreadSignal() = default;
+enum class DebugRequest {
+    none,
+    suspend,
+    step,
+};
 
-    void wait();
-    bool send();
+struct RegisterArgs {
+    std::vector<uint32_t> values;
+};
 
-private:
-    std::mutex mutex;
-    std::condition_variable recv_cond;
-    bool signaled = false;
+enum class NestedCallError {
+    not_dormant, // thread wasn't dormant when the call was requested
+    terminated, // exit_delete, destroy_requested, or JIT error during the call
+};
+
+using NestedCallResult = std::expected<uint32_t, NestedCallError>;
+
+// Queued on the target's wait_thread_end_joiners while a waiter is parked in
+// sceKernelWaitThreadEnd[CB].
+struct WaitThreadEndJoinerEntry : WaitEntryBase {
+    SceInt32 returned_value = 0;
 };
 
 struct ThreadState {
-    std::mutex mutex;
-    std::string name;
-    SceUID id;
-    Address entry_point;
+    enum class ParkResult {
+        woken,
+        timed_out,
+    };
 
+    // Immutable after init().
+    SceUID id;
+    char name[SCE_UID_NAMELEN + 1]{};
+    Address entry_point;
     Block stack;
     int stack_size;
     Block tls;
 
     int priority;
     SceInt32 affinity_mask;
-    uint64_t start_tick;
     uint64_t last_vblank_waited;
-    // set to true if thread is processing kernel callbacks
-    bool is_processing_callbacks = false;
+    uint64_t start_tick;
 
     CPUStatePtr cpu;
-    ThreadStatus status = ThreadStatus::dormant;
 
-    ThreadSignal signal;
-    std::vector<CallbackPtr> callbacks;
-    std::condition_variable status_cond;
-    std::vector<std::shared_ptr<ThreadState>> waiting_threads;
+    // Never taken while holding a primitive's mutex.
+    mutable std::mutex mutex;
+
+    ThreadStatus status = ThreadStatus::dormant;
+    bool is_suspended = false;
+    WaitInfo wait_info;
     uint32_t returned_value = 0;
+
+    std::optional<SelfExitRequest> exit_request;
+    bool destroy_requested = false;
+
+    bool signal_pending = false;
+    bool callbacks_pending = false;
+
+    std::list<CallbackPtr> callbacks;
+    WaitQueue<WaitThreadEndJoinerEntry> wait_thread_end_joiners;
 
     ThreadState() = delete;
     explicit ThreadState(SceUID id, KernelState &kernel, MemState &mem);
+    int init(std::string_view name, Ptr<const void> entry_point, int init_priority,
+        SceInt32 affinity_mask, int stack_size, const SceKernelThreadOptParam *option);
 
-    int init(const char *name, Ptr<const void> entry_point, int init_priority, SceInt32 affinity_mask, int stack_size, const SceKernelThreadOptParam *option);
-    int start(SceSize arglen, const Ptr<void> argp, bool run_entry_callback = false);
+    int start(SceSize arglen, Ptr<void> argp, bool fire_start = false);
     void exit(SceInt32 status);
-    void exit_delete(bool exit = true);
+    void exit_delete(SceInt32 status);
+    void request_destroy();
 
-    void update_status(ThreadStatus status, std::optional<ThreadStatus> expected = std::nullopt);
-    Address stack_top() const;
+    void notify_host_thread_exited();
+    void wait_host_thread_exited();
 
     void run_loop();
-    void raise_waiting_threads();
 
-    // this function must be called from the thread itself (inside a svc call)
-    uint32_t run_callback(Address callback_address, const std::vector<uint32_t> &args);
+    // call_guest runs on this thread's host thread; the _on_dormant_thread variant from another.
+    uint32_t call_guest(Address pc, RegisterArgs args);
+    NestedCallResult call_guest_on_dormant_thread(Address pc, SceSize arglen, Ptr<void> argp = {});
 
-    // this function is called from another thread when this one is dormant
-    // it is only used for module loading and gxm display queue right now
-    // args and argp are passed to thread->start as is
-    uint32_t run_guest_function(Address callback_address, SceSize args = 0, const Ptr<void> argp = Ptr<void>{});
+    // Returns the priority snapshot for WaitQueue entries.
+    int enter_wait(WaitInfo info);
+    void leave_wait();
+
+    uint32_t process_callbacks();
+
+    ParkResult park_until(std::chrono::steady_clock::time_point deadline);
+    void park() { park_until(std::chrono::steady_clock::time_point::max()); }
+    void unpark();
 
     void suspend();
     void resume(bool step = false);
+
+    Address stack_top() const;
+    // Caller must already hold mutex.
+    SceUInt32 vita_status_locked() const;
+    SceUInt32 vita_status() const;
     std::string log_stack_traceback() const;
 
 private:
+    void raise_wait_thread_end_joiners();
     void push_arguments(const std::vector<uint32_t> &args);
     void dispatch_abort(CPUState &cpu);
+    void setup_cpu_args(Address pc, SceSize arglen, Ptr<void> argp);
+
+    // Backend seam: future native-exec replaces this function. Returns on
+    // halt PC, JIT error (status=dead), exit_request, or destroy_requested.
+    void run_guest_until_halt();
+
+    void set_status_locked(ThreadStatus next);
 
     KernelState &kernel;
+    MemState &mem;
 
     CPUContext init_cpu_ctx;
-    // sceKernelExitThread (or top-level guest function return): park at dormant, thread reusable via start() / run_guest_function().
-    bool exit_requested = false;
-    // sceKernelExitDeleteThread (or external kill): will return from top-level run_loop(), then host thread joins.
-    bool delete_requested = false;
-    // Set by suspend(), consumed in run_loop() to transition to ThreadStatus::suspend.
-    bool suspend_requested = false;
-    // Single stepping mode.
-    bool single_stepping = false;
 
-    // Number of active run_loop frames. The top-level host thread keeps one
-    // frame alive (run_loop()) while parked dormant; callbacks add nested frames.
-    int call_level = 0;
+    DebugRequest debug_request = DebugRequest::none;
+    bool host_thread_exited = false;
+    bool fire_start_event = false;
 
-    // when calling sceKernelStartThread
-    bool run_start_callback = false;
-    // when calling sceKernelExitThread or sceKernelExitDeleteThread
-    bool run_end_callback = false;
+    std::condition_variable lifecycle_cv;
 
-    MemState &mem;
+    // Separate from `mutex`: signalers can unpark without taking thread.mutex.
+    std::mutex park_mutex;
+    std::condition_variable park_cv;
+    bool park_permit = false;
 };
 
 typedef std::shared_ptr<ThreadState> ThreadStatePtr;

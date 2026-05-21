@@ -22,6 +22,7 @@
 #include <kernel/debugger.h>
 #include <kernel/object_store.h>
 #include <kernel/sync_primitives.h>
+#include <kernel/thread/thread_state.h>
 #include <kernel/types.h>
 #include <mem/allocator.h>
 #include <mem/block.h>
@@ -112,9 +113,9 @@ struct KernelState {
     TimerPtrs timers;
     SemaphorePtrs semaphores;
     CondvarPtrs condvars;
-    CondvarPtrs lwcondvars;
+    LwCondVarPtrs lwcondvars;
     MutexPtrs mutexes;
-    MutexPtrs lwmutexes; // also Mutexes for now
+    LwMutexPtrs lwmutexes;
     RWLockPtrs rwlocks;
     EventFlagPtrs eventflags;
     MsgPipePtrs msgpipes;
@@ -166,8 +167,8 @@ struct KernelState {
     bool init(MemState &mem, const CallImportFunc &call_import, bool cpu_opt);
     void deinit(MemState &mem);
     void load_process_param(MemState &mem, Ptr<uint32_t> ptr);
-    ThreadStatePtr create_thread(MemState &mem, const char *name, Ptr<const void> entry_point = Ptr<const void>(0));
-    ThreadStatePtr create_thread(MemState &mem, const char *name, Ptr<const void> entry_point, int init_priority, SceInt32 affinity_mask, int stack_size, const SceKernelThreadOptParam *option);
+    ThreadStatePtr create_thread(MemState &mem, std::string_view name, Ptr<const void> entry_point = Ptr<const void>(0));
+    ThreadStatePtr create_thread(MemState &mem, std::string_view name, Ptr<const void> entry_point, int init_priority, SceInt32 affinity_mask, int stack_size, const SceKernelThreadOptParam *option);
 
     ThreadStatePtr get_thread(SceUID thread_id);
     Ptr<Ptr<void>> get_thread_tls_addr(MemState &mem, SceUID thread_id, int key);
@@ -178,7 +179,7 @@ struct KernelState {
 
     // Kill all guest threads and block until they have exited. Must only be called from a host thread.
     void process_exit();
-    std::function<void(int, std::optional<AppLaunchRequest>)> process_exit_callback;
+    std::move_only_function<void(int, std::optional<AppLaunchRequest>)> process_exit_callback;
     // Request process exit. Safe to call from a guest thread. Returns immediately.
     // The registered process_exit_callback is invoked to notify the host layer.
     void request_process_exit(int res, std::optional<AppLaunchRequest> relaunch = std::nullopt);
