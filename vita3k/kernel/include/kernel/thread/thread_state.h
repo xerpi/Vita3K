@@ -26,11 +26,13 @@
 
 #include <chrono>
 #include <condition_variable>
+#include <deque>
 #include <expected>
 #include <list>
 #include <mutex>
 #include <optional>
 #include <string>
+#include <variant>
 #include <vector>
 
 struct CPUContext;
@@ -59,12 +61,19 @@ struct RegisterArgs {
     std::vector<uint32_t> values;
 };
 
-enum class NestedCallError {
-    not_dormant, // thread wasn't dormant when the call was requested
-    terminated, // exit_delete, destroy_requested, or JIT error during the call
+struct ArglenArgs {
+    SceSize arglen = 0;
+    Ptr<void> argp;
 };
 
-using NestedCallResult = std::expected<uint32_t, NestedCallError>;
+using GuestArgs = std::variant<ArglenArgs, RegisterArgs>;
+
+enum class GuestCallError {
+    not_dormant, // thread wasn't dormant when the call was requested
+    terminated, // host exit/delete request or JIT error during the call
+};
+
+using GuestCallResult = std::expected<uint32_t, GuestCallError>;
 
 // Queued on the target's wait_thread_end_joiners while a waiter is parked in
 // sceKernelWaitThreadEnd[CB].
@@ -102,7 +111,8 @@ struct ThreadState {
     uint32_t returned_value = 0;
 
     std::optional<SelfExitRequest> exit_request;
-    bool destroy_requested = false;
+    // External request to wind down the host thread. Guest self-exit uses exit_request.
+    bool host_thread_exit_requested = false;
 
     bool signal_pending = false;
     bool callbacks_pending = false;
@@ -118,16 +128,15 @@ struct ThreadState {
     int start(SceSize arglen, Ptr<void> argp, bool fire_start = false);
     void exit(SceInt32 status);
     void exit_delete(SceInt32 status);
-    void request_destroy();
-
-    void notify_host_thread_exited();
-    void wait_host_thread_exited();
+    void request_host_thread_exit();
 
     void run_loop();
 
-    // call_guest runs on this thread's host thread; the _on_dormant_thread variant from another.
-    uint32_t call_guest(Address pc, RegisterArgs args);
-    NestedCallResult call_guest_on_dormant_thread(Address pc, SceSize arglen, Ptr<void> argp = {});
+    // Same host thread only: used by callbacks during CheckCallback / WaitCB / thread events.
+    uint32_t call_guest_inline(Address pc, RegisterArgs args);
+    // Any host thread: enqueue onto this Vita thread's host loop.
+    GuestCallResult call_guest_on_thread(Address pc, RegisterArgs args);
+    GuestCallResult call_guest_on_thread(Address pc, SceSize arglen, Ptr<void> argp = {});
 
     // Returns the priority snapshot for WaitQueue entries.
     int enter_wait(WaitInfo info);
@@ -144,18 +153,35 @@ struct ThreadState {
 
     Address stack_top() const;
     // Caller must already hold mutex.
+    bool should_stop_guest_locked() const;
+    // Caller must already hold mutex.
+    bool should_unwind_wait_locked(bool cb) const;
+    // Caller must already hold mutex.
     SceUInt32 vita_status_locked() const;
     SceUInt32 vita_status() const;
     std::string log_stack_traceback() const;
 
 private:
+    struct QueuedGuestCall {
+        Address pc = 0;
+        GuestArgs args;
+        bool completed = false;
+        GuestCallResult result = std::unexpected{ GuestCallError::terminated };
+        std::condition_variable cv;
+    };
+
     void raise_wait_thread_end_joiners();
     void push_arguments(const std::vector<uint32_t> &args);
     void dispatch_abort(CPUState &cpu);
-    void setup_cpu_args(Address pc, SceSize arglen, Ptr<void> argp);
+    void apply_guest_args(Address pc, const GuestArgs &args);
+    void complete_pending_guest_calls_locked(GuestCallError error);
+    GuestCallResult enqueue_guest_call(QueuedGuestCall &call);
+    // Fires start event, runs guest, fires end event, completes queued call, resets to dormant.
+    // Returns true if the run_loop should break (dead, exit_delete, or host exit).
+    bool execute_run(QueuedGuestCall *queued_call, bool fire_start);
 
-    // Backend seam: future native-exec replaces this function. Returns on
-    // halt PC, JIT error (status=dead), exit_request, or destroy_requested.
+    // Dynarmic execution seam. Future native exec should move this behind the backend.
+    // Returns on halt PC, JIT error (status=dead), exit_request, or host_thread_exit_requested.
     void run_guest_until_halt();
 
     void set_status_locked(ThreadStatus next);
@@ -166,10 +192,10 @@ private:
     CPUContext init_cpu_ctx;
 
     DebugRequest debug_request = DebugRequest::none;
-    bool host_thread_exited = false;
     bool fire_start_event = false;
 
     std::condition_variable lifecycle_cv;
+    std::deque<QueuedGuestCall *> pending_guest_calls;
 
     // Separate from `mutex`: signalers can unpark without taking thread.mutex.
     std::mutex park_mutex;

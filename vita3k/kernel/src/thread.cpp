@@ -133,17 +133,21 @@ void ThreadState::set_status_locked(ThreadStatus next) {
     status = next;
 }
 
-void ThreadState::setup_cpu_args(Address pc, SceSize arglen, Ptr<void> argp) {
+void ThreadState::apply_guest_args(Address pc, const GuestArgs &args) {
     load_context(*cpu, init_cpu_ctx);
     write_pc(*cpu, pc);
     write_lr(*cpu, kernel.halt_instruction_pc);
-    write_reg(*cpu, 0, arglen);
-    if (argp && arglen > 0) {
-        const Address data_addr = stack_alloc(*cpu, align(arglen, 8));
-        memcpy(Ptr<uint8_t>(data_addr).get(mem), argp.get(mem), arglen);
-        write_reg(*cpu, 1, data_addr);
+    if (const auto *a = std::get_if<ArglenArgs>(&args)) {
+        write_reg(*cpu, 0, a->arglen);
+        if (a->argp && a->arglen > 0) {
+            const Address data_addr = stack_alloc(*cpu, align(a->arglen, 8));
+            memcpy(Ptr<uint8_t>(data_addr).get(mem), a->argp.get(mem), a->arglen);
+            write_reg(*cpu, 1, data_addr);
+        } else {
+            write_reg(*cpu, 1, 0);
+        }
     } else {
-        write_reg(*cpu, 1, 0);
+        push_arguments(std::get<RegisterArgs>(args).values);
     }
 }
 
@@ -153,7 +157,7 @@ int ThreadState::start(SceSize arglen, Ptr<void> argp, bool fire_start) {
         if (status != ThreadStatus::dormant)
             return SCE_KERNEL_ERROR_RUNNING;
 
-        setup_cpu_args(entry_point, arglen, argp);
+        apply_guest_args(entry_point, ArglenArgs{ arglen, argp });
         fire_start_event = fire_start;
         is_suspended = std::exchange(kernel.debugger.wait_for_debugger, false);
         exit_request.reset();
@@ -181,10 +185,11 @@ void ThreadState::exit_delete(SceInt32 status) {
     stop(*cpu);
 }
 
-void ThreadState::request_destroy() {
+void ThreadState::request_host_thread_exit() {
     {
         std::lock_guard<std::mutex> lock(mutex);
-        destroy_requested = true;
+        host_thread_exit_requested = true;
+        complete_pending_guest_calls_locked(GuestCallError::terminated);
     }
     stop(*cpu);
     lifecycle_cv.notify_all();
@@ -220,6 +225,14 @@ void ThreadState::leave_wait() {
     wait_info = {};
 }
 
+bool ThreadState::should_stop_guest_locked() const {
+    return exit_request || host_thread_exit_requested;
+}
+
+bool ThreadState::should_unwind_wait_locked(bool cb) const {
+    return host_thread_exit_requested || (cb && exit_request);
+}
+
 SceUInt32 ThreadState::vita_status_locked() const {
     SceUInt32 bits = 0;
     switch (status) {
@@ -252,10 +265,10 @@ void ThreadState::run_guest_until_halt() {
         {
             std::unique_lock<std::mutex> lock(mutex);
             lifecycle_cv.wait(lock, [&] {
-                return !is_suspended || destroy_requested
+                return !is_suspended || host_thread_exit_requested
                     || exit_request;
             });
-            if (exit_request || destroy_requested)
+            if (should_stop_guest_locked())
                 return;
             do_step = (debug_request == DebugRequest::step);
             if (do_step)
@@ -292,6 +305,70 @@ void ThreadState::run_guest_until_halt() {
     }
 }
 
+bool ThreadState::execute_run(QueuedGuestCall *queued_call, bool fire_start) {
+    if (queued_call) {
+        apply_guest_args(queued_call->pc, queued_call->args);
+        std::lock_guard<std::mutex> lock(mutex);
+        exit_request.reset();
+        set_status_locked(ThreadStatus::running);
+    }
+
+    if (fire_start && kernel.thread_event_start) {
+        const uint32_t r = call_guest_inline(kernel.thread_event_start.address(),
+            RegisterArgs{ { SCE_KERNEL_THREAD_EVENT_TYPE_START,
+                static_cast<uint32_t>(id), 0, kernel.thread_event_start_arg } });
+        if (r != 0)
+            LOG_WARN("Thread start event handler returned {}", log_hex(r));
+    }
+
+    run_guest_until_halt();
+
+    bool dead, exit_del, host_thread_exit, fire_end;
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        dead = status == ThreadStatus::dead;
+        exit_del = exit_request == SelfExitRequest::exit_delete;
+        host_thread_exit = host_thread_exit_requested;
+        fire_end = !dead && !host_thread_exit
+            && exit_request == SelfExitRequest::exit
+            && kernel.thread_event_end;
+        if (!dead && !host_thread_exit && !exit_request)
+            returned_value = read_reg(*cpu, 0);
+    }
+
+    if (fire_end) {
+        const uint32_t r = call_guest_inline(kernel.thread_event_end.address(),
+            RegisterArgs{ { SCE_KERNEL_THREAD_EVENT_TYPE_END,
+                static_cast<uint32_t>(id), 0, kernel.thread_event_end_arg } });
+        if (r != 0)
+            LOG_WARN("Thread end event handler returned {}", log_hex(r));
+    }
+
+    const bool terminal = dead || exit_del || host_thread_exit;
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        is_suspended = false;
+        wait_info = {};
+        if (queued_call) {
+            queued_call->result = terminal
+                ? GuestCallResult(std::unexpected{ GuestCallError::terminated })
+                : GuestCallResult(returned_value);
+            queued_call->completed = true;
+        }
+        if (!terminal) {
+            set_status_locked(ThreadStatus::dormant);
+            exit_request.reset();
+        }
+    }
+    if (queued_call)
+        queued_call->cv.notify_all();
+
+    if (!host_thread_exit)
+        raise_wait_thread_end_joiners();
+
+    return terminal;
+}
+
 void ThreadState::run_loop() {
     set_current_cpu_state(cpu.get());
     struct CpuStateGuard {
@@ -299,66 +376,35 @@ void ThreadState::run_loop() {
     } cpu_state_guard;
 
     while (true) {
+        QueuedGuestCall *queued_call = nullptr;
+        bool fire_start = false;
         {
             std::unique_lock<std::mutex> lock(mutex);
             lifecycle_cv.wait(lock, [&] {
-                return destroy_requested
+                return host_thread_exit_requested
+                    || !pending_guest_calls.empty()
                     || (status == ThreadStatus::running && !is_suspended);
             });
-            if (destroy_requested)
+            if (host_thread_exit_requested) {
+                complete_pending_guest_calls_locked(GuestCallError::terminated);
                 break;
-        }
+            }
+            if (!pending_guest_calls.empty()) {
+                queued_call = pending_guest_calls.front();
+                pending_guest_calls.pop_front();
 
-        bool fire_start;
-        {
-            std::lock_guard<std::mutex> lock(mutex);
-            fire_start = std::exchange(fire_start_event, false);
-        }
-        if (fire_start && kernel.thread_event_start) {
-            const uint32_t r = call_guest(kernel.thread_event_start.address(),
-                RegisterArgs{ { SCE_KERNEL_THREAD_EVENT_TYPE_START,
-                    static_cast<uint32_t>(id), 0, kernel.thread_event_start_arg } });
-            if (r != 0)
-                LOG_WARN("Thread start event handler returned {}", log_hex(r));
-        }
-
-        run_guest_until_halt();
-
-        bool dead, exit_del, destroy, fire_end;
-        {
-            std::lock_guard<std::mutex> lock(mutex);
-            dead = status == ThreadStatus::dead;
-            exit_del = exit_request == SelfExitRequest::exit_delete;
-            destroy = destroy_requested;
-            fire_end = !dead && !destroy
-                && exit_request == SelfExitRequest::exit
-                && kernel.thread_event_end;
-            if (!dead && !destroy && !exit_request)
-                returned_value = read_reg(*cpu, 0);
-        }
-
-        if (fire_end) {
-            const uint32_t r = call_guest(kernel.thread_event_end.address(),
-                RegisterArgs{ { SCE_KERNEL_THREAD_EVENT_TYPE_END,
-                    static_cast<uint32_t>(id), 0, kernel.thread_event_end_arg } });
-            if (r != 0)
-                LOG_WARN("Thread end event handler returned {}", log_hex(r));
-        }
-
-        {
-            std::lock_guard<std::mutex> lock(mutex);
-            is_suspended = false;
-            wait_info = {};
-            if (!dead && !exit_del && !destroy) {
-                set_status_locked(ThreadStatus::dormant);
-                exit_request.reset();
+                if (status != ThreadStatus::dormant) {
+                    queued_call->result = std::unexpected{ GuestCallError::not_dormant };
+                    queued_call->completed = true;
+                    queued_call->cv.notify_all();
+                    continue;
+                }
+            } else {
+                fire_start = std::exchange(fire_start_event, false);
             }
         }
 
-        if (!destroy)
-            raise_wait_thread_end_joiners();
-
-        if (dead || exit_del || destroy)
+        if (execute_run(queued_call, fire_start))
             break;
 
         lifecycle_cv.notify_all();
@@ -379,9 +425,9 @@ void ThreadState::push_arguments(const std::vector<uint32_t> &args) {
     write_sp(*cpu, sp);
 }
 
-uint32_t ThreadState::call_guest(Address pc, RegisterArgs args) {
+uint32_t ThreadState::call_guest_inline(Address pc, RegisterArgs args) {
     std::unique_lock<std::mutex> lock(mutex);
-    if (exit_request || destroy_requested)
+    if (should_stop_guest_locked())
         return 0;
 
     const CPUContext prev_ctx = save_context(*cpu);
@@ -431,41 +477,38 @@ void ThreadState::dispatch_abort(CPUState &cpu) {
     LOG_DEBUG("DABT handler=0x{:08X} FAR=0x{:08X} PC=0x{:08X} SP=0x{:08X} sp_aligned=0x{:08X}",
         handler, fault_addr, ctx[15], sp_orig, sp_aligned);
 
-    call_guest(handler, RegisterArgs{ { sp_aligned } });
+    call_guest_inline(handler, RegisterArgs{ { sp_aligned } });
 }
 
-NestedCallResult ThreadState::call_guest_on_dormant_thread(Address pc, SceSize arglen, Ptr<void> argp) {
-    std::unique_lock<std::mutex> lock(mutex);
-    if (status != ThreadStatus::dormant)
-        return std::unexpected{ NestedCallError::not_dormant };
-
-    setup_cpu_args(pc, arglen, argp);
-    fire_start_event = false;
-    exit_request.reset();
-    set_status_locked(ThreadStatus::running);
-
-    lifecycle_cv.notify_all();
-    lifecycle_cv.wait(lock, [&] {
-        return status == ThreadStatus::dormant
-            || status == ThreadStatus::dead
-            || host_thread_exited;
-    });
-    if (host_thread_exited || status == ThreadStatus::dead)
-        return std::unexpected{ NestedCallError::terminated };
-    return returned_value;
-}
-
-void ThreadState::notify_host_thread_exited() {
-    {
-        std::lock_guard<std::mutex> lock(mutex);
-        host_thread_exited = true;
+void ThreadState::complete_pending_guest_calls_locked(GuestCallError error) {
+    for (QueuedGuestCall *call : pending_guest_calls) {
+        call->result = std::unexpected{ error };
+        call->completed = true;
+        call->cv.notify_all();
     }
-    lifecycle_cv.notify_all();
+    pending_guest_calls.clear();
 }
 
-void ThreadState::wait_host_thread_exited() {
+GuestCallResult ThreadState::enqueue_guest_call(QueuedGuestCall &call) {
     std::unique_lock<std::mutex> lock(mutex);
-    lifecycle_cv.wait(lock, [&] { return host_thread_exited; });
+    if (host_thread_exit_requested)
+        return std::unexpected{ GuestCallError::terminated };
+    if (status != ThreadStatus::dormant)
+        return std::unexpected{ GuestCallError::not_dormant };
+    pending_guest_calls.push_back(&call);
+    lifecycle_cv.notify_all();
+    call.cv.wait(lock, [&] { return call.completed; });
+    return call.result;
+}
+
+GuestCallResult ThreadState::call_guest_on_thread(Address pc, SceSize arglen, Ptr<void> argp) {
+    QueuedGuestCall call{ .pc = pc, .args = ArglenArgs{ arglen, argp } };
+    return enqueue_guest_call(call);
+}
+
+GuestCallResult ThreadState::call_guest_on_thread(Address pc, RegisterArgs args) {
+    QueuedGuestCall call{ .pc = pc, .args = std::move(args) };
+    return enqueue_guest_call(call);
 }
 
 ThreadState::ThreadState(SceUID id, KernelState &kernel, MemState &mem)

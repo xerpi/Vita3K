@@ -80,7 +80,6 @@ static int SDLCALL thread_function(void *data) {
         params.kernel->corenum_allocator.free_corenum(get_processor_id(*thread->cpu));
         params.kernel->thread_deleted_cond.notify_all();
     }
-    thread->notify_host_thread_exited();
 
     return r0;
 }
@@ -143,6 +142,13 @@ ThreadStatePtr KernelState::get_thread(SceUID thread_id) {
     return lock_and_find(thread_id, threads, mutex);
 }
 
+void KernelState::wait_thread_deleted(SceUID thread_id) {
+    std::unique_lock<std::mutex> lock(mutex);
+    thread_deleted_cond.wait(lock, [&] {
+        return !threads.contains(thread_id);
+    });
+}
+
 ThreadStatePtr KernelState::create_thread(MemState &mem, const char *name, Ptr<const void> entry_point) {
     return create_thread(mem, name, entry_point, SCE_KERNEL_DEFAULT_PRIORITY, SCE_KERNEL_THREAD_CPU_AFFINITY_MASK_DEFAULT, SCE_KERNEL_STACK_SIZE_USER_MAIN, nullptr);
 }
@@ -192,7 +198,7 @@ void KernelState::process_exit() {
         for (auto &[_, timer] : timers)
             timer->notify_all_waiters();
         for (auto &[_, thread] : threads)
-            thread->request_destroy();
+            thread->request_host_thread_exit();
     }
 
     std::unique_lock<std::mutex> lock(mutex);

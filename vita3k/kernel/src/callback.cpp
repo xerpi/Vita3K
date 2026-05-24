@@ -47,7 +47,7 @@ uint32_t ThreadState::process_callbacks() {
             std::erase_if(kernel.callbacks, [&](const auto &kv) { return kv.second == cb; });
         }
         std::lock_guard lock(mutex);
-        if (exit_request || destroy_requested)
+        if (should_stop_guest_locked())
             break;
     }
     return num_dispatched;
@@ -108,6 +108,6 @@ Callback::ExecuteResult Callback::execute(ThreadState &thread) {
         static_cast<uint32_t>(snap_arg),
         userdata.address(),
     };
-    const uint32_t ret = thread.call_guest(cb_func.address(), RegisterArgs{ args });
+    const uint32_t ret = thread.call_guest_inline(cb_func.address(), RegisterArgs{ args });
     return ret != 0 ? ExecuteResult::delete_self : ExecuteResult::handled;
 }
