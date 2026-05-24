@@ -171,6 +171,7 @@ struct KernelState {
     ThreadStatePtr create_thread(MemState &mem, std::string_view name, Ptr<const void> entry_point, int init_priority, SceInt32 affinity_mask, int stack_size, const SceKernelThreadOptParam *option);
 
     ThreadStatePtr get_thread(SceUID thread_id);
+    void wait_thread_deleted(SceUID thread_id);
     Ptr<Ptr<void>> get_thread_tls_addr(MemState &mem, SceUID thread_id, int key);
 
     bool is_threads_paused() { return !paused_threads_status.empty(); }

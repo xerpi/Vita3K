@@ -35,7 +35,7 @@ struct ThreadState;
 using ThreadStatePtr = std::shared_ptr<ThreadState>;
 
 // Set by the thread itself from sceKernelExitThread / sceKernelExitDeleteThread.
-// External "delete this thread" uses destroy_requested instead.
+// External host-thread teardown uses host_thread_exit_requested instead.
 enum class SelfExitRequest {
     exit,
     exit_delete,
@@ -47,7 +47,7 @@ struct WaitInfo {
     const char *reason = "";
 };
 
-// Wait was interrupted by self-exit-from-callback or external destroy_requested.
+// Wait was interrupted by self-exit-from-callback or external host-thread teardown.
 struct ExitSignal {};
 
 using WaitResult = std::expected<SceInt32, ExitSignal>;
@@ -61,7 +61,7 @@ inline Deadline deadline_from(const SceUInt32 *timeout) {
 }
 
 // On ExitSignal, returns SCE_KERNEL_OK and lets the guest-run checkpoint catch
-// exit_request / destroy_requested before the guest resumes.
+// exit_request / host_thread_exit_requested before the guest resumes.
 inline SceInt32 unwrap_or_bail(WaitResult r) {
     return r.value_or(SCE_KERNEL_OK);
 }
@@ -123,11 +123,9 @@ public:
             bool should_bail = false;
             {
                 std::lock_guard<std::mutex> lock(t.mutex);
-                should_bail = t.destroy_requested;
+                should_bail = t.stop_requested_locked();
                 if (cb) {
-                    if (t.exit_request)
-                        should_bail = true;
-                    else if (!should_bail && t.callbacks_pending) {
+                    if (!should_bail && t.callbacks_pending) {
                         t.callbacks_pending = false;
                         run_callbacks = true;
                     }
@@ -147,7 +145,7 @@ public:
                 primitive_lock.lock();
                 {
                     std::lock_guard<std::mutex> lock(t.mutex);
-                    if (t.exit_request || t.destroy_requested) {
+                    if (t.stop_requested_locked()) {
                         remove(&entry);
                         return std::unexpected{ ExitSignal{} };
                     }

@@ -922,7 +922,7 @@ static void display_entry_thread(EmuEnvState &emuenv) {
         // now we can remove the thread from the display queue
         display_queue.pop();
 
-        // check if we're shutting down before calling call_guest_on_dormant_thread to avoid deadlock
+        // Avoid queueing guest callback work after shutdown has started.
         if (emuenv.display.abort.load()) {
             LOG_DEBUG("Abort detected after pop, freeing callback data and exiting");
             free(emuenv.mem, display_callback->data);
@@ -934,7 +934,7 @@ static void display_entry_thread(EmuEnvState &emuenv) {
         emuenv.display.current_sync_object = display_callback->new_sync.address();
 
         // Now run callback
-        (void)display_thread->call_guest_on_dormant_thread(callback_address, display_callback->data);
+        (void)display_thread->call_guest_on_thread(callback_address, RegisterArgs{ { display_callback->data } });
 
         // Notifies the renderer of the completion of the callback for the display_entry.
         // The last_display of the entry, when pushed into the queue, is guaranteed to be timestamp_ahead + 1 at the time of the call.
@@ -953,7 +953,7 @@ static Ptr<void> gxmRunDeferredMemoryCallback(KernelState &kernel, const MemStat
     const ThreadStatePtr thread = kernel.get_thread(thread_id);
     const Address final_size_addr = stack_alloc(*thread->cpu, 4);
 
-    Ptr<void> result(thread->call_guest(callback.address(), RegisterArgs{ { userdata.address(), size, final_size_addr } }));
+    Ptr<void> result(thread->call_guest_inline(callback.address(), RegisterArgs{ { userdata.address(), size, final_size_addr } }));
 
     return_size = *Ptr<std::uint32_t>(final_size_addr).get(mem);
     stack_free(*thread->cpu, 4);
@@ -4447,7 +4447,7 @@ static Address alloc_callbacked(EmuEnvState &emuenv, SceUID thread_id, const Sce
         LOG_ERROR("Empty hostAllocCallback");
     }
     const auto thread = emuenv.kernel.get_thread(thread_id);
-    auto result = thread->call_guest(shaderPatcherParams.hostAllocCallback.address(), RegisterArgs{ { shaderPatcherParams.userData.address(), size } });
+    auto result = thread->call_guest_inline(shaderPatcherParams.hostAllocCallback.address(), RegisterArgs{ { shaderPatcherParams.userData.address(), size } });
     return result;
 }
 
@@ -4473,7 +4473,7 @@ static void free_callbacked(EmuEnvState &emuenv, SceUID thread_id, SceGxmShaderP
         LOG_ERROR("Empty hostFreeCallback");
     }
     const auto thread = emuenv.kernel.get_thread(thread_id);
-    thread->call_guest(shaderPatcher->params.hostFreeCallback.address(), RegisterArgs{ { shaderPatcher->params.userData.address(), data } });
+    thread->call_guest_inline(shaderPatcher->params.hostFreeCallback.address(), RegisterArgs{ { shaderPatcher->params.userData.address(), data } });
 }
 
 template <typename T>
@@ -4881,7 +4881,7 @@ EXPORT(int, sceGxmTerminate) {
     gxm::destroy_all_contexts(emuenv, false);
     gxm::destroy_all_render_targets(emuenv, false);
     emuenv.gxm.display_queue.abort();
-    emuenv.kernel.get_thread(emuenv.gxm.display_queue_thread)->request_destroy();
+    emuenv.kernel.get_thread(emuenv.gxm.display_queue_thread)->request_host_thread_exit();
     return 0;
 }
 

@@ -492,7 +492,7 @@ EXPORT(int, sceNetCtlCheckCallback) {
     if (emuenv.net.state != 1) {
         for (auto &callback : emuenv.netctl.callbacks) {
             if (callback.pc != 0) {
-                thread->call_guest(callback.pc, RegisterArgs{ { SCE_NET_CTL_EVENT_TYPE_DISCONNECTED, callback.arg } });
+                thread->call_guest_inline(callback.pc, RegisterArgs{ { SCE_NET_CTL_EVENT_TYPE_DISCONNECTED, callback.arg } });
             }
         }
         emuenv.net.state = 1;
@@ -502,7 +502,7 @@ EXPORT(int, sceNetCtlCheckCallback) {
     if ((emuenv.netctl.adhocEvent != SCE_NET_CTL_EVENT_TYPE_NONE) && (emuenv.netctl.adhocEvent != emuenv.netctl.lastNotifiedAdhocEvent)) {
         for (auto &callback : emuenv.netctl.adhocCallbacks) {
             if (callback.pc != 0)
-                thread->call_guest(callback.pc, RegisterArgs{ { emuenv.netctl.adhocEvent, callback.arg } });
+                thread->call_guest_inline(callback.pc, RegisterArgs{ { emuenv.netctl.adhocEvent, callback.arg } });
         }
 
         // Update the last notified adhoc event
