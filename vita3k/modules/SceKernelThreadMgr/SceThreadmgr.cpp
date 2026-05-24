@@ -993,8 +993,7 @@ static WaitResult wait_signal(ThreadStatePtr thread, Deadline deadline,
         bool run_callbacks = false;
         {
             std::lock_guard lock(thread->mutex);
-            if (thread->destroy_requested
-                || (cb && thread->exit_request)) {
+            if (thread->stop_requested_locked()) {
                 thread->leave_wait();
                 return std::unexpected{ ExitSignal{} };
             }
@@ -1282,8 +1281,7 @@ static WaitResult delay_thread(ThreadStatePtr thread, Deadline deadline,
         bool run_callbacks = false;
         {
             std::lock_guard lock(thread->mutex);
-            if (thread->destroy_requested
-                || (cb && thread->exit_request)) {
+            if (thread->stop_requested_locked()) {
                 thread->leave_wait();
                 return std::unexpected{ ExitSignal{} };
             }
@@ -1401,8 +1399,8 @@ EXPORT(int, sceKernelDeleteThread, SceUID thid) {
         if (thread->status != ThreadStatus::dormant)
             return RET_ERROR(SCE_KERNEL_ERROR_NOT_DORMANT);
     }
-    thread->request_destroy();
-    thread->wait_host_thread_exited();
+    thread->request_host_thread_exit();
+    emuenv.kernel.wait_thread_deleted(thid);
     return 0;
 }
 
