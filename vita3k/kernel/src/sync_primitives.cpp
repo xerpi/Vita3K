@@ -29,12 +29,9 @@ WaitResult Semaphore::wait_for(ThreadStatePtr t, int n, Deadline d, bool cb) {
         return SCE_KERNEL_OK;
     }
     const WaitInfo info = wait_info(cb);
-    SemaWaitEntry e;
+    WaitEntry e;
     e.need_count = n;
-    e.priority = t->enter_wait(info);
-    e.thread = std::move(t);
-    waiters.push(&e);
-    return waiters.wait(lock, e, d, cb, info);
+    return waiters.enqueue_and_wait(lock, std::move(t), e, d, cb, info);
 }
 
 SceInt32 Semaphore::poll(int n) {
@@ -52,10 +49,10 @@ SceInt32 Semaphore::signal(int n) {
     if (val + n > max_val)
         return SCE_KERNEL_ERROR_SEMA_OVF;
     val += n;
-    waiters.wake_many([&](SemaWaitEntry &e) {
-        if (val < e.need_count)
+    waiters.wake_many([&](WaitEntry &entry, const ThreadStatePtr &) {
+        if (val < entry.need_count)
             return false;
-        val -= e.need_count;
+        val -= entry.need_count;
         return true;
     });
     return SCE_KERNEL_OK;
@@ -102,12 +99,9 @@ WaitResult MutexT<W>::lock(ThreadStatePtr t, int n, Deadline d, MemState &mem, b
     if (const auto r = try_acquire_locked(t, n, mem))
         return *r;
     const WaitInfo info = wait_info(cb);
-    MutexWaitEntry e;
+    WaitEntry e;
     e.lock_count = n;
-    e.priority = t->enter_wait(info);
-    e.thread = std::move(t);
-    waiters.push(&e);
-    return waiters.wait(lock, e, d, cb, info);
+    return waiters.enqueue_and_wait(lock, std::move(t), e, d, cb, info);
 }
 
 template <SyncWeight W>
@@ -131,9 +125,9 @@ SceInt32 MutexT<W>::unlock(ThreadStatePtr t, int n, MemState &mem) {
     if (lock_count == 0) {
         owner.reset();
         // Hand the mutex to the first waiter (lock_count == 0, anyone wins).
-        waiters.wake_one([&](MutexWaitEntry &e) {
-            owner = e.thread;
-            lock_count = e.lock_count;
+        waiters.wake_one([&](WaitEntry &entry, const ThreadStatePtr &thread) {
+            owner = thread;
+            lock_count = entry.lock_count;
             return true;
         });
     }
@@ -179,12 +173,9 @@ WaitResult CondvarT<W>::wait(ThreadStatePtr t, Deadline d, MemState &mem, bool c
         return err;
 
     const WaitInfo info = wait_info(cb);
-    CondvarWaitEntry e;
-    e.priority = t->enter_wait(info);
-    e.thread = t;
-    waiters.push(&e);
+    WaitEntry e;
 
-    const WaitResult r = waiters.wait(lock, e, d, cb, info);
+    const WaitResult r = waiters.enqueue_and_wait(lock, t, e, d, cb, info);
     lock.unlock();
 
     if (!r || *r != SCE_KERNEL_OK)
@@ -198,18 +189,18 @@ SceInt32 CondvarT<W>::signal(SignalTarget target) {
     switch (target.type) {
     case CondvarSignalTarget::Type::Specific: {
         // sceKernelSignalCondTo: target must be waiting on this condvar.
-        const bool woken = waiters.wake_one([&](CondvarWaitEntry &e) {
-            return e.thread->id == target.thread_id;
+        const bool woken = waiters.wake_one([&](WaitEntry &, const ThreadStatePtr &thread) {
+            return thread->id == target.thread_id;
         });
         if (!woken)
             return SCE_KERNEL_ERROR_COND_ERROR;
         return SCE_KERNEL_OK;
     }
     case CondvarSignalTarget::Type::Any:
-        waiters.wake_one([](CondvarWaitEntry &) { return true; });
+        waiters.wake_one([](WaitEntry &, const ThreadStatePtr &) { return true; });
         return SCE_KERNEL_OK;
     case CondvarSignalTarget::Type::All:
-        waiters.wake_many([](CondvarWaitEntry &) { return true; });
+        waiters.wake_many([](WaitEntry &, const ThreadStatePtr &) { return true; });
         return SCE_KERNEL_OK;
     }
     return SCE_KERNEL_OK;
@@ -253,14 +244,11 @@ WaitResult EventFlag::wait(ThreadStatePtr t, SceUInt32 bits, SceUInt32 wait_mode
         return SCE_KERNEL_OK;
     }
     const WaitInfo info = wait_info(cb);
-    EventFlagWaitEntry e;
+    WaitEntry e;
     e.bit_pattern = bits;
     e.wait_mode = wait_mode;
     e.out_bits = p_result;
-    e.priority = t->enter_wait(info);
-    e.thread = std::move(t);
-    waiters.push(&e);
-    const WaitResult r = waiters.wait(lock, e, d, cb, info);
+    const WaitResult r = waiters.enqueue_and_wait(lock, std::move(t), e, d, cb, info);
     if (r && *r != SCE_KERNEL_OK && p_result)
         *p_result = pattern;
     return r;
@@ -280,12 +268,12 @@ SceInt32 EventFlag::poll(SceUInt32 bits, SceUInt32 wait_mode, SceUInt32 *p_resul
 SceInt32 EventFlag::set(SceUInt32 bits) {
     std::lock_guard<std::mutex> lock(mutex);
     pattern |= bits;
-    waiters.wake_many([&](EventFlagWaitEntry &e) {
-        if (!satisfies(pattern, e.bit_pattern, e.wait_mode))
+    waiters.wake_many([&](WaitEntry &entry, const ThreadStatePtr &) {
+        if (!satisfies(pattern, entry.bit_pattern, entry.wait_mode))
             return false;
-        if (e.out_bits)
-            *e.out_bits = pattern;
-        apply_clear_locked(e.wait_mode, e.bit_pattern);
+        if (entry.out_bits)
+            *entry.out_bits = pattern;
+        apply_clear_locked(entry.wait_mode, entry.bit_pattern);
         return true;
     });
     return SCE_KERNEL_OK;
@@ -300,9 +288,9 @@ SceInt32 EventFlag::clear(SceUInt32 bits) {
 SceUInt32 EventFlag::cancel(SceUInt32 new_pattern) {
     std::lock_guard<std::mutex> lock(mutex);
     const SceUInt32 n = static_cast<SceUInt32>(waiters.size());
-    waiters.drain_with_error(SCE_KERNEL_ERROR_WAIT_CANCEL, [&](EventFlagWaitEntry &e) {
-        if (e.out_bits)
-            *e.out_bits = new_pattern;
+    waiters.drain_with_error(SCE_KERNEL_ERROR_WAIT_CANCEL, [&](WaitEntry &entry) {
+        if (entry.out_bits)
+            *entry.out_bits = new_pattern;
     });
     pattern = new_pattern;
     return n;
@@ -337,19 +325,16 @@ std::optional<SceInt32> RWLock::try_acquire_locked(ThreadStatePtr t, bool is_wri
     return std::nullopt;
 }
 
-WaitResult RWLock::lock(ThreadStatePtr t, bool is_write, Deadline d) {
+WaitResult RWLock::lock(ThreadStatePtr t, bool is_write, Deadline d, bool cb) {
     std::unique_lock<std::mutex> lock(mutex);
     if (being_deleted)
         return SCE_KERNEL_ERROR_WAIT_DELETE;
     if (const auto r = try_acquire_locked(t, is_write))
         return *r;
-    const WaitInfo info = wait_info();
-    RWLockWaitEntry e;
+    const WaitInfo info = wait_info(cb);
+    WaitEntry e;
     e.is_write = is_write;
-    e.priority = t->enter_wait(info);
-    e.thread = std::move(t);
-    waiters.push(&e);
-    return waiters.wait(lock, e, d, false, info);
+    return waiters.enqueue_and_wait(lock, std::move(t), e, d, cb, info);
 }
 
 SceInt32 RWLock::try_lock(ThreadStatePtr t, bool is_write) {
@@ -373,13 +358,13 @@ SceInt32 RWLock::unlock(ThreadStatePtr t, bool is_write) {
         return SCE_KERNEL_OK;
     state = RWLock::State::Unlocked;
     // Write-priority: once a writer is at the head we stop granting reads.
-    waiters.wake_many([&](RWLockWaitEntry &e) {
+    waiters.wake_many([&](WaitEntry &entry, const ThreadStatePtr &thread) {
         if (state == RWLock::State::WriteLocked)
             return false;
-        if (state == RWLock::State::ReadLocked && e.is_write)
+        if (state == RWLock::State::ReadLocked && entry.is_write)
             return false;
-        owners.emplace(e.thread, 1);
-        state = e.is_write ? RWLock::State::WriteLocked : RWLock::State::ReadLocked;
+        owners.emplace(thread, 1);
+        state = entry.is_write ? RWLock::State::WriteLocked : RWLock::State::ReadLocked;
         return true;
     });
     return SCE_KERNEL_OK;
@@ -388,8 +373,8 @@ SceInt32 RWLock::unlock(ThreadStatePtr t, bool is_write) {
 RWLock::CancelCounts RWLock::cancel(ThreadStatePtr caller, SceInt32 flag) {
     std::lock_guard<std::mutex> lock(mutex);
     CancelCounts counts{ 0, 0 };
-    waiters.drain_with_error(SCE_KERNEL_ERROR_WAIT_CANCEL, [&](RWLockWaitEntry &e) {
-        (e.is_write ? counts.write : counts.read)++;
+    waiters.drain_with_error(SCE_KERNEL_ERROR_WAIT_CANCEL, [&](WaitEntry &entry) {
+        (entry.is_write ? counts.write : counts.read)++;
     });
     owners.clear();
     if (flag & SCE_KERNEL_RW_LOCK_CANCEL_WITH_WRITE_LOCK) {
@@ -427,15 +412,12 @@ WaitResult SimpleEvent::wait_or_poll(ThreadStatePtr t, SceUInt32 wait_pattern, S
         return SCE_KERNEL_ERROR_EVENT_COND;
 
     const WaitInfo info = wait_info(alertable);
-    SimpleEventWaitEntry e;
+    WaitEntry e;
     e.wait_pattern = wait_pattern;
     e.result_pattern = result_pattern;
     e.user_data = user_data_out;
-    e.priority = t->enter_wait(info);
-    e.thread = std::move(t);
-    waiters.push(&e);
 
-    const WaitResult r = waiters.wait(lock, e, d, alertable, info);
+    const WaitResult r = waiters.enqueue_and_wait(lock, std::move(t), e, d, alertable, info);
     if (alertable && !r)
         return SCE_KERNEL_OK;
     if (r && *r != SCE_KERNEL_OK) {
@@ -452,15 +434,15 @@ SceInt32 SimpleEvent::set_or_pulse(SceUInt32 pattern_to_set, SceUInt64 ud, bool 
     pattern |= pattern_to_set;
     user_data = ud;
 
-    waiters.wake_many([&](SimpleEventWaitEntry &e) {
-        if ((pattern & e.wait_pattern) == 0)
+    waiters.wake_many([&](WaitEntry &entry, const ThreadStatePtr &) {
+        if ((pattern & entry.wait_pattern) == 0)
             return false;
-        if (e.result_pattern)
-            *e.result_pattern = pattern;
-        if (e.user_data)
-            *e.user_data = user_data;
+        if (entry.result_pattern)
+            *entry.result_pattern = pattern;
+        if (entry.user_data)
+            *entry.user_data = user_data;
         if (auto_reset)
-            pattern &= ~e.wait_pattern;
+            pattern &= ~entry.wait_pattern;
         return true;
     });
 
@@ -489,14 +471,14 @@ void SimpleEvent::mark_deleted() {
 }
 
 void MsgPipe::wake_one_receiver_locked() {
-    receivers.wake_one([&](MsgPipeRecvWaitEntry &e) {
-        return data_buffer.Used() >= e.request_size;
+    receivers.wake_one([&](RecvWaitEntry &entry, const ThreadStatePtr &) {
+        return data_buffer.Used() >= entry.request_size;
     });
 }
 
 void MsgPipe::wake_one_sender_locked() {
-    senders.wake_one([&](MsgPipeSendWaitEntry &e) {
-        return data_buffer.Free() >= e.request_size;
+    senders.wake_one([&](SendWaitEntry &entry, const ThreadStatePtr &) {
+        return data_buffer.Free() >= entry.request_size;
     });
 }
 
@@ -525,13 +507,10 @@ std::expected<SceSize, ExitSignal> MsgPipe::recv(ThreadStatePtr t, void *p_recv,
     if (no_wait)
         return SceSize{ 0 };
     const WaitInfo info = recv_wait_info(cb);
-    MsgPipeRecvWaitEntry e;
+    RecvWaitEntry e;
     e.request_size = ASAP ? 1u : recv_size;
-    e.priority = t->enter_wait(info);
-    e.thread = std::move(t);
-    receivers.push(&e);
 
-    const WaitResult r = receivers.wait(lock, e, d, cb, info);
+    const WaitResult r = receivers.enqueue_and_wait(lock, std::move(t), e, d, cb, info);
     if (!r)
         return r;
     if (*r != SCE_KERNEL_OK)
@@ -566,13 +545,10 @@ std::expected<SceSize, ExitSignal> MsgPipe::send(ThreadStatePtr t, const void *p
     if (no_wait)
         return SceSize{ 0 };
     const WaitInfo info = send_wait_info(cb);
-    MsgPipeSendWaitEntry e;
+    SendWaitEntry e;
     e.request_size = ASAP ? 1u : send_size;
-    e.priority = t->enter_wait(info);
-    e.thread = std::move(t);
-    senders.push(&e);
 
-    const WaitResult r = senders.wait(lock, e, d, cb, info);
+    const WaitResult r = senders.enqueue_and_wait(lock, std::move(t), e, d, cb, info);
     if (!r)
         return r;
     if (*r != SCE_KERNEL_OK)

@@ -35,7 +35,7 @@ enum SceDisplayPixelFormat {
 struct ThreadState;
 typedef std::shared_ptr<ThreadState> ThreadStatePtr;
 
-struct VblankWaitEntry : WaitEntryBase {
+struct VblankWaitEntry {
     uint64_t target_vcount = 0;
 };
 
@@ -72,7 +72,7 @@ struct DisplayState {
     std::atomic<bool> imgui_render{ true };
     std::atomic<bool> fullscreen{ false };
     std::atomic<std::uint64_t> vblank_count{ 0 };
-    WaitQueue<VblankWaitEntry> vblank_waiters;
+    WaitQueue<void, VblankWaitEntry> vblank_waiters;
     std::atomic<uint64_t> last_setframe_vblank_count = 0;
     std::map<SceUID, CallbackPtr> vblank_callbacks{};
 

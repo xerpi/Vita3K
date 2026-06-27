@@ -28,6 +28,7 @@
 #include <string_view>
 
 #include <map>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <type_traits>
@@ -60,12 +61,12 @@ struct SyncObjectBase {
     }
 };
 
-struct SemaWaitEntry : WaitEntryBase {
-    int need_count = 0;
-};
-
 class Semaphore : public SyncObjectBase {
 public:
+    struct WaitEntry {
+        int need_count = 0;
+    };
+
     Semaphore(SceUID uid, std::string_view name, SceUInt32 attr,
         int init_val, int max_val)
         : SyncObjectBase(uid, name, attr)
@@ -97,7 +98,7 @@ private:
     int init_val;
     int val;
     int max_val;
-    WaitQueue<SemaWaitEntry> waiters;
+    WaitQueue<Semaphore> waiters;
 };
 using SemaphorePtr = std::shared_ptr<Semaphore>;
 using SemaphorePtrs = std::map<SceUID, SemaphorePtr>;
@@ -111,26 +112,31 @@ enum class SyncWeight {
     Light
 };
 
-struct MutexWaitEntry : WaitEntryBase {
-    int lock_count = 0;
-};
-
 template <SyncWeight W>
 class MutexT : public SyncObjectBase {
 public:
     static constexpr bool is_lw = (W == SyncWeight::Light);
 
-    MutexT(SceUID uid, std::string_view name, SceUInt32 attr, int init_count)
+    struct WaitEntry {
+        int lock_count = 0;
+    };
+
+    MutexT(SceUID uid, std::string_view name, SceUInt32 attr,
+        int init_count, ThreadStatePtr initial_owner)
         requires(!is_lw)
         : SyncObjectBase(uid, name, attr)
         , init_count(init_count)
+        , lock_count(init_count)
+        , owner(init_count > 0 ? std::move(initial_owner) : nullptr)
         , waiters(wait_order_from_attr(attr)) {}
 
     MutexT(SceUID uid, std::string_view name, SceUInt32 attr,
-        int init_count, Ptr<SceKernelLwMutexWork> workarea)
+        int init_count, ThreadStatePtr initial_owner, Ptr<SceKernelLwMutexWork> workarea)
         requires(is_lw)
         : SyncObjectBase(uid, name, attr)
         , init_count(init_count)
+        , lock_count(init_count)
+        , owner(init_count > 0 ? std::move(initial_owner) : nullptr)
         , workarea(workarea)
         , waiters(wait_order_from_attr(attr)) {}
 
@@ -198,7 +204,7 @@ private:
     [[no_unique_address]] std::conditional_t<is_lw,
         Ptr<SceKernelLwMutexWork>, std::monostate>
         workarea{};
-    WaitQueue<MutexWaitEntry> waiters;
+    WaitQueue<MutexT<W>> waiters;
 };
 
 using Mutex = MutexT<SyncWeight::Heavy>;
@@ -209,8 +215,6 @@ using MutexPtrs = std::map<SceUID, MutexPtr>;
 using LwMutexPtrs = std::map<SceUID, LwMutexPtr>;
 
 // Same Heavy/Light split as Mutex; differs only in the paired mutex type.
-
-struct CondvarWaitEntry : WaitEntryBase {};
 
 struct CondvarSignalTarget {
     enum class Type {
@@ -231,6 +235,8 @@ template <SyncWeight W>
 class CondvarT : public SyncObjectBase {
 public:
     static constexpr bool is_lw = (W == SyncWeight::Light);
+
+    struct WaitEntry {};
 
     using PairedMutex = std::conditional_t<is_lw, LwMutex, Mutex>;
     using PairedMutexPtr = std::shared_ptr<PairedMutex>;
@@ -264,7 +270,7 @@ private:
     }
 
     PairedMutexPtr associated_mutex;
-    WaitQueue<CondvarWaitEntry> waiters;
+    WaitQueue<CondvarT<W>> waiters;
 };
 
 using Condvar = CondvarT<SyncWeight::Heavy>;
@@ -274,14 +280,14 @@ using LwCondVarPtr = std::shared_ptr<LwCondVar>;
 using CondvarPtrs = std::map<SceUID, CondvarPtr>;
 using LwCondVarPtrs = std::map<SceUID, LwCondVarPtr>;
 
-struct EventFlagWaitEntry : WaitEntryBase {
-    SceUInt32 bit_pattern = 0;
-    SceUInt32 wait_mode = 0;
-    SceUInt32 *out_bits = nullptr; // signaler writes the pre-clear pattern here
-};
-
 class EventFlag : public SyncObjectBase {
 public:
+    struct WaitEntry {
+        SceUInt32 bit_pattern = 0;
+        SceUInt32 wait_mode = 0;
+        SceUInt32 *out_bits = nullptr; // signaler writes the pre-clear pattern here
+    };
+
     EventFlag(SceUID uid, std::string_view name, SceUInt32 attr, SceUInt32 initial_pattern)
         : SyncObjectBase(uid, name, attr)
         , pattern(initial_pattern)
@@ -312,17 +318,17 @@ private:
     }
 
     SceUInt32 pattern;
-    WaitQueue<EventFlagWaitEntry> waiters;
+    WaitQueue<EventFlag> waiters;
 };
 using EventFlagPtr = std::shared_ptr<EventFlag>;
 using EventFlagPtrs = std::map<SceUID, EventFlagPtr>;
 
-struct RWLockWaitEntry : WaitEntryBase {
-    bool is_write = false;
-};
-
 class RWLock : public SyncObjectBase {
 public:
+    struct WaitEntry {
+        bool is_write = false;
+    };
+
     RWLock(SceUID uid, std::string_view name, SceUInt32 attr)
         : SyncObjectBase(uid, name, attr)
         , waiters(wait_order_from_attr(attr)) {}
@@ -332,7 +338,7 @@ public:
         SceUInt32 write;
     };
 
-    WaitResult lock(ThreadStatePtr t, bool is_write, Deadline d);
+    WaitResult lock(ThreadStatePtr t, bool is_write, Deadline d, bool cb);
     SceInt32 try_lock(ThreadStatePtr t, bool is_write);
     SceInt32 unlock(ThreadStatePtr t, bool is_write);
     CancelCounts cancel(ThreadStatePtr caller, SceInt32 flag);
@@ -347,9 +353,9 @@ private:
 
     std::optional<SceInt32> try_acquire_locked(ThreadStatePtr t, bool is_write);
 
-    WaitInfo wait_info() const {
+    WaitInfo wait_info(bool cb) const {
         return {
-            .type = SCE_KERNEL_WAITTYPE_RW_LOCK,
+            .type = cb ? SCE_KERNEL_WAITTYPE_RW_LOCK_CB : SCE_KERNEL_WAITTYPE_RW_LOCK,
             .uid = uid,
             .reason = "rwlock"
         };
@@ -357,19 +363,19 @@ private:
 
     State state = State::Unlocked;
     std::map<ThreadStatePtr, int> owners;
-    WaitQueue<RWLockWaitEntry> waiters;
+    WaitQueue<RWLock> waiters;
 };
 using RWLockPtr = std::shared_ptr<RWLock>;
 using RWLockPtrs = std::map<SceUID, RWLockPtr>;
 
-struct SimpleEventWaitEntry : WaitEntryBase {
-    SceUInt32 wait_pattern = 0;
-    SceUInt32 *result_pattern = nullptr;
-    SceUInt64 *user_data = nullptr;
-};
-
 class SimpleEvent : public SyncObjectBase {
 public:
+    struct WaitEntry {
+        SceUInt32 wait_pattern = 0;
+        SceUInt32 *result_pattern = nullptr;
+        SceUInt64 *user_data = nullptr;
+    };
+
     SimpleEvent(SceUID uid, std::string_view name, SceUInt32 attr, SceUInt32 init_pattern)
         : SyncObjectBase(uid, name, attr)
         , pattern(init_pattern)
@@ -397,7 +403,7 @@ private:
     SceUInt32 pattern;
     SceUInt64 user_data = 0;
     bool auto_reset;
-    WaitQueue<SimpleEventWaitEntry> waiters;
+    WaitQueue<SimpleEvent> waiters;
 };
 using SimpleEventPtr = std::shared_ptr<SimpleEvent>;
 using SimpleEventPtrs = std::map<SceUID, SimpleEventPtr>;
@@ -432,21 +438,21 @@ private:
     bool is_pulse = false;
     bool event_set = false;
     uint64_t time = 0;
-    uint64_t next_event = 0;
+    uint64_t next_event = std::numeric_limits<uint64_t>::max();
     uint64_t event_interval = 0;
 };
 using TimerPtr = std::shared_ptr<Timer>;
 using TimerPtrs = std::map<SceUID, TimerPtr>;
 
-struct MsgPipeRecvWaitEntry : WaitEntryBase {
-    SceSize request_size = 0; // ASAP = 1, FULL = recv_size
-};
-struct MsgPipeSendWaitEntry : WaitEntryBase {
-    SceSize request_size = 0;
-};
-
 class MsgPipe : public SyncObjectBase {
 public:
+    struct RecvWaitEntry {
+        SceSize request_size = 0; // ASAP = 1, FULL = recv_size
+    };
+    struct SendWaitEntry {
+        SceSize request_size = 0;
+    };
+
     MsgPipe(SceUID uid, std::string_view name, SceUInt32 attr, SceSize buf_size)
         : SyncObjectBase(uid, name, attr)
         , data_buffer(buf_size)
@@ -485,8 +491,8 @@ private:
     }
 
     ByteRingBuffer data_buffer;
-    WaitQueue<MsgPipeRecvWaitEntry> receivers;
-    WaitQueue<MsgPipeSendWaitEntry> senders;
+    WaitQueue<MsgPipe, RecvWaitEntry> receivers;
+    WaitQueue<MsgPipe, SendWaitEntry> senders;
 };
 using MsgPipePtr = std::shared_ptr<MsgPipe>;
 using MsgPipePtrs = std::map<SceUID, MsgPipePtr>;

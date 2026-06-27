@@ -64,8 +64,8 @@ static void vblank_sync_thread(EmuEnvState &emuenv) {
                 cb->notify(emuenv.kernel, SCE_UID_INVALID_UID, 0);
 
             const uint64_t current = display.vblank_count;
-            display.vblank_waiters.wake_many([&](VblankWaitEntry &e) {
-                return e.target_vcount <= current;
+            display.vblank_waiters.wake_many([&](VblankWaitEntry &entry, const ThreadStatePtr &) {
+                return entry.target_vcount <= current;
             });
         }
         const auto time_ms = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
@@ -85,11 +85,8 @@ void wait_vblank(DisplayState &display, KernelState &kernel, const ThreadStatePt
     std::unique_lock<std::mutex> lock(display.mutex);
     if (target_vcount > display.vblank_count) {
         VblankWaitEntry entry;
-        entry.thread = wait_thread;
-        entry.priority = wait_thread->enter_wait({ .type = SCE_KERNEL_WAITTYPE_EVENT, .reason = "vblank" });
         entry.target_vcount = target_vcount;
-        display.vblank_waiters.push(&entry);
-        (void)display.vblank_waiters.wait(lock, entry, Deadline::max(), is_cb,
+        (void)display.vblank_waiters.enqueue_and_wait(lock, wait_thread, entry, Deadline::max(), is_cb,
             { .type = SCE_KERNEL_WAITTYPE_EVENT, .reason = "vblank" });
     }
     lock.unlock();

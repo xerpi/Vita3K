@@ -111,8 +111,8 @@ int ThreadState::init(std::string_view name, Ptr<const void> entry_point, int in
 void ThreadState::raise_wait_thread_end_joiners() {
     std::lock_guard<std::mutex> lock(mutex);
     const SceInt32 final_value = static_cast<SceInt32>(returned_value);
-    wait_thread_end_joiners.wake_many([&](WaitThreadEndJoinerEntry &e) {
-        e.returned_value = final_value;
+    wait_thread_end_joiners.wake_many([&](WaitThreadEndJoinerEntry &entry, const ThreadStatePtr &) {
+        entry.returned_value = final_value;
         return true;
     });
 }

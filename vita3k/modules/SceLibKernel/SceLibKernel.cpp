@@ -1255,7 +1255,7 @@ EXPORT(int, sceKernelCreateMutex, const char *name, SceUInt attr, int init_count
         return RET_ERROR(SCE_KERNEL_ERROR_UID_NAME_TOO_LONG);
 
     return create_sync_object<Mutex>(emuenv.kernel, emuenv.kernel.mutexes,
-        name, attr, init_count);
+        name, attr, init_count, emuenv.kernel.get_thread(thread_id));
 }
 
 EXPORT(SceUID, sceKernelCreateRWLock, const char *name, SceUInt32 attr, SceKernelMutexOptParam *opt_param) {

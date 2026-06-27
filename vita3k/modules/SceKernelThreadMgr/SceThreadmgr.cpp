@@ -86,7 +86,7 @@ EXPORT(SceInt32, __sceKernelCreateLwMutex, Ptr<SceKernelLwMutexWork> workarea, c
         return RET_ERROR(SCE_KERNEL_ERROR_UID_NAME_TOO_LONG);
 
     const SceUID uid = create_sync_object<LwMutex>(emuenv.kernel, emuenv.kernel.lwmutexes,
-        name, attr, init_count, workarea);
+        name, attr, init_count, emuenv.kernel.get_thread(thread_id), workarea);
     auto *wa = workarea.get(emuenv.mem);
     wa->uid = uid;
     wa->attr = attr;
@@ -219,7 +219,7 @@ EXPORT(int, _sceKernelCreateMutex, const char *name, SceUInt attr, int init_coun
     if ((attr & SCE_KERNEL_ATTR_OPENABLE) && std::strlen(name) > SCE_UID_NAMELEN)
         return RET_ERROR(SCE_KERNEL_ERROR_UID_NAME_TOO_LONG);
     return create_sync_object<Mutex>(emuenv.kernel, emuenv.kernel.mutexes,
-        name, attr, init_count);
+        name, attr, init_count, emuenv.kernel.get_thread(thread_id));
 }
 
 EXPORT(SceUID, _sceKernelCreateRWLock, const char *name, SceUInt32 attr, SceKernelMutexOptParam *opt_param) {
@@ -639,7 +639,8 @@ EXPORT(int, _sceKernelLockLwMutex, Ptr<SceKernelLwMutexWork> workarea, int lock_
     auto mutex = lock_and_find(lwmutexid, emuenv.kernel.lwmutexes, emuenv.kernel.mutex);
     if (!mutex)
         return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_LW_MUTEX_ID);
-    return unwrap_or_bail(mutex->lock(emuenv.kernel.get_thread(thread_id), lock_count, deadline_from(ptimeout), emuenv.mem, false));
+    const Deadline deadline = deadline_from(ptimeout);
+    return unwrap_or_bail(mutex->lock(emuenv.kernel.get_thread(thread_id), lock_count, deadline, emuenv.mem, false), ptimeout, deadline);
 }
 
 EXPORT(int, _sceKernelLockMutex, SceUID mutexid, int lock_count, unsigned int *timeout) {
@@ -647,7 +648,8 @@ EXPORT(int, _sceKernelLockMutex, SceUID mutexid, int lock_count, unsigned int *t
     auto mutex = lock_and_find(mutexid, emuenv.kernel.mutexes, emuenv.kernel.mutex);
     if (!mutex)
         return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_MUTEX_ID);
-    return unwrap_or_bail(mutex->lock(emuenv.kernel.get_thread(thread_id), lock_count, deadline_from(timeout), emuenv.mem, false));
+    const Deadline deadline = deadline_from(timeout);
+    return unwrap_or_bail(mutex->lock(emuenv.kernel.get_thread(thread_id), lock_count, deadline, emuenv.mem, false), timeout, deadline);
 }
 
 EXPORT(SceInt32, _sceKernelLockMutexCB, SceUID mutexId, SceInt32 lockCount, SceUInt32 *pTimeout) {
@@ -655,7 +657,8 @@ EXPORT(SceInt32, _sceKernelLockMutexCB, SceUID mutexId, SceInt32 lockCount, SceU
     auto mutex = lock_and_find(mutexId, emuenv.kernel.mutexes, emuenv.kernel.mutex);
     if (!mutex)
         return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_MUTEX_ID);
-    return unwrap_or_bail(mutex->lock(emuenv.kernel.get_thread(thread_id), lockCount, deadline_from(pTimeout), emuenv.mem, true));
+    const Deadline deadline = deadline_from(pTimeout);
+    return unwrap_or_bail(mutex->lock(emuenv.kernel.get_thread(thread_id), lockCount, deadline, emuenv.mem, true), pTimeout, deadline);
 }
 
 EXPORT(SceInt32, _sceKernelLockReadRWLock, SceUID lock_id, SceUInt32 *timeout) {
@@ -663,7 +666,8 @@ EXPORT(SceInt32, _sceKernelLockReadRWLock, SceUID lock_id, SceUInt32 *timeout) {
     auto rwlock = lock_and_find(lock_id, emuenv.kernel.rwlocks, emuenv.kernel.mutex);
     if (!rwlock)
         return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_RW_LOCK_ID);
-    return unwrap_or_bail(rwlock->lock(emuenv.kernel.get_thread(thread_id), false, deadline_from(timeout)));
+    const Deadline deadline = deadline_from(timeout);
+    return unwrap_or_bail(rwlock->lock(emuenv.kernel.get_thread(thread_id), false, deadline, false), timeout, deadline);
 }
 
 EXPORT(SceInt32, _sceKernelLockReadRWLockCB, SceUID lock_id, SceUInt32 *timeout) {
@@ -671,7 +675,8 @@ EXPORT(SceInt32, _sceKernelLockReadRWLockCB, SceUID lock_id, SceUInt32 *timeout)
     auto rwlock = lock_and_find(lock_id, emuenv.kernel.rwlocks, emuenv.kernel.mutex);
     if (!rwlock)
         return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_RW_LOCK_ID);
-    return unwrap_or_bail(rwlock->lock(emuenv.kernel.get_thread(thread_id), false, deadline_from(timeout)));
+    const Deadline deadline = deadline_from(timeout);
+    return unwrap_or_bail(rwlock->lock(emuenv.kernel.get_thread(thread_id), false, deadline, true), timeout, deadline);
 }
 
 EXPORT(SceInt32, _sceKernelLockWriteRWLock, SceUID lock_id, SceUInt32 *timeout) {
@@ -679,7 +684,8 @@ EXPORT(SceInt32, _sceKernelLockWriteRWLock, SceUID lock_id, SceUInt32 *timeout) 
     auto rwlock = lock_and_find(lock_id, emuenv.kernel.rwlocks, emuenv.kernel.mutex);
     if (!rwlock)
         return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_RW_LOCK_ID);
-    return unwrap_or_bail(rwlock->lock(emuenv.kernel.get_thread(thread_id), true, deadline_from(timeout)));
+    const Deadline deadline = deadline_from(timeout);
+    return unwrap_or_bail(rwlock->lock(emuenv.kernel.get_thread(thread_id), true, deadline, false), timeout, deadline);
 }
 
 EXPORT(SceInt32, _sceKernelLockWriteRWLockCB, SceUID lock_id, SceUInt32 *timeout) {
@@ -687,7 +693,8 @@ EXPORT(SceInt32, _sceKernelLockWriteRWLockCB, SceUID lock_id, SceUInt32 *timeout
     auto rwlock = lock_and_find(lock_id, emuenv.kernel.rwlocks, emuenv.kernel.mutex);
     if (!rwlock)
         return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_RW_LOCK_ID);
-    return unwrap_or_bail(rwlock->lock(emuenv.kernel.get_thread(thread_id), true, deadline_from(timeout)));
+    const Deadline deadline = deadline_from(timeout);
+    return unwrap_or_bail(rwlock->lock(emuenv.kernel.get_thread(thread_id), true, deadline, true), timeout, deadline);
 }
 
 EXPORT(int, _sceKernelPMonThreadGetCounter) {
@@ -873,7 +880,8 @@ EXPORT(SceInt32, _sceKernelWaitCond, SceUID condId, SceUInt32 *pTimeout) {
     auto cv = lock_and_find(condId, emuenv.kernel.condvars, emuenv.kernel.mutex);
     if (!cv)
         return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_COND_ID);
-    return unwrap_or_bail(cv->wait(emuenv.kernel.get_thread(thread_id), deadline_from(pTimeout), emuenv.mem, false));
+    const Deadline deadline = deadline_from(pTimeout);
+    return unwrap_or_bail(cv->wait(emuenv.kernel.get_thread(thread_id), deadline, emuenv.mem, false), pTimeout, deadline);
 }
 
 EXPORT(SceInt32, _sceKernelWaitCondCB, SceUID condId, SceUInt32 *pTimeout) {
@@ -881,7 +889,8 @@ EXPORT(SceInt32, _sceKernelWaitCondCB, SceUID condId, SceUInt32 *pTimeout) {
     auto cv = lock_and_find(condId, emuenv.kernel.condvars, emuenv.kernel.mutex);
     if (!cv)
         return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_COND_ID);
-    return unwrap_or_bail(cv->wait(emuenv.kernel.get_thread(thread_id), deadline_from(pTimeout), emuenv.mem, true));
+    const Deadline deadline = deadline_from(pTimeout);
+    return unwrap_or_bail(cv->wait(emuenv.kernel.get_thread(thread_id), deadline, emuenv.mem, true), pTimeout, deadline);
 }
 
 EXPORT(SceInt32, _sceKernelWaitEvent, SceUID event_id, SceUInt32 bit_pattern, SceUInt32 *result_pattern, SceUInt64 *user_data, SceUInt32 *timeout) {
@@ -895,7 +904,8 @@ EXPORT(SceInt32, _sceKernelWaitEvent, SceUID event_id, SceUInt32 bit_pattern, Sc
             LOG_WARN_ONCE("Ignoring timer timeout");
         return timer->wait_or_poll(emuenv.kernel.get_thread(thread_id), result_pattern, user_data, true, false);
     }
-    return unwrap_or_bail(ev->wait_or_poll(emuenv.kernel.get_thread(thread_id), bit_pattern, result_pattern, user_data, deadline_from(timeout), true, false));
+    const Deadline deadline = deadline_from(timeout);
+    return unwrap_or_bail(ev->wait_or_poll(emuenv.kernel.get_thread(thread_id), bit_pattern, result_pattern, user_data, deadline, true, false), timeout, deadline);
 }
 
 EXPORT(SceInt32, _sceKernelWaitEventCB, SceUID event_id, SceUInt32 bit_pattern, SceUInt32 *result_pattern, SceUInt64 *user_data, SceUInt32 *timeout) {
@@ -909,7 +919,8 @@ EXPORT(SceInt32, _sceKernelWaitEventCB, SceUID event_id, SceUInt32 bit_pattern, 
             LOG_WARN_ONCE("Ignoring timer timeout");
         return timer->wait_or_poll(emuenv.kernel.get_thread(thread_id), result_pattern, user_data, true, true);
     }
-    return unwrap_or_bail(ev->wait_or_poll(emuenv.kernel.get_thread(thread_id), bit_pattern, result_pattern, user_data, deadline_from(timeout), true, true));
+    const Deadline deadline = deadline_from(timeout);
+    return unwrap_or_bail(ev->wait_or_poll(emuenv.kernel.get_thread(thread_id), bit_pattern, result_pattern, user_data, deadline, true, true), timeout, deadline);
 }
 
 EXPORT(SceInt32, _sceKernelWaitEventFlag, SceUID evfId, SceUInt32 bitPattern, SceUInt32 waitMode, SceUInt32 *pResultPat, SceUInt32 *pTimeout) {
@@ -917,7 +928,8 @@ EXPORT(SceInt32, _sceKernelWaitEventFlag, SceUID evfId, SceUInt32 bitPattern, Sc
     auto ef = lock_and_find(evfId, emuenv.kernel.eventflags, emuenv.kernel.mutex);
     if (!ef)
         return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_EVF_ID);
-    return unwrap_or_bail(ef->wait(emuenv.kernel.get_thread(thread_id), bitPattern, waitMode, pResultPat, deadline_from(pTimeout), false));
+    const Deadline deadline = deadline_from(pTimeout);
+    return unwrap_or_bail(ef->wait(emuenv.kernel.get_thread(thread_id), bitPattern, waitMode, pResultPat, deadline, false), pTimeout, deadline);
 }
 
 EXPORT(SceInt32, _sceKernelWaitEventFlagCB, SceUID evfId, SceUInt32 bitPattern, SceUInt32 waitMode, SceUInt32 *pResultPat, SceUInt32 *pTimeout) {
@@ -925,7 +937,8 @@ EXPORT(SceInt32, _sceKernelWaitEventFlagCB, SceUID evfId, SceUInt32 bitPattern, 
     auto ef = lock_and_find(evfId, emuenv.kernel.eventflags, emuenv.kernel.mutex);
     if (!ef)
         return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_EVF_ID);
-    return unwrap_or_bail(ef->wait(emuenv.kernel.get_thread(thread_id), bitPattern, waitMode, pResultPat, deadline_from(pTimeout), true));
+    const Deadline deadline = deadline_from(pTimeout);
+    return unwrap_or_bail(ef->wait(emuenv.kernel.get_thread(thread_id), bitPattern, waitMode, pResultPat, deadline, true), pTimeout, deadline);
 }
 
 EXPORT(int, _sceKernelWaitException) {
@@ -944,7 +957,8 @@ EXPORT(int, _sceKernelWaitLwCond, Ptr<SceKernelLwCondWork> workarea, SceUInt32 *
     auto cv = lock_and_find(cond_id, emuenv.kernel.lwcondvars, emuenv.kernel.mutex);
     if (!cv)
         return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_LW_COND_ID);
-    return unwrap_or_bail(cv->wait(emuenv.kernel.get_thread(thread_id), deadline_from(timeout), emuenv.mem, false));
+    const Deadline deadline = deadline_from(timeout);
+    return unwrap_or_bail(cv->wait(emuenv.kernel.get_thread(thread_id), deadline, emuenv.mem, false), timeout, deadline);
 }
 
 EXPORT(SceInt32, _sceKernelWaitLwCondCB, Ptr<SceKernelLwCondWork> pWork, SceUInt32 *pTimeout) {
@@ -953,7 +967,8 @@ EXPORT(SceInt32, _sceKernelWaitLwCondCB, Ptr<SceKernelLwCondWork> pWork, SceUInt
     auto cv = lock_and_find(cond_id, emuenv.kernel.lwcondvars, emuenv.kernel.mutex);
     if (!cv)
         return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_LW_COND_ID);
-    return unwrap_or_bail(cv->wait(emuenv.kernel.get_thread(thread_id), deadline_from(pTimeout), emuenv.mem, true));
+    const Deadline deadline = deadline_from(pTimeout);
+    return unwrap_or_bail(cv->wait(emuenv.kernel.get_thread(thread_id), deadline, emuenv.mem, true), pTimeout, deadline);
 }
 
 EXPORT(int, _sceKernelWaitMultipleEvents) {
@@ -971,7 +986,8 @@ EXPORT(SceInt32, _sceKernelWaitSema, SceUID semaId, SceInt32 needCount, SceUInt3
     auto sema = lock_and_find(semaId, emuenv.kernel.semaphores, emuenv.kernel.mutex);
     if (!sema)
         return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_SEMA_ID);
-    return unwrap_or_bail(sema->wait_for(emuenv.kernel.get_thread(thread_id), needCount, deadline_from(pTimeout), false));
+    const Deadline deadline = deadline_from(pTimeout);
+    return unwrap_or_bail(sema->wait_for(emuenv.kernel.get_thread(thread_id), needCount, deadline, false), pTimeout, deadline);
 }
 
 EXPORT(SceInt32, _sceKernelWaitSemaCB, SceUID semaId, SceInt32 needCount, SceUInt32 *pTimeout) {
@@ -979,7 +995,8 @@ EXPORT(SceInt32, _sceKernelWaitSemaCB, SceUID semaId, SceInt32 needCount, SceUIn
     auto sema = lock_and_find(semaId, emuenv.kernel.semaphores, emuenv.kernel.mutex);
     if (!sema)
         return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_SEMA_ID);
-    return unwrap_or_bail(sema->wait_for(emuenv.kernel.get_thread(thread_id), needCount, deadline_from(pTimeout), true));
+    const Deadline deadline = deadline_from(pTimeout);
+    return unwrap_or_bail(sema->wait_for(emuenv.kernel.get_thread(thread_id), needCount, deadline, true), pTimeout, deadline);
 }
 
 static WaitResult wait_signal(ThreadStatePtr thread, Deadline deadline,
@@ -1055,12 +1072,9 @@ static WaitResult wait_thread_end(ThreadStatePtr waiter, ThreadStatePtr target,
     };
 
     WaitThreadEndJoinerEntry entry;
-    entry.thread = waiter;
-    entry.priority = waiter->enter_wait(info);
-    target->wait_thread_end_joiners.push(&entry);
 
     const auto deadline = deadline_from(timeout);
-    const WaitResult res = target->wait_thread_end_joiners.wait(tlock, entry, deadline, cb, info);
+    const WaitResult res = target->wait_thread_end_joiners.enqueue_and_wait(tlock, waiter, entry, deadline, cb, info);
 
     if (res && *res == SCE_KERNEL_OK) {
         if (stat)

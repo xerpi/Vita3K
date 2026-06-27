@@ -77,7 +77,7 @@ using GuestCallResult = std::expected<uint32_t, GuestCallError>;
 
 // Queued on the target's wait_thread_end_joiners while a waiter is parked in
 // sceKernelWaitThreadEnd[CB].
-struct WaitThreadEndJoinerEntry : WaitEntryBase {
+struct WaitThreadEndJoinerEntry {
     SceInt32 returned_value = 0;
 };
 
@@ -126,7 +126,7 @@ struct ThreadState {
     // Callbacks created on this thread.
     std::list<CallbackPtr> callbacks;
     // Threads parked in sceKernelWaitThreadEnd[CB] on this one.
-    WaitQueue<WaitThreadEndJoinerEntry> wait_thread_end_joiners;
+    WaitQueue<void, WaitThreadEndJoinerEntry> wait_thread_end_joiners;
 
     ThreadState() = delete;
     explicit ThreadState(SceUID id, KernelState &kernel, MemState &mem);
