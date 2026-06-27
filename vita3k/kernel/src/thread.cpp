@@ -158,13 +158,11 @@ int ThreadState::start(SceSize arglen, Ptr<void> argp, bool fire_start) {
         if (status != ThreadStatus::dormant)
             return SCE_KERNEL_ERROR_RUNNING;
 
-        pending_guest_call = std::make_shared<QueuedGuestCall>(
-            QueuedGuestCall{ .pc = entry_point, .args = ArglenArgs{ arglen, argp }, .fire_events = fire_start });
         is_suspended = std::exchange(kernel.debugger.wait_for_debugger, false);
-        exit_request.reset();
-        set_status_locked(ThreadStatus::running);
+        queue_guest_call_locked(
+            QueuedGuestCall{ .pc = entry_point, .args = ArglenArgs{ arglen, argp }, .fire_events = fire_start });
     }
-    lifecycle_cv.notify_all();
+    state_cv.notify_all();
     return SCE_KERNEL_OK;
 }
 
@@ -193,7 +191,7 @@ void ThreadState::request_host_thread_exit() {
         complete_pending_guest_call_locked(GuestCallError::terminated);
     }
     stop(*cpu);
-    lifecycle_cv.notify_all();
+    state_cv.notify_all();
     unpark();
 }
 
@@ -224,6 +222,167 @@ void ThreadState::leave_wait() {
     std::lock_guard<std::mutex> lock(mutex);
     set_status_locked(ThreadStatus::running);
     wait_info = {};
+}
+
+WaitInterrupt ThreadState::check_wait_interrupt(bool callback_aware) {
+    std::lock_guard lock(mutex);
+    if (stop_requested_locked())
+        return WaitInterrupt::stop;
+    if (callback_aware && callbacks_pending) {
+        callbacks_pending = false;
+        return WaitInterrupt::callbacks;
+    }
+    return WaitInterrupt::none;
+}
+
+void ThreadState::notify_callbacks_pending() {
+    {
+        std::lock_guard lock(mutex);
+        callbacks_pending = true;
+    }
+    unpark();
+}
+
+SceInt32 ThreadState::send_signal() {
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        if (signal_pending)
+            return SCE_KERNEL_ERROR_ALREADY_SENT;
+        signal_pending = true;
+    }
+    unpark();
+    return SCE_KERNEL_OK;
+}
+
+WaitResult ThreadState::delay_until(Deadline deadline, bool callback_aware) {
+    const WaitInfo info{
+        .type = callback_aware ? SCE_KERNEL_WAITTYPE_DELAY_CB : SCE_KERNEL_WAITTYPE_DELAY,
+        .reason = "delay",
+    };
+    enter_wait(info);
+    while (true) {
+        const auto park_result = park_until(deadline);
+        const WaitInterrupt wait_interrupt = check_wait_interrupt(callback_aware);
+        if (wait_interrupt == WaitInterrupt::stop) {
+            leave_wait();
+            return std::unexpected{ ExitSignal{} };
+        }
+        if (park_result == ThreadState::ParkResult::timed_out) {
+            leave_wait();
+            return SCE_KERNEL_OK;
+        }
+        if (wait_interrupt == WaitInterrupt::callbacks) {
+            leave_wait();
+            while (true) {
+                process_callbacks();
+
+                bool more_callbacks = false;
+                {
+                    std::lock_guard lock(mutex);
+                    if (stop_requested_locked())
+                        return std::unexpected{ ExitSignal{} };
+                    if (std::chrono::steady_clock::now() >= deadline)
+                        return SCE_KERNEL_OK;
+                    if (callback_aware && callbacks_pending) {
+                        callbacks_pending = false;
+                        more_callbacks = true;
+                    }
+                }
+                if (!more_callbacks)
+                    break;
+            }
+            enter_wait(info);
+        }
+        // Otherwise spurious wake. Re-park against the same deadline.
+    }
+}
+
+WaitResult ThreadState::wait_for_signal(Deadline deadline, bool callback_aware) {
+    const WaitInfo info{
+        .type = callback_aware ? SCE_KERNEL_WAITTYPE_SIGNAL_CB : SCE_KERNEL_WAITTYPE_SIGNAL,
+        .reason = "signal",
+    };
+    enter_wait(info);
+    while (true) {
+        bool run_callbacks = false;
+        bool should_bail = false;
+        bool signal_was_pending = false;
+        {
+            std::lock_guard lock(mutex);
+            should_bail = stop_requested_locked();
+            if (!should_bail && signal_pending) {
+                signal_pending = false;
+                signal_was_pending = true;
+            }
+            if (!should_bail && !signal_was_pending && callback_aware && callbacks_pending) {
+                callbacks_pending = false;
+                run_callbacks = true;
+            }
+        }
+        if (should_bail) {
+            leave_wait();
+            return std::unexpected{ ExitSignal{} };
+        }
+        if (signal_was_pending) {
+            leave_wait();
+            return SCE_KERNEL_OK;
+        }
+        if (run_callbacks) {
+            leave_wait();
+            while (true) {
+                process_callbacks();
+                bool more_callbacks = false;
+                {
+                    std::lock_guard lock(mutex);
+                    if (stop_requested_locked())
+                        return std::unexpected{ ExitSignal{} };
+                    if (signal_pending) {
+                        signal_pending = false;
+                        return SCE_KERNEL_OK;
+                    }
+                    if (std::chrono::steady_clock::now() >= deadline)
+                        return SCE_KERNEL_ERROR_WAIT_TIMEOUT;
+                    if (callback_aware && callbacks_pending) {
+                        callbacks_pending = false;
+                        more_callbacks = true;
+                    }
+                }
+                if (!more_callbacks)
+                    break;
+            }
+            enter_wait(info);
+            continue;
+        }
+        if (park_until(deadline) == ThreadState::ParkResult::timed_out) {
+            leave_wait();
+            return SCE_KERNEL_ERROR_WAIT_TIMEOUT;
+        }
+    }
+}
+
+WaitResult ThreadState::wait_for_thread_end(ThreadStatePtr waiter, SceInt32 *status,
+    SceUInt32 *timeout, bool callback_aware) {
+    std::unique_lock<std::mutex> lock(mutex);
+    if (this->status == ThreadStatus::dormant) {
+        if (status)
+            *status = static_cast<SceInt32>(returned_value);
+        return SCE_KERNEL_OK;
+    }
+
+    const WaitInfo info{
+        .type = callback_aware ? SCE_KERNEL_WAITTYPE_WAITTHEND_CB : SCE_KERNEL_WAITTYPE_WAITTHEND,
+        .uid = id,
+        .reason = "thread_end",
+    };
+    WaitThreadEndJoinerEntry entry;
+    const Deadline deadline = deadline_from(timeout);
+    const WaitResult result = wait_thread_end_joiners.enqueue_and_wait(lock, std::move(waiter), entry, deadline, callback_aware, info);
+    if (result) {
+        if (*result == SCE_KERNEL_OK && status)
+            *status = entry.returned_value;
+        writeback_timeout(timeout, deadline, *result);
+    }
+    return result;
 }
 
 bool ThreadState::stop_requested_locked() const {
@@ -261,7 +420,7 @@ void ThreadState::run_guest_until_halt() {
         bool do_step = false;
         {
             std::unique_lock<std::mutex> lock(mutex);
-            lifecycle_cv.wait(lock, [&] {
+            state_cv.wait(lock, [&] {
                 return !is_suspended || host_thread_exit_requested
                     || exit_request;
             });
@@ -337,20 +496,20 @@ bool ThreadState::execute_run(QueuedGuestCall &call) {
     }
 
     const bool terminal = dead || exit_del || host_thread_exit;
+    GuestCallResult result = std::unexpected{ GuestCallError::terminated };
     {
         std::lock_guard<std::mutex> lock(mutex);
         is_suspended = false;
         wait_info = {};
-        call.result = terminal
-            ? GuestCallResult(std::unexpected{ GuestCallError::terminated })
-            : GuestCallResult(returned_value);
-        call.completed = true;
+        result = terminal ? GuestCallResult(std::unexpected{ GuestCallError::terminated })
+                          : GuestCallResult(returned_value);
         if (!terminal) {
             set_status_locked(ThreadStatus::dormant);
             exit_request.reset();
         }
+        complete_guest_call_locked(call, std::move(result));
     }
-    lifecycle_cv.notify_all();
+    state_cv.notify_all();
 
     if (!host_thread_exit)
         raise_wait_thread_end_joiners();
@@ -365,22 +524,23 @@ void ThreadState::run_loop() {
     } cpu_state_guard;
 
     while (true) {
-        QueuedGuestCallPtr call;
+        QueuedGuestCall call;
         {
             std::unique_lock<std::mutex> lock(mutex);
-            lifecycle_cv.wait(lock, [&] {
+            state_cv.wait(lock, [&] {
                 return host_thread_exit_requested
                     || (pending_guest_call && !is_suspended);
             });
             if (host_thread_exit_requested) {
                 complete_pending_guest_call_locked(GuestCallError::terminated);
-                lifecycle_cv.notify_all();
+                state_cv.notify_all();
                 break;
             }
-            call = std::exchange(pending_guest_call, {});
+            call = std::move(*pending_guest_call);
+            pending_guest_call.reset();
         }
 
-        if (execute_run(*call))
+        if (execute_run(call))
             break;
     }
 }
@@ -454,17 +614,27 @@ void ThreadState::dispatch_abort(CPUState &cpu) {
     call_guest_inline(handler, RegisterArgs{ { sp_aligned } });
 }
 
+void ThreadState::queue_guest_call_locked(QueuedGuestCall call) {
+    assert(!pending_guest_call);
+    pending_guest_call.emplace(std::move(call));
+    exit_request.reset();
+    set_status_locked(ThreadStatus::running);
+}
+
+void ThreadState::complete_guest_call_locked(QueuedGuestCall &call, GuestCallResult result) {
+    if (call.completion)
+        *call.completion = std::move(result);
+}
+
 void ThreadState::complete_pending_guest_call_locked(GuestCallError error) {
     if (!pending_guest_call)
         return;
-    pending_guest_call->result = std::unexpected{ error };
-    pending_guest_call->completed = true;
+    complete_guest_call_locked(*pending_guest_call, std::unexpected{ error });
     pending_guest_call.reset();
 }
 
 GuestCallResult ThreadState::call_guest_on_thread(Address pc, GuestArgs args) {
-    QueuedGuestCallPtr call = std::make_shared<QueuedGuestCall>(
-        QueuedGuestCall{ .pc = pc, .args = std::move(args) });
+    std::optional<GuestCallResult> completion;
 
     std::unique_lock<std::mutex> lock(mutex);
     if (host_thread_exit_requested)
@@ -472,12 +642,10 @@ GuestCallResult ThreadState::call_guest_on_thread(Address pc, GuestArgs args) {
     if (status != ThreadStatus::dormant)
         return std::unexpected{ GuestCallError::not_dormant };
 
-    pending_guest_call = call;
-    exit_request.reset();
-    set_status_locked(ThreadStatus::running);
-    lifecycle_cv.notify_all();
-    lifecycle_cv.wait(lock, [&] { return call->completed; });
-    return call->result;
+    queue_guest_call_locked(QueuedGuestCall{ .pc = pc, .args = std::move(args), .completion = &completion });
+    state_cv.notify_all();
+    state_cv.wait(lock, [&] { return completion.has_value(); });
+    return std::move(*completion);
 }
 
 ThreadState::ThreadState(SceUID id, KernelState &kernel, MemState &mem)
@@ -506,7 +674,7 @@ void ThreadState::resume(bool step) {
         is_suspended = false;
         debug_request = step ? DebugRequest::step : DebugRequest::none;
     }
-    lifecycle_cv.notify_all();
+    state_cv.notify_all();
     unpark();
 }
 

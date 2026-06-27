@@ -1011,117 +1011,14 @@ EXPORT(SceInt32, _sceKernelWaitSemaCB, SceUID semaId, SceInt32 needCount, SceUIn
     return unwrap_or_bail(sema->wait_for(emuenv.kernel.get_thread(thread_id), needCount, deadline, true), pTimeout, deadline);
 }
 
-static WaitResult wait_signal(ThreadStatePtr thread, Deadline deadline,
-    bool cb) {
-    const WaitInfo info{
-        .type = cb ? SCE_KERNEL_WAITTYPE_SIGNAL_CB : SCE_KERNEL_WAITTYPE_SIGNAL,
-        .reason = "signal",
-    };
-    thread->enter_wait(info);
-    while (true) {
-        bool run_callbacks = false;
-        bool should_bail = false;
-        bool signal_pending = false;
-        {
-            std::lock_guard lock(thread->mutex);
-            should_bail = thread->stop_requested_locked();
-            if (!should_bail && thread->signal_pending) {
-                thread->signal_pending = false;
-                signal_pending = true;
-            }
-            if (!should_bail && !signal_pending && cb && thread->callbacks_pending) {
-                thread->callbacks_pending = false;
-                run_callbacks = true;
-            }
-        }
-        if (should_bail) {
-            thread->leave_wait();
-            return std::unexpected{ ExitSignal{} };
-        }
-        if (signal_pending) {
-            thread->leave_wait();
-            return SCE_KERNEL_OK;
-        }
-        if (run_callbacks) {
-            thread->leave_wait();
-            while (true) {
-                thread->process_callbacks();
-                bool callbacks_pending = false;
-                bool post_callback_signal = false;
-                {
-                    std::lock_guard lock(thread->mutex);
-                    if (thread->stop_requested_locked())
-                        return std::unexpected{ ExitSignal{} };
-                    if (thread->signal_pending) {
-                        thread->signal_pending = false;
-                        post_callback_signal = true;
-                    } else if (cb && thread->callbacks_pending) {
-                        thread->callbacks_pending = false;
-                        callbacks_pending = true;
-                    }
-                }
-                if (post_callback_signal)
-                    return SCE_KERNEL_OK;
-                if (!callbacks_pending)
-                    break;
-            }
-            thread->enter_wait(info);
-            continue;
-        }
-        if (thread->park_until(deadline) == ThreadState::ParkResult::timed_out) {
-            thread->leave_wait();
-            return SCE_KERNEL_ERROR_WAIT_TIMEOUT;
-        }
-    }
-}
-
 EXPORT(int, _sceKernelWaitSignal, uint32_t unknown, uint32_t delay, uint32_t timeout) {
     TRACY_FUNC(_sceKernelWaitSignal, unknown, delay, timeout);
-    return unwrap_or_bail(wait_signal(emuenv.kernel.get_thread(thread_id), deadline_from(&timeout), false));
+    return unwrap_or_bail(emuenv.kernel.get_thread(thread_id)->wait_for_signal(deadline_from(&timeout), false));
 }
 
 EXPORT(int, _sceKernelWaitSignalCB, uint32_t unknown, uint32_t delay, uint32_t timeout) {
     TRACY_FUNC(_sceKernelWaitSignalCB, unknown, delay, timeout);
-    return unwrap_or_bail(wait_signal(emuenv.kernel.get_thread(thread_id), deadline_from(&timeout), true));
-}
-
-static void writeback_remaining(SceUInt *timeout, Deadline deadline) {
-    if (!timeout || deadline == Deadline::max())
-        return;
-    const auto remaining = std::chrono::duration_cast<std::chrono::microseconds>(
-        deadline - std::chrono::steady_clock::now())
-                               .count();
-    *timeout = (remaining <= 0) ? 0 : static_cast<SceUInt>(remaining);
-}
-
-static WaitResult wait_thread_end(ThreadStatePtr waiter, ThreadStatePtr target,
-    int *stat, SceUInt *timeout, bool cb) {
-    std::unique_lock<std::mutex> tlock(target->mutex);
-    if (target->status == ThreadStatus::dormant) {
-        if (stat)
-            *stat = static_cast<SceInt32>(target->returned_value);
-        return SCE_KERNEL_OK;
-    }
-
-    const WaitInfo info{
-        .type = cb ? SCE_KERNEL_WAITTYPE_WAITTHEND_CB : SCE_KERNEL_WAITTYPE_WAITTHEND,
-        .uid = target->id,
-        .reason = "thread_end",
-    };
-
-    WaitThreadEndJoinerEntry entry;
-
-    const auto deadline = deadline_from(timeout);
-    const WaitResult res = target->wait_thread_end_joiners.enqueue_and_wait(tlock, waiter, entry, deadline, cb, info);
-
-    if (res && *res == SCE_KERNEL_OK) {
-        if (stat)
-            *stat = entry.returned_value;
-        writeback_remaining(timeout, deadline);
-    } else if (res && *res == SCE_KERNEL_ERROR_WAIT_TIMEOUT && timeout) {
-        *timeout = 0;
-    }
-    return res;
+    return unwrap_or_bail(emuenv.kernel.get_thread(thread_id)->wait_for_signal(deadline_from(&timeout), true));
 }
 
 EXPORT(int, _sceKernelWaitThreadEnd, SceUID thid, int *stat, SceUInt *timeout) {
@@ -1129,7 +1026,7 @@ EXPORT(int, _sceKernelWaitThreadEnd, SceUID thid, int *stat, SceUInt *timeout) {
     auto target = emuenv.kernel.get_thread(thid);
     if (!target)
         return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_THREAD_ID);
-    return unwrap_or_bail(wait_thread_end(emuenv.kernel.get_thread(thread_id), target, stat, timeout, false));
+    return unwrap_or_bail(target->wait_for_thread_end(emuenv.kernel.get_thread(thread_id), stat, timeout, false));
 }
 
 EXPORT(int, _sceKernelWaitThreadEndCB, SceUID thid, int *stat, SceUInt *timeout) {
@@ -1137,7 +1034,7 @@ EXPORT(int, _sceKernelWaitThreadEndCB, SceUID thid, int *stat, SceUInt *timeout)
     auto target = emuenv.kernel.get_thread(thid);
     if (!target)
         return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_THREAD_ID);
-    return unwrap_or_bail(wait_thread_end(emuenv.kernel.get_thread(thread_id), target, stat, timeout, true));
+    return unwrap_or_bail(target->wait_for_thread_end(emuenv.kernel.get_thread(thread_id), stat, timeout, true));
 }
 
 EXPORT(SceInt32, sceKernelCancelCallback, SceUID callbackId) {
@@ -1320,63 +1217,12 @@ EXPORT(int, sceKernelCreateThreadForUser, const char *name, SceKernelThreadEntry
     return thread->id;
 }
 
-static WaitResult delay_thread(ThreadStatePtr thread, Deadline deadline,
-    bool cb) {
-    const WaitInfo info{
-        .type = cb ? SCE_KERNEL_WAITTYPE_DELAY_CB : SCE_KERNEL_WAITTYPE_DELAY,
-        .reason = "delay",
-    };
-    thread->enter_wait(info);
-    while (true) {
-        const auto park_result = thread->park_until(deadline);
-
-        bool run_callbacks = false;
-        bool should_bail = false;
-        {
-            std::lock_guard lock(thread->mutex);
-            should_bail = thread->stop_requested_locked();
-            if (!should_bail && cb && thread->callbacks_pending) {
-                thread->callbacks_pending = false;
-                run_callbacks = true;
-            }
-        }
-        if (should_bail) {
-            thread->leave_wait();
-            return std::unexpected{ ExitSignal{} };
-        }
-        if (park_result == ThreadState::ParkResult::timed_out) {
-            thread->leave_wait();
-            return SCE_KERNEL_OK;
-        }
-        if (run_callbacks) {
-            thread->leave_wait();
-            while (true) {
-                thread->process_callbacks();
-                bool callbacks_pending = false;
-                {
-                    std::lock_guard lock(thread->mutex);
-                    if (thread->stop_requested_locked())
-                        return std::unexpected{ ExitSignal{} };
-                    if (cb && thread->callbacks_pending) {
-                        thread->callbacks_pending = false;
-                        callbacks_pending = true;
-                    }
-                }
-                if (!callbacks_pending)
-                    break;
-            }
-            thread->enter_wait(info);
-        }
-        // Otherwise spurious wake. Re-park against the same deadline.
-    }
-}
-
 EXPORT(int, sceKernelDelayThread, SceUInt delay) {
     TRACY_FUNC(sceKernelDelayThread, delay);
     if (delay == 0)
         return RET_ERROR(SCE_KERNEL_ERROR_INVALID_ARGUMENT);
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::microseconds(delay);
-    return unwrap_or_bail(delay_thread(emuenv.kernel.get_thread(thread_id), deadline, false));
+    return unwrap_or_bail(emuenv.kernel.get_thread(thread_id)->delay_until(deadline, false));
 }
 
 EXPORT(int, sceKernelDelayThread200, SceUInt delay) {
@@ -1384,7 +1230,7 @@ EXPORT(int, sceKernelDelayThread200, SceUInt delay) {
     if (delay < 201)
         delay = 201;
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::microseconds(delay);
-    return unwrap_or_bail(delay_thread(emuenv.kernel.get_thread(thread_id), deadline, false));
+    return unwrap_or_bail(emuenv.kernel.get_thread(thread_id)->delay_until(deadline, false));
 }
 
 EXPORT(int, sceKernelDelayThreadCB, SceUInt delay) {
@@ -1392,7 +1238,7 @@ EXPORT(int, sceKernelDelayThreadCB, SceUInt delay) {
     if (delay == 0)
         return RET_ERROR(SCE_KERNEL_ERROR_INVALID_ARGUMENT);
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::microseconds(delay);
-    return unwrap_or_bail(delay_thread(emuenv.kernel.get_thread(thread_id), deadline, true));
+    return unwrap_or_bail(emuenv.kernel.get_thread(thread_id)->delay_until(deadline, true));
 }
 
 EXPORT(int, sceKernelDelayThreadCB200, SceUInt delay) {
@@ -1400,7 +1246,7 @@ EXPORT(int, sceKernelDelayThreadCB200, SceUInt delay) {
     if (delay < 201)
         delay = 201;
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::microseconds(delay);
-    return unwrap_or_bail(delay_thread(emuenv.kernel.get_thread(thread_id), deadline, true));
+    return unwrap_or_bail(emuenv.kernel.get_thread(thread_id)->delay_until(deadline, true));
 }
 
 EXPORT(int, sceKernelDeleteCallback, SceUID callbackId) {
@@ -1646,14 +1492,9 @@ EXPORT(int, sceKernelResumeThreadForVM, SceUID threadId) {
 EXPORT(int, sceKernelSendSignal, SceUID target_thread_id) {
     TRACY_FUNC(sceKernelSendSignal, target_thread_id);
     const auto thread = emuenv.kernel.get_thread(target_thread_id);
-    {
-        std::lock_guard lock(thread->mutex);
-        if (thread->signal_pending)
-            return SCE_KERNEL_ERROR_ALREADY_SENT;
-        thread->signal_pending = true;
-    }
-    thread->unpark();
-    return SCE_KERNEL_OK;
+    if (!thread)
+        return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_THREAD_ID);
+    return thread->send_signal();
 }
 
 EXPORT(SceInt32, sceKernelSetEvent, SceUID event_id, SceUInt32 set_pattern, SceUInt64 user_data) {

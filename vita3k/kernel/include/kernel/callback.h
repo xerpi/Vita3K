@@ -61,7 +61,7 @@ struct Callback {
 
     // Coalesce a notification. notifier_id == SCE_UID_INVALID_UID for direct
     // (non-event) notifications from sceKernelNotifyCallback. Wakes the owning
-    // thread via callbacks_pending + unpark.
+    // thread for callback-aware waits.
     void notify(KernelState &kernel, SceUID notifier_id, SceInt32 notify_arg);
 
     // Discard pending notifications. Does not interrupt an in-progress run.

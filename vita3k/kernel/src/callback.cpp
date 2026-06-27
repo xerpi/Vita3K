@@ -74,11 +74,7 @@ void Callback::notify(KernelState &kernel, SceUID notifier_id, SceInt32 notify_a
     if (!thread)
         return;
 
-    {
-        std::lock_guard lock(thread->mutex);
-        thread->callbacks_pending = true;
-    }
-    thread->unpark();
+    thread->notify_callbacks_pending();
 }
 
 void Callback::cancel() {

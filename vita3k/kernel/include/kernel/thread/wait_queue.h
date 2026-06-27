@@ -53,6 +53,12 @@ struct ExitSignal {};
 using WaitResult = std::expected<SceInt32, ExitSignal>;
 using Deadline = std::chrono::steady_clock::time_point;
 
+enum class WaitInterrupt {
+    none,
+    callbacks,
+    stop,
+};
+
 // pTimeout: NULL = forever, *p==0 = poll, *p>0 = microseconds.
 inline Deadline deadline_from(const SceUInt32 *timeout) {
     if (!timeout)
@@ -148,9 +154,15 @@ public:
             const auto park_result = t.park_until(deadline);
             primitive_lock.lock();
 
+            // Claims are finalized by the primitive before the waiter is unparked.
             if (waiter.claimed) {
                 t.leave_wait();
                 return waiter.error;
+            }
+            if (t.check_wait_interrupt(false) == WaitInterrupt::stop) {
+                remove(&waiter);
+                t.leave_wait();
+                return std::unexpected{ ExitSignal{} };
             }
             if (park_result == decltype(park_result)::timed_out) {
                 remove(&waiter);
@@ -158,26 +170,14 @@ public:
                 return SCE_KERNEL_ERROR_WAIT_TIMEOUT;
             }
 
-            bool run_callbacks = false;
-            bool should_bail = false;
-            {
-                std::lock_guard<std::mutex> lock(t.mutex);
-                should_bail = t.stop_requested_locked();
-                if (cb) {
-                    if (!should_bail && t.callbacks_pending) {
-                        t.callbacks_pending = false;
-                        run_callbacks = true;
-                    }
-                }
-            }
-
-            if (should_bail) {
+            const WaitInterrupt wait_interrupt = t.check_wait_interrupt(cb);
+            if (wait_interrupt == WaitInterrupt::stop) {
                 remove(&waiter);
                 t.leave_wait();
                 return std::unexpected{ ExitSignal{} };
             }
 
-            if (run_callbacks) {
+            if (wait_interrupt == WaitInterrupt::callbacks) {
                 t.leave_wait();
                 while (true) {
                     primitive_lock.unlock();
@@ -186,20 +186,21 @@ public:
 
                     if (waiter.claimed)
                         return waiter.error;
-
-                    bool callbacks_pending = false;
-                    {
-                        std::lock_guard<std::mutex> lock(t.mutex);
-                        if (t.stop_requested_locked()) {
-                            remove(&waiter);
-                            return std::unexpected{ ExitSignal{} };
-                        }
-                        if (cb && t.callbacks_pending) {
-                            t.callbacks_pending = false;
-                            callbacks_pending = true;
-                        }
+                    if (t.check_wait_interrupt(false) == WaitInterrupt::stop) {
+                        remove(&waiter);
+                        return std::unexpected{ ExitSignal{} };
                     }
-                    if (!callbacks_pending)
+                    if (std::chrono::steady_clock::now() >= deadline) {
+                        remove(&waiter);
+                        return SCE_KERNEL_ERROR_WAIT_TIMEOUT;
+                    }
+
+                    const WaitInterrupt callback_interrupt = t.check_wait_interrupt(cb);
+                    if (callback_interrupt == WaitInterrupt::stop) {
+                        remove(&waiter);
+                        return std::unexpected{ ExitSignal{} };
+                    }
+                    if (callback_interrupt != WaitInterrupt::callbacks)
                         break;
                 }
                 t.enter_wait(info);

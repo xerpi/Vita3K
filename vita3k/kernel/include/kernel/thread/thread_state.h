@@ -76,18 +76,11 @@ enum class GuestCallError {
 
 using GuestCallResult = std::expected<uint32_t, GuestCallError>;
 
-// Queued on the target's wait_thread_end_joiners while a waiter is parked in
-// sceKernelWaitThreadEnd[CB].
-struct WaitThreadEndJoinerEntry {
-    SceInt32 returned_value = 0;
-};
-
 struct ThreadState {
     enum class ParkResult {
         woken,
         timed_out,
     };
-
     // Immutable after init().
     SceUID id;
     char name[SCE_UID_NAMELEN + 1]{};
@@ -119,15 +112,8 @@ struct ThreadState {
     // Entry return value / exit status (guest r0).
     uint32_t returned_value = 0;
 
-    // A sceKernelSignal is pending for this thread.
-    bool signal_pending = false;
-    // A registered callback has a coalesced notification waiting.
-    bool callbacks_pending = false;
-
     // Callbacks created on this thread.
     std::list<CallbackPtr> callbacks;
-    // Threads parked in sceKernelWaitThreadEnd[CB] on this one.
-    WaitQueue<void, WaitThreadEndJoinerEntry> wait_thread_end_joiners;
 
     ThreadState() = delete;
     explicit ThreadState(SceUID id, KernelState &kernel, MemState &mem);
@@ -152,16 +138,24 @@ struct ThreadState {
     // Any host thread: run a guest function on this dormant thread and wait for the result.
     GuestCallResult call_guest_on_thread(Address pc, GuestArgs args);
 
+    // Signal wait/notify operations for sceKernelWaitSignal[CB] / sceKernelSendSignal.
+    WaitResult wait_for_signal(Deadline deadline, bool callback_aware);
+    SceInt32 send_signal();
+    // Thread-owned waits with callback-aware variants.
+    WaitResult delay_until(Deadline deadline, bool callback_aware);
+    WaitResult wait_for_thread_end(ThreadStatePtr waiter, SceInt32 *status, SceUInt32 *timeout, bool callback_aware);
+
     // Enters the waiting state. Returns the priority snapshot for WaitQueue entries.
     int enter_wait(WaitInfo info);
     void leave_wait();
+    // Checks stop/callback interrupts at a wait boundary, consuming callback notifications.
+    WaitInterrupt check_wait_interrupt(bool callback_aware);
 
     // Runs this thread's pending callbacks. Returns the number dispatched.
     uint32_t process_callbacks();
-
+    void notify_callbacks_pending();
     // Parks this thread until unparked or the deadline elapses.
     ParkResult park_until(std::chrono::steady_clock::time_point deadline);
-    void park() { park_until(std::chrono::steady_clock::time_point::max()); }
     void unpark();
 
     // Debugger pause / resume.
@@ -177,21 +171,27 @@ struct ThreadState {
     std::string log_stack_traceback() const;
 
 private:
+    struct WaitThreadEndJoinerEntry {
+        SceInt32 returned_value = 0;
+    };
+
     struct QueuedGuestCall {
         Address pc = 0;
         GuestArgs args;
         // Fire thread start/end events (thread entry only).
         bool fire_events = false;
-        bool completed = false;
-        GuestCallResult result = std::unexpected{ GuestCallError::terminated };
+        // Non-owning: points to call_guest_on_thread's stack completion while that caller waits.
+        std::optional<GuestCallResult> *completion = nullptr;
     };
-    using QueuedGuestCallPtr = std::shared_ptr<QueuedGuestCall>;
 
     void raise_wait_thread_end_joiners();
     void push_arguments(const std::vector<uint32_t> &args);
     void dispatch_abort(CPUState &cpu);
     // Loads the initial context and writes pc + args for a guest entry.
     void apply_guest_args(Address pc, const GuestArgs &args);
+    // Queues a top-level guest call and marks the dormant thread runnable. Caller must hold mutex.
+    void queue_guest_call_locked(QueuedGuestCall call);
+    void complete_guest_call_locked(QueuedGuestCall &call, GuestCallResult result);
     // Completes the pending call with an error (teardown). Caller must hold mutex.
     void complete_pending_guest_call_locked(GuestCallError error);
     // Applies args, fires the start event, runs the guest, fires the end event,
@@ -218,11 +218,17 @@ private:
     std::optional<SelfExitRequest> exit_request;
     // External teardown.
     bool host_thread_exit_requested = false;
+    // A sceKernelSignal is pending for this thread.
+    bool signal_pending = false;
+    // A registered callback has a coalesced notification waiting.
+    bool callbacks_pending = false;
+    // Threads parked in sceKernelWaitThreadEnd[CB] on this one.
+    WaitQueue<void, WaitThreadEndJoinerEntry> wait_thread_end_joiners;
 
-    // Signals lifecycle transitions to the host loop and call_guest_on_thread waiters.
-    std::condition_variable lifecycle_cv;
+    // Signals state changes that unblock the host loop.
+    std::condition_variable state_cv;
     // Guest call awaiting pickup by run_loop, or null.
-    QueuedGuestCallPtr pending_guest_call;
+    std::optional<QueuedGuestCall> pending_guest_call;
 
     // Separate from `mutex`: signalers can unpark without taking thread.mutex.
     std::mutex park_mutex;
