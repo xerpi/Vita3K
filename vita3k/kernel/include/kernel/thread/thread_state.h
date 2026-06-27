@@ -28,6 +28,7 @@
 #include <condition_variable>
 #include <expected>
 #include <list>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -184,6 +185,7 @@ private:
         bool completed = false;
         GuestCallResult result = std::unexpected{ GuestCallError::terminated };
     };
+    using QueuedGuestCallPtr = std::shared_ptr<QueuedGuestCall>;
 
     void raise_wait_thread_end_joiners();
     void push_arguments(const std::vector<uint32_t> &args);
@@ -219,10 +221,8 @@ private:
 
     // Signals lifecycle transitions to the host loop and call_guest_on_thread waiters.
     std::condition_variable lifecycle_cv;
-    // Descriptor for the thread's own entry point (start).
-    QueuedGuestCall entry_call;
     // Guest call awaiting pickup by run_loop, or null.
-    QueuedGuestCall *pending_guest_call = nullptr;
+    QueuedGuestCallPtr pending_guest_call;
 
     // Separate from `mutex`: signalers can unpark without taking thread.mutex.
     std::mutex park_mutex;

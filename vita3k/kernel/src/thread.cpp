@@ -158,8 +158,8 @@ int ThreadState::start(SceSize arglen, Ptr<void> argp, bool fire_start) {
         if (status != ThreadStatus::dormant)
             return SCE_KERNEL_ERROR_RUNNING;
 
-        entry_call = { .pc = entry_point, .args = ArglenArgs{ arglen, argp }, .fire_events = fire_start };
-        pending_guest_call = &entry_call;
+        pending_guest_call = std::make_shared<QueuedGuestCall>(
+            QueuedGuestCall{ .pc = entry_point, .args = ArglenArgs{ arglen, argp }, .fire_events = fire_start });
         is_suspended = std::exchange(kernel.debugger.wait_for_debugger, false);
         exit_request.reset();
         set_status_locked(ThreadStatus::running);
@@ -365,7 +365,7 @@ void ThreadState::run_loop() {
     } cpu_state_guard;
 
     while (true) {
-        QueuedGuestCall *call = nullptr;
+        QueuedGuestCallPtr call;
         {
             std::unique_lock<std::mutex> lock(mutex);
             lifecycle_cv.wait(lock, [&] {
@@ -377,7 +377,7 @@ void ThreadState::run_loop() {
                 lifecycle_cv.notify_all();
                 break;
             }
-            call = std::exchange(pending_guest_call, nullptr);
+            call = std::exchange(pending_guest_call, {});
         }
 
         if (execute_run(*call))
@@ -459,11 +459,12 @@ void ThreadState::complete_pending_guest_call_locked(GuestCallError error) {
         return;
     pending_guest_call->result = std::unexpected{ error };
     pending_guest_call->completed = true;
-    pending_guest_call = nullptr;
+    pending_guest_call.reset();
 }
 
 GuestCallResult ThreadState::call_guest_on_thread(Address pc, GuestArgs args) {
-    QueuedGuestCall call{ .pc = pc, .args = std::move(args) };
+    QueuedGuestCallPtr call = std::make_shared<QueuedGuestCall>(
+        QueuedGuestCall{ .pc = pc, .args = std::move(args) });
 
     std::unique_lock<std::mutex> lock(mutex);
     if (host_thread_exit_requested)
@@ -471,12 +472,12 @@ GuestCallResult ThreadState::call_guest_on_thread(Address pc, GuestArgs args) {
     if (status != ThreadStatus::dormant)
         return std::unexpected{ GuestCallError::not_dormant };
 
-    pending_guest_call = &call;
+    pending_guest_call = call;
     exit_request.reset();
     set_status_locked(ThreadStatus::running);
     lifecycle_cv.notify_all();
-    lifecycle_cv.wait(lock, [&] { return call.completed; });
-    return call.result;
+    lifecycle_cv.wait(lock, [&] { return call->completed; });
+    return call->result;
 }
 
 ThreadState::ThreadState(SceUID id, KernelState &kernel, MemState &mem)
