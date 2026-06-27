@@ -85,9 +85,11 @@ EXPORT(SceInt32, __sceKernelCreateLwMutex, Ptr<SceKernelLwMutexWork> workarea, c
     if ((attr & SCE_KERNEL_ATTR_OPENABLE) && std::strlen(name) > SCE_UID_NAMELEN)
         return RET_ERROR(SCE_KERNEL_ERROR_UID_NAME_TOO_LONG);
 
+    const ThreadStatePtr initial_owner = emuenv.kernel.get_thread(thread_id);
     const SceUID uid = create_sync_object<LwMutex>(emuenv.kernel, emuenv.kernel.lwmutexes,
-        name, attr, init_count, emuenv.kernel.get_thread(thread_id), workarea);
+        name, attr, init_count, initial_owner, workarea);
     auto *wa = workarea.get(emuenv.mem);
+    wa->owner = (init_count > 0 && initial_owner) ? initial_owner->id : 0;
     wa->uid = uid;
     wa->attr = attr;
     wa->lockCount = init_count;
@@ -630,8 +632,8 @@ EXPORT(int, _sceKernelGetTimerTime) {
     return UNIMPLEMENTED();
 }
 
-EXPORT(int, _sceKernelLockLwMutex, Ptr<SceKernelLwMutexWork> workarea, int lock_count, unsigned int *ptimeout) {
-    TRACY_FUNC(_sceKernelLockLwMutex, workarea, lock_count, ptimeout);
+static SceInt32 lock_lw_mutex(EmuEnvState &emuenv, SceUID thread_id, const char *export_name,
+    Ptr<SceKernelLwMutexWork> workarea, int lock_count, SceUInt32 *timeout, bool cb) {
     if (!workarea)
         return RET_ERROR(SCE_KERNEL_ERROR_INVALID_ARGUMENT);
 
@@ -639,8 +641,18 @@ EXPORT(int, _sceKernelLockLwMutex, Ptr<SceKernelLwMutexWork> workarea, int lock_
     auto mutex = lock_and_find(lwmutexid, emuenv.kernel.lwmutexes, emuenv.kernel.mutex);
     if (!mutex)
         return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_LW_MUTEX_ID);
-    const Deadline deadline = deadline_from(ptimeout);
-    return unwrap_or_bail(mutex->lock(emuenv.kernel.get_thread(thread_id), lock_count, deadline, emuenv.mem, false), ptimeout, deadline);
+    const Deadline deadline = deadline_from(timeout);
+    return unwrap_or_bail(mutex->lock(emuenv.kernel.get_thread(thread_id), lock_count, deadline, emuenv.mem, cb), timeout, deadline);
+}
+
+EXPORT(int, _sceKernelLockLwMutex, Ptr<SceKernelLwMutexWork> workarea, int lock_count, unsigned int *ptimeout) {
+    TRACY_FUNC(_sceKernelLockLwMutex, workarea, lock_count, ptimeout);
+    return lock_lw_mutex(emuenv, thread_id, export_name, workarea, lock_count, ptimeout, false);
+}
+
+EXPORT(SceInt32, _sceKernelLockLwMutexCB, Ptr<SceKernelLwMutexWork> workarea, SceInt32 lock_count, SceUInt32 *pTimeout) {
+    TRACY_FUNC(_sceKernelLockLwMutexCB, workarea, lock_count, pTimeout);
+    return lock_lw_mutex(emuenv, thread_id, export_name, workarea, lock_count, pTimeout, true);
 }
 
 EXPORT(int, _sceKernelLockMutex, SceUID mutexid, int lock_count, unsigned int *timeout) {
@@ -1008,25 +1020,51 @@ static WaitResult wait_signal(ThreadStatePtr thread, Deadline deadline,
     thread->enter_wait(info);
     while (true) {
         bool run_callbacks = false;
+        bool should_bail = false;
+        bool signal_pending = false;
         {
             std::lock_guard lock(thread->mutex);
-            if (thread->stop_requested_locked()) {
-                thread->leave_wait();
-                return std::unexpected{ ExitSignal{} };
-            }
-            if (thread->signal_pending) {
+            should_bail = thread->stop_requested_locked();
+            if (!should_bail && thread->signal_pending) {
                 thread->signal_pending = false;
-                thread->leave_wait();
-                return SCE_KERNEL_OK;
+                signal_pending = true;
             }
-            if (cb && thread->callbacks_pending) {
+            if (!should_bail && !signal_pending && cb && thread->callbacks_pending) {
                 thread->callbacks_pending = false;
                 run_callbacks = true;
             }
         }
+        if (should_bail) {
+            thread->leave_wait();
+            return std::unexpected{ ExitSignal{} };
+        }
+        if (signal_pending) {
+            thread->leave_wait();
+            return SCE_KERNEL_OK;
+        }
         if (run_callbacks) {
             thread->leave_wait();
-            thread->process_callbacks();
+            while (true) {
+                thread->process_callbacks();
+                bool callbacks_pending = false;
+                bool post_callback_signal = false;
+                {
+                    std::lock_guard lock(thread->mutex);
+                    if (thread->stop_requested_locked())
+                        return std::unexpected{ ExitSignal{} };
+                    if (thread->signal_pending) {
+                        thread->signal_pending = false;
+                        post_callback_signal = true;
+                    } else if (cb && thread->callbacks_pending) {
+                        thread->callbacks_pending = false;
+                        callbacks_pending = true;
+                    }
+                }
+                if (post_callback_signal)
+                    return SCE_KERNEL_OK;
+                if (!callbacks_pending)
+                    break;
+            }
             thread->enter_wait(info);
             continue;
         }
@@ -1293,16 +1331,18 @@ static WaitResult delay_thread(ThreadStatePtr thread, Deadline deadline,
         const auto park_result = thread->park_until(deadline);
 
         bool run_callbacks = false;
+        bool should_bail = false;
         {
             std::lock_guard lock(thread->mutex);
-            if (thread->stop_requested_locked()) {
-                thread->leave_wait();
-                return std::unexpected{ ExitSignal{} };
-            }
-            if (cb && thread->callbacks_pending) {
+            should_bail = thread->stop_requested_locked();
+            if (!should_bail && cb && thread->callbacks_pending) {
                 thread->callbacks_pending = false;
                 run_callbacks = true;
             }
+        }
+        if (should_bail) {
+            thread->leave_wait();
+            return std::unexpected{ ExitSignal{} };
         }
         if (park_result == ThreadState::ParkResult::timed_out) {
             thread->leave_wait();
@@ -1310,7 +1350,21 @@ static WaitResult delay_thread(ThreadStatePtr thread, Deadline deadline,
         }
         if (run_callbacks) {
             thread->leave_wait();
-            thread->process_callbacks();
+            while (true) {
+                thread->process_callbacks();
+                bool callbacks_pending = false;
+                {
+                    std::lock_guard lock(thread->mutex);
+                    if (thread->stop_requested_locked())
+                        return std::unexpected{ ExitSignal{} };
+                    if (cb && thread->callbacks_pending) {
+                        thread->callbacks_pending = false;
+                        callbacks_pending = true;
+                    }
+                }
+                if (!callbacks_pending)
+                    break;
+            }
             thread->enter_wait(info);
         }
         // Otherwise spurious wake. Re-park against the same deadline.

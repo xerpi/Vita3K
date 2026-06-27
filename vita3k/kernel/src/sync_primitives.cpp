@@ -29,9 +29,9 @@ WaitResult Semaphore::wait_for(ThreadStatePtr t, int n, Deadline d, bool cb) {
         return SCE_KERNEL_OK;
     }
     const WaitInfo info = wait_info(cb);
-    WaitEntry e;
-    e.need_count = n;
-    return waiters.enqueue_and_wait(lock, std::move(t), e, d, cb, info);
+    WaitEntry entry;
+    entry.need_count = n;
+    return waiters.enqueue_and_wait(lock, std::move(t), entry, d, cb, info);
 }
 
 SceInt32 Semaphore::poll(int n) {
@@ -99,9 +99,9 @@ WaitResult MutexT<W>::lock(ThreadStatePtr t, int n, Deadline d, MemState &mem, b
     if (const auto r = try_acquire_locked(t, n, mem))
         return *r;
     const WaitInfo info = wait_info(cb);
-    WaitEntry e;
-    e.lock_count = n;
-    return waiters.enqueue_and_wait(lock, std::move(t), e, d, cb, info);
+    WaitEntry entry;
+    entry.lock_count = n;
+    return waiters.enqueue_and_wait(lock, std::move(t), entry, d, cb, info);
 }
 
 template <SyncWeight W>
@@ -173,9 +173,9 @@ WaitResult CondvarT<W>::wait(ThreadStatePtr t, Deadline d, MemState &mem, bool c
         return err;
 
     const WaitInfo info = wait_info(cb);
-    WaitEntry e;
+    WaitEntry entry;
 
-    const WaitResult r = waiters.enqueue_and_wait(lock, t, e, d, cb, info);
+    const WaitResult r = waiters.enqueue_and_wait(lock, t, entry, d, cb, info);
     lock.unlock();
 
     if (!r || *r != SCE_KERNEL_OK)
@@ -244,11 +244,11 @@ WaitResult EventFlag::wait(ThreadStatePtr t, SceUInt32 bits, SceUInt32 wait_mode
         return SCE_KERNEL_OK;
     }
     const WaitInfo info = wait_info(cb);
-    WaitEntry e;
-    e.bit_pattern = bits;
-    e.wait_mode = wait_mode;
-    e.out_bits = p_result;
-    const WaitResult r = waiters.enqueue_and_wait(lock, std::move(t), e, d, cb, info);
+    WaitEntry entry;
+    entry.bit_pattern = bits;
+    entry.wait_mode = wait_mode;
+    entry.out_bits = p_result;
+    const WaitResult r = waiters.enqueue_and_wait(lock, std::move(t), entry, d, cb, info);
     if (r && *r != SCE_KERNEL_OK && p_result)
         *p_result = pattern;
     return r;
@@ -332,9 +332,9 @@ WaitResult RWLock::lock(ThreadStatePtr t, bool is_write, Deadline d, bool cb) {
     if (const auto r = try_acquire_locked(t, is_write))
         return *r;
     const WaitInfo info = wait_info(cb);
-    WaitEntry e;
-    e.is_write = is_write;
-    return waiters.enqueue_and_wait(lock, std::move(t), e, d, cb, info);
+    WaitEntry entry;
+    entry.is_write = is_write;
+    return waiters.enqueue_and_wait(lock, std::move(t), entry, d, cb, info);
 }
 
 SceInt32 RWLock::try_lock(ThreadStatePtr t, bool is_write) {
@@ -412,12 +412,12 @@ WaitResult SimpleEvent::wait_or_poll(ThreadStatePtr t, SceUInt32 wait_pattern, S
         return SCE_KERNEL_ERROR_EVENT_COND;
 
     const WaitInfo info = wait_info(alertable);
-    WaitEntry e;
-    e.wait_pattern = wait_pattern;
-    e.result_pattern = result_pattern;
-    e.user_data = user_data_out;
+    WaitEntry entry;
+    entry.wait_pattern = wait_pattern;
+    entry.result_pattern = result_pattern;
+    entry.user_data = user_data_out;
 
-    const WaitResult r = waiters.enqueue_and_wait(lock, std::move(t), e, d, alertable, info);
+    const WaitResult r = waiters.enqueue_and_wait(lock, std::move(t), entry, d, alertable, info);
     if (alertable && !r)
         return SCE_KERNEL_OK;
     if (r && *r != SCE_KERNEL_OK) {
@@ -507,10 +507,10 @@ std::expected<SceSize, ExitSignal> MsgPipe::recv(ThreadStatePtr t, void *p_recv,
     if (no_wait)
         return SceSize{ 0 };
     const WaitInfo info = recv_wait_info(cb);
-    RecvWaitEntry e;
-    e.request_size = ASAP ? 1u : recv_size;
+    RecvWaitEntry entry;
+    entry.request_size = ASAP ? 1u : recv_size;
 
-    const WaitResult r = receivers.enqueue_and_wait(lock, std::move(t), e, d, cb, info);
+    const WaitResult r = receivers.enqueue_and_wait(lock, std::move(t), entry, d, cb, info);
     if (!r)
         return r;
     if (*r != SCE_KERNEL_OK)
@@ -545,10 +545,10 @@ std::expected<SceSize, ExitSignal> MsgPipe::send(ThreadStatePtr t, const void *p
     if (no_wait)
         return SceSize{ 0 };
     const WaitInfo info = send_wait_info(cb);
-    SendWaitEntry e;
-    e.request_size = ASAP ? 1u : send_size;
+    SendWaitEntry entry;
+    entry.request_size = ASAP ? 1u : send_size;
 
-    const WaitResult r = senders.enqueue_and_wait(lock, std::move(t), e, d, cb, info);
+    const WaitResult r = senders.enqueue_and_wait(lock, std::move(t), entry, d, cb, info);
     if (!r)
         return r;
     if (*r != SCE_KERNEL_OK)

@@ -179,15 +179,28 @@ public:
 
             if (run_callbacks) {
                 t.leave_wait();
-                primitive_lock.unlock();
-                t.process_callbacks();
-                primitive_lock.lock();
-                {
-                    std::lock_guard<std::mutex> lock(t.mutex);
-                    if (t.stop_requested_locked()) {
-                        remove(&waiter);
-                        return std::unexpected{ ExitSignal{} };
+                while (true) {
+                    primitive_lock.unlock();
+                    t.process_callbacks();
+                    primitive_lock.lock();
+
+                    if (waiter.claimed)
+                        return waiter.error;
+
+                    bool callbacks_pending = false;
+                    {
+                        std::lock_guard<std::mutex> lock(t.mutex);
+                        if (t.stop_requested_locked()) {
+                            remove(&waiter);
+                            return std::unexpected{ ExitSignal{} };
+                        }
+                        if (cb && t.callbacks_pending) {
+                            t.callbacks_pending = false;
+                            callbacks_pending = true;
+                        }
                     }
+                    if (!callbacks_pending)
+                        break;
                 }
                 t.enter_wait(info);
                 continue;
@@ -265,10 +278,10 @@ private:
 
     // Marks an entry as claimed with the given code and unparks its thread.
     // Caller is responsible for removing the entry from the queue.
-    static void wake(Waiter &e, SceInt32 code) {
-        e.error = code;
-        e.claimed = true;
-        e.thread->unpark();
+    static void wake(Waiter &waiter, SceInt32 code) {
+        waiter.error = code;
+        waiter.claimed = true;
+        waiter.thread->unpark();
     }
 
     WaitOrder order;
