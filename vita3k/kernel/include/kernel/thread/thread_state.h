@@ -149,6 +149,9 @@ struct ThreadState {
     [[nodiscard]] WaitResult run_callbacks();
     // Wakes this thread from wait().
     void wake();
+    // Records the UID of the object whose wait queue holds the thread, or 0 once it left it. Called
+    // by the queue with the object's lock held.
+    void set_queue_object(SceUID object);
     // Shows the thread WAITING while a host call blocks it, such as an audio output, and RUNNING after
     void begin_host_wait();
     void end_host_wait();
@@ -294,6 +297,9 @@ private:
     // Waits
     // What the thread waits on while waiting, empty otherwise
     WaitTarget wait_target;
+    // The UID of the object whose wait queue holds the thread, or 0. Unlike wait_target, it stays
+    // set between two sleeps of the same wait, so a priority change always finds the queue.
+    SceUID queue_object = 0;
     // Set by wake() and consumed by the next wait().
     bool wake_pending = false;
     // A sceKernelSendSignal is pending for this thread.

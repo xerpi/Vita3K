@@ -330,7 +330,7 @@ SceInt32 Timer::wait(const ThreadStatePtr &thread, SceUInt32 wait_pattern, SceUI
     // Like wait_loop(), but the first waiter also wakes when the next event is due. It fires the event
     // then, which gives it to the waiters in queue order, this one included.
     const WaitTarget target{ SCE_KERNEL_WAITTYPE_EVENT, uid, callbacks };
-    WaitQueue<WaitEntry>::Waiter waiter{ .thread = thread, .entry = { wait_pattern, result_pattern, user_data } };
+    WaitQueue<WaitEntry>::Waiter waiter{ .thread = thread, .object = uid, .entry = { wait_pattern, result_pattern, user_data } };
     const Deadline deadline = deadline_from(timeout);
     // The result of the last sleep, then the final result
     WaitResult result = SCE_KERNEL_OK;

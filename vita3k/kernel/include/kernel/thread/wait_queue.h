@@ -39,6 +39,8 @@ class WaitQueue {
 public:
     struct Waiter {
         ThreadStatePtr thread;
+        // The UID of the object the thread waits on, which the thread knows while it is queued
+        SceUID object = 0;
         // The thread's priority, taken when it is queued or requeued
         int priority = 0;
         Entry entry;
@@ -66,7 +68,7 @@ public:
     // thread must be the guest thread making this HLE call.
     // With target.callbacks, the thread runs its notified callbacks while it waits.
     [[nodiscard]] WaitResult wait(std::unique_lock<std::mutex> &lock, const ThreadStatePtr &thread, WaitTarget target, Entry entry, Deadline deadline) {
-        Waiter waiter{ .thread = thread, .entry = std::move(entry) };
+        Waiter waiter{ .thread = thread, .object = target.id, .entry = std::move(entry) };
         waiter.priority = waiter.thread->get_priority();
         push(waiter);
         while (true) {
@@ -139,6 +141,7 @@ public:
                 continue;
             }
             it = waiters.erase(it);
+            waiter.thread->set_queue_object(0);
             waiter.result = result;
             waiter.thread->wake();
             ++woken;
@@ -154,11 +157,13 @@ public:
     // Queues a waiter that the caller will block itself. Used by waits that need their own loop.
     void push(Waiter &waiter) {
         waiters.insert(place_for(waiter.priority), &waiter);
+        waiter.thread->set_queue_object(waiter.object);
     }
 
     // Takes a waiter off the queue if it is still on it.
     void remove(Waiter &waiter) {
-        std::erase(waiters, &waiter);
+        if (std::erase(waiters, &waiter))
+            waiter.thread->set_queue_object(0);
     }
 
     // Moves the waiter of thread behind every waiter of the thread's current priority, even if it

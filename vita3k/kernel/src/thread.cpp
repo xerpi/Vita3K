@@ -596,6 +596,11 @@ void ThreadState::wake() {
     wait_cv.notify_all();
 }
 
+void ThreadState::set_queue_object(SceUID object) {
+    const std::lock_guard<std::mutex> lock(mutex);
+    queue_object = object;
+}
+
 bool ThreadState::has_pending_callbacks() {
     const std::lock_guard<std::mutex> lock(mutex);
     return !is_processing_callbacks && callbacks_notified();
@@ -691,10 +696,10 @@ int ThreadState::change_priority(int new_priority) {
     std::unique_lock<std::mutex> lock(mutex);
     const int old_priority = priority;
     set_priority(new_priority);
-    const SceUID wait_id = wait_target.id;
+    const SceUID queued_on = queue_object;
     lock.unlock();
     // The object takes its own lock, and moves the thread only if it still waits on it
-    if (const auto object = std::dynamic_pointer_cast<SyncPrimitive>(kernel.objects.find(wait_id)))
+    if (const auto object = std::dynamic_pointer_cast<SyncPrimitive>(kernel.objects.find(queued_on)))
         object->requeue(*this);
     return old_priority;
 }

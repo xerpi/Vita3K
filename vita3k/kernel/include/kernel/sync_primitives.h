@@ -83,7 +83,7 @@ protected:
     // whether callbacks notified during the wait run before it returns.
     template <typename Entry, typename Attempt>
     [[nodiscard]] WaitResult wait_loop(WaitQueue<Entry> &queue, std::unique_lock<std::mutex> &lock, const ThreadStatePtr &thread, WaitTarget target, Entry entry, SceUInt32 *timeout, CallbacksCheck callbacks_check, Attempt attempt) {
-        typename WaitQueue<Entry>::Waiter waiter{ .thread = thread, .entry = std::move(entry) };
+        typename WaitQueue<Entry>::Waiter waiter{ .thread = thread, .object = target.id, .entry = std::move(entry) };
         const Deadline deadline = deadline_from(timeout);
         // The result of the last sleep, then the final result
         WaitResult result = SCE_KERNEL_OK;
