@@ -39,7 +39,7 @@ class WaitQueue {
 public:
     struct Waiter {
         ThreadStatePtr thread;
-        // Taken when the wait starts, the queue is not reordered if it changes
+        // The thread's priority, taken when it is queued or requeued
         int priority = 0;
         Entry entry;
         // Set by a waker that decided the outcome of the wait
@@ -167,6 +167,20 @@ public:
     // Takes a waiter off the queue if it is still on it.
     void remove(Waiter &waiter) {
         std::erase(waiters, &waiter);
+    }
+
+    // Moves the waiter of thread behind every waiter of the thread's current priority, even if it
+    // didn't change, in a priority queue. Returns whether thread waits in this queue.
+    bool requeue(const ThreadState &thread) {
+        Waiter *const waiter = find_if([&](const Waiter &w) { return w.thread.get() == &thread; });
+        if (!waiter)
+            return false;
+        if (by_priority) {
+            remove(*waiter);
+            waiter->priority = waiter->thread->get_priority();
+            push(*waiter);
+        }
+        return true;
     }
 
 private:

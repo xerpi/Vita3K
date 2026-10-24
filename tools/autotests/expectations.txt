@@ -35,7 +35,7 @@ callback_outer_wake             pass
 callback_outer_wake_more        pass
 callback_outer_wake_send        pass
 callback_owner_end              pass
-callback_priority_requeue       fail     # no requeue on a priority change
+callback_priority_requeue       pass
 callback_requeue_order          pass
 callback_retake                 pass
 callback_retake_more            pass
@@ -63,7 +63,7 @@ cond_delete_relock              fail     # a condition or a mutex deleted after 
 cond_errors                     fail     # close, signal to a thread errors, create attributes, open with a NULL name
 cond_mutex_delete               pass
 cond_mutex_delete_wakes         fail     # a mutex delete ends its conditions' waits only at their timeout
-cond_relock_requeue             fail     # a condition waiter taking its mutex back isn't requeued on a priority change
+cond_relock_requeue             pass
 cond_rwlock_edges               pass
 cond_semantics                  pass
 cond_signal                     pass
@@ -96,7 +96,7 @@ event_flag_hold_callbacks       pass
 event_flag_hold_leak            pass
 event_flag_hold_take            pass
 event_flag_multi_waiters        pass
-event_flag_requeue_clear        fail     # no requeue on a priority change
+event_flag_requeue_clear        pass
 event_flag_single_waiter        pass
 event_flag_wait_out_bits        pass
 event_flag_waits                pass
@@ -139,7 +139,7 @@ local_ready_requeue             fail     # threads are never READY or STANDBY
 lowered_to_shared               fail     # threads ignore their core
 lw_cond                         pass
 lw_cond_errors                  fail     # create checks of the attribute, a NULL mutex and a NULL work area, a signal to thread 0
-lw_cond_relock_requeue          fail     # a lightweight condition waiter taking its mutex back isn't requeued on a priority change
+lw_cond_relock_requeue          pass
 lw_cond_semantics               pass
 lw_info_by_id_uid               fail     # the uid the lightweight condition variable info by UID reports
 lw_mutex                        pass
@@ -191,12 +191,12 @@ msgpipe_failed_sizes            pass
 msgpipe_modes                   pass
 msgpipe_order                   pass
 msgpipe_partial_head_order      pass
-msgpipe_partial_head_rejoin     fail     # no requeue on a priority change
+msgpipe_partial_head_rejoin     pass
 msgpipe_peek_stale              fail     # a send to a DONT_REMOVE receive leaves the pipe's bytes out of step
 msgpipe_receive_sender_stays    pass
 msgpipe_receiver_leaves         pass
-msgpipe_receiver_requeue        fail     # no requeue on a priority change
-msgpipe_sender_requeue          fail     # no requeue on a priority change
+msgpipe_receiver_requeue        pass
+msgpipe_sender_requeue          pass
 msgpipe_try_receive_senders     pass
 msgpipe_vectors                 pass
 msgpipe_waits                   pass
@@ -237,10 +237,10 @@ priority_change_args            pass
 priority_change_preempt         fail     # threads ignore their core and priority
 priority_inheritance            fail     # threads ignore their core and priority
 priority_queue_areas            fail     # threads ignore their core and priority
-priority_requeue_others         fail     # waiters keep their place in a priority queue when their priority changes
+priority_requeue_others         pass
 queue_area_bounds               fail     # threads ignore their core and priority
-queue_order                     fail     # priority changes while waiting
-queue_order_matrix              fail     # a waiter whose priority changes keeps its place in a priority queue
+queue_order                     pass
+queue_order_matrix              pass
 readonly_in                     fail     # timer and simple event names, the mutex ceiling from its option struct
 readonly_out_info               fail     # no write check on output parameters
 readonly_out_values             fail     # no write check on output parameters
@@ -253,7 +253,7 @@ release_preempt                 fail     # threads ignore their core and priorit
 release_preempt_more            fail     # wakes don't preempt the waker
 remote_change_preempt           fail     # threads are never STANDBY and ignore their core
 remote_priority_change          fail     # threads ignore their core and priority
-requeue_lower_same              fail     # no requeue on a priority change
+requeue_lower_same              pass
 rtc                             crash    # RTC date range checks, a NULL tick
 rwlock                          pass
 rwlock_attr_bits                pass
@@ -262,17 +262,17 @@ rwlock_cancel_wake_order        skip     # threads ignore their core and priorit
 rwlock_counts                   pass
 rwlock_errors                   fail     # closing unknown UIDs
 rwlock_reader_again             pass
-rwlock_requeue_writers          fail     # no requeue on a priority change
+rwlock_requeue_writers          pass
 rwlock_wake_counts              fail     # woken threads aren't READY before they run
 rwlock_wake_order               pass
 savedata_slot_id                fail     # save data slot ID range checks
 self_lower_order                fail     # a thread that lowers itself doesn't go to the head of its new priority
 self_priority_drop              fail     # threads ignore their core and priority
 sema_errors                     crash    # closing unknown UIDs, a NULL name
-sema_head_leaves                fail     # a head that leaves by a priority drop doesn't let the next waiter take
+sema_head_leaves                pass
 sema_mutex_edges                pass
 sema_poll_negative              pass
-sema_requeue_wake               fail     # no requeue on a priority change
+sema_requeue_wake               pass
 sema_take_past_waiters          pass
 sema_waits                      pass
 semaphore                       pass
@@ -370,7 +370,7 @@ timer_info_cancel               pass
 timer_modes                     pass
 timer_oneshot_refire            pass
 timer_period                    skip     # timing, how evenly a repeating timer fires
-timer_requeue                   fail     # no requeue on a priority change
+timer_requeue                   pass
 timer_wait_no_event             pass
 timer_wait_pattern              pass
 timer_waiter_handoff            pass
@@ -392,7 +392,7 @@ wait_delete_timeout             pass
 wait_info_retries               fail     # a woken thread reports RUNNING instead of READY
 wait_order                      pass
 wait_own_end                    pass
-wait_priority_change            fail     # a waiter changed to any priority goes behind the others at it
+wait_priority_change            pass
 wait_zero_timeout               fail     # multiple event waits with a timeout of 0
 wake_all_order                  fail     # threads ignore their core and priority
 wake_batch_cores                fail     # threads ignore their core

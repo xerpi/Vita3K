@@ -244,6 +244,12 @@ SceInt32 Event::info(SceKernelEventInfo &info) {
     return SCE_KERNEL_OK;
 }
 
+void Event::requeue(const ThreadState &thread) {
+    const auto guard = lock();
+    if (guard && waiters.requeue(thread))
+        serve();
+}
+
 // *********
 // * Timer *
 // *********
@@ -685,6 +691,12 @@ void Mutex::release_ended_owner(const ThreadState &thread) {
     serve();
 }
 
+void Mutex::requeue(const ThreadState &thread) {
+    const auto guard = lock();
+    if (guard && waiters.requeue(thread))
+        serve();
+}
+
 void Mutex::serve() {
     if (owner)
         return;
@@ -895,6 +907,12 @@ SceInt32 RWLock::info(SceKernelRWLockInfo &info) const {
     return SCE_KERNEL_OK;
 }
 
+void RWLock::requeue(const ThreadState &thread) {
+    const auto guard = lock();
+    if (guard && waiters.requeue(thread))
+        serve();
+}
+
 void RWLock::serve() {
     if (write_owner)
         return;
@@ -1051,6 +1069,12 @@ SceInt32 Semaphore::info(SceKernelSemaInfo &info) const {
     return SCE_KERNEL_OK;
 }
 
+void Semaphore::requeue(const ThreadState &thread) {
+    const auto guard = lock();
+    if (guard && waiters.requeue(thread))
+        serve();
+}
+
 // **********************
 // * Condition Variable *
 // **********************
@@ -1127,6 +1151,12 @@ SceInt32 Condvar::signal(SignalTarget target) {
 SceUInt32 Condvar::num_waiters() const {
     const auto guard = lock();
     return guard ? static_cast<SceUInt32>(waiters.size()) : 0;
+}
+
+void Condvar::requeue(const ThreadState &thread) {
+    const auto guard = lock();
+    if (guard && waiters.requeue(thread))
+        serve();
 }
 
 SceInt32 HeavyCond::info(SceKernelCondInfo &info) const {
@@ -1286,6 +1316,12 @@ void EventFlag::release_ended_holder(const ThreadState &thread) {
         return;
     holder = 0;
     holds = 0;
+}
+
+void EventFlag::requeue(const ThreadState &thread) {
+    const auto guard = lock();
+    if (guard && waiters.requeue(thread))
+        serve();
 }
 
 SceInt32 EventFlag::set(SceUInt32 pattern) {
@@ -1693,4 +1729,10 @@ SceInt32 MsgPipe::info(SceKernelMppInfo &info) const {
     info.numSendWaitThreads = static_cast<SceInt32>(senders.size());
     info.numReceiveWaitThreads = static_cast<SceInt32>(receivers.size());
     return SCE_KERNEL_OK;
+}
+
+void MsgPipe::requeue(const ThreadState &thread) {
+    const auto guard = lock();
+    if (guard && (senders.requeue(thread) || receivers.requeue(thread)))
+        serve();
 }

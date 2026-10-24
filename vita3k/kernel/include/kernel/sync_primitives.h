@@ -34,6 +34,10 @@ public:
     // Returns the error for a name the guest can't use, or 0.
     static SceInt32 check_name(const char *name, SceUInt32 attr);
 
+    // Moves thread to the place of its new priority if it waits on the object, then serves the
+    // waiters.
+    virtual void requeue(const ThreadState &thread) {}
+
     const SceUInt32 attr;
     const std::string name;
 
@@ -159,6 +163,7 @@ public:
     SceInt32 get_pattern(SceUInt32 &result);
     // Fills info with what the event's info reports, or returns UNKNOWN_EVENT_ID if it was deleted.
     SceInt32 info(SceKernelEventInfo &info);
+    void requeue(const ThreadState &thread) override;
 
 protected:
     Event(SceUInt32 attr, const char *name, SceUInt32 init_pattern, SceUInt64 init_user_data);
@@ -280,6 +285,7 @@ public:
     SceInt32 cancel(SceInt32 set_count, SceUInt32 *num_wait_threads);
     // Fills info with what the semaphore's info reports, or returns UNKNOWN_SEMA_ID if it was deleted.
     SceInt32 info(SceKernelSemaInfo &info) const;
+    void requeue(const ThreadState &thread) override;
 
 private:
     struct WaitEntry {
@@ -318,6 +324,7 @@ public:
     SceInt32 cancel(const ThreadStatePtr &thread, SceInt32 new_count, SceUInt32 *num_wait_threads);
     // Gives the mutex to its next waiter if thread, which is ending, owns it.
     void release_ended_owner(const ThreadState &thread);
+    void requeue(const ThreadState &thread) override;
 
 protected:
     struct WaitEntry {
@@ -385,6 +392,7 @@ public:
     void release_ended_writer(const ThreadState &thread);
     // Fills info with what the rwlock's info reports, or returns UNKNOWN_RW_LOCK_ID if it was deleted.
     SceInt32 info(SceKernelRWLockInfo &info) const;
+    void requeue(const ThreadState &thread) override;
 
 private:
     struct WaitEntry {
@@ -433,6 +441,7 @@ public:
     SceInt32 info(SceKernelEventFlagInfo &info) const;
     // Drops the holds of thread, which is ending.
     void release_ended_holder(const ThreadState &thread);
+    void requeue(const ThreadState &thread) override;
 
 private:
     struct WaitEntry {
@@ -498,6 +507,7 @@ public:
     SceInt32 signal(SignalTarget target);
     // Returns how many threads wait on the condition variable, 0 once it was deleted.
     SceUInt32 num_waiters() const;
+    void requeue(const ThreadState &thread) override;
 
 protected:
     // Guarded by the lock, read by the info of a condition variable
@@ -554,6 +564,7 @@ public:
     // Fills info with what the message pipe's info reports, or returns UNKNOWN_MSG_PIPE_ID if it was
     // deleted.
     SceInt32 info(SceKernelMppInfo &info) const;
+    void requeue(const ThreadState &thread) override;
 
 private:
     // How far a send or a receive got, kept in its waiter so that whoever moves bytes carries it on

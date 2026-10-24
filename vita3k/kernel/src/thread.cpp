@@ -688,9 +688,14 @@ int ThreadState::get_priority() const {
 }
 
 int ThreadState::change_priority(int new_priority) {
-    const std::lock_guard<std::mutex> lock(mutex);
+    std::unique_lock<std::mutex> lock(mutex);
     const int old_priority = priority;
     set_priority(new_priority);
+    const SceUID wait_id = wait_target.id;
+    lock.unlock();
+    // The object takes its own lock, and moves the thread only if it still waits on it
+    if (const auto object = std::dynamic_pointer_cast<SyncPrimitive>(kernel.objects.find(wait_id)))
+        object->requeue(*this);
     return old_priority;
 }
 
