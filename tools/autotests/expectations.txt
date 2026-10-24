@@ -331,7 +331,7 @@ thread_limits                   fail     # no limit on the number of threads
 thread_names                    pass
 thread_nouse_vfp                fail     # a waiting thread keeps d16 across its wait
 thread_null_name                pass
-thread_opt_param                fail     # thread option struct size and attribute checks
+thread_opt_param                pass
 thread_priority                 pass
 thread_ready_status             fail     # a thread that can run but doesn't reports RUNNING instead of READY
 thread_restart                  fail     # the stack free size of a thread started again
