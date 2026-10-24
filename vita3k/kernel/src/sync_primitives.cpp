@@ -55,8 +55,7 @@ SimpleEvent::SimpleEvent(SceUInt32 attr, const char *name, SceUInt32 init_patter
 SceInt32 SimpleEvent::check_create(const char *name, SceUInt32 attr, SceUInt32 init_pattern) {
     if (const SceInt32 error = check_name(name, attr))
         return error;
-    // The notify attribute is accepted and reported, nothing reads it
-    if (attr & ~(SCE_KERNEL_EVENT_ATTR_AUTO_RESET | SCE_KERNEL_ATTR_TH_PRIO | SCE_KERNEL_ATTR_OPENABLE | SCE_KERNEL_ATTR_NOTIFY_CB_WAKEUP_ONLY))
+    if (attr & ~create_attrs)
         return SCE_KERNEL_ERROR_ILLEGAL_ATTR;
     if (init_pattern & ~SCE_KERNEL_EVENT_USER_DEFINED_MASK)
         return SCE_KERNEL_ERROR_ILLEGAL_PATTERN;
@@ -262,6 +261,14 @@ inline uint64_t get_current_time() {
 
 Timer::Timer(SceUInt32 attr, const char *name, SceUID creator)
     : WithUidClass(attr, name, 0, system_event_user_data(creator)) {}
+
+SceInt32 Timer::check_create(const char *name, SceUInt32 attr) {
+    if (const SceInt32 error = check_name(name, attr))
+        return error;
+    if (attr & ~create_attrs)
+        return SCE_KERNEL_ERROR_ILLEGAL_ATTR;
+    return SCE_KERNEL_OK;
+}
 
 // A timer event is due at least this long after it was queued or after the event before it
 constexpr uint64_t TIMER_EVENT_FLOOR = 200;
@@ -533,10 +540,10 @@ Mutex::Mutex(SceUInt32 attr, const char *name, SceInt32 init_count, ThreadStateP
     , lock_count(init_count)
     , owner(init_count > 0 && thread ? thread->id : 0) {}
 
-SceInt32 Mutex::check_create(const char *name, SceUInt32 attr, SceInt32 init_count, bool kernel) {
+SceInt32 Mutex::check_create(const char *name, SceUInt32 attr, SceUInt32 attrs, SceInt32 init_count) {
     if (const SceInt32 error = check_name(name, attr))
         return error;
-    if (!kernel && attr & ~(SCE_KERNEL_MUTEX_ATTR_RECURSIVE | SCE_KERNEL_MUTEX_ATTR_CEILING | SCE_KERNEL_ATTR_TH_PRIO | SCE_KERNEL_ATTR_OPENABLE))
+    if (attr & ~attrs)
         return SCE_KERNEL_ERROR_ILLEGAL_ATTR;
     if (init_count < 0)
         return SCE_KERNEL_ERROR_ILLEGAL_COUNT;
@@ -1083,6 +1090,14 @@ Condvar::Condvar(SceUInt32 attr, const char *name, MutexPtr associated_mutex)
     : SyncPrimitive(attr, name)
     , associated_mutex(std::move(associated_mutex))
     , waiters(attr) {}
+
+SceInt32 Condvar::check_create(const char *name, SceUInt32 attr) {
+    if (const SceInt32 error = check_name(name, attr))
+        return error;
+    if (attr & ~SCE_KERNEL_ATTR_TH_PRIO)
+        return SCE_KERNEL_ERROR_ILLEGAL_ATTR;
+    return SCE_KERNEL_OK;
+}
 
 void Condvar::on_delete(SceUID) {
     // wait() maps this to the condition's own delete error

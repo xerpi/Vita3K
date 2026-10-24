@@ -166,6 +166,9 @@ public:
     void requeue(const ThreadState &thread) override;
 
 protected:
+    // The attributes a create takes. The notify attribute is accepted and reported, nothing reads it.
+    static constexpr SceUInt32 create_attrs = SCE_KERNEL_EVENT_ATTR_AUTO_RESET | SCE_KERNEL_ATTR_TH_PRIO | SCE_KERNEL_ATTR_OPENABLE | SCE_KERNEL_ATTR_NOTIFY_CB_WAKEUP_ONLY;
+
     Event(SceUInt32 attr, const char *name, SceUInt32 init_pattern, SceUInt64 init_user_data);
 
     struct WaitEntry {
@@ -216,6 +219,9 @@ using EventPtr = std::shared_ptr<Event>;
 class Timer final : public WithUidClass<Event, UidClass::timer> {
 public:
     Timer(SceUInt32 attr, const char *name, SceUID creator);
+
+    // Returns the error a create with these arguments gets, or SCE_KERNEL_OK
+    static SceInt32 check_create(const char *name, SceUInt32 attr);
 
     SceInt32 set_event(SceUID type, SceKernelSysClock interval, SceInt32 repeats);
     SceInt32 wait(const ThreadStatePtr &thread, SceUInt32 wait_pattern, SceUInt32 *result_pattern, SceUInt64 *user_data, SceUInt32 *timeout, bool callbacks);
@@ -312,9 +318,8 @@ public:
     const Ptr<SceKernelLwMutexWork> workarea;
 
     Mutex(SceUInt32 attr, const char *name, SceInt32 init_count, ThreadStatePtr thread, Ptr<SceKernelLwMutexWork> workarea = {});
-    // Returns the error for a name, attributes or count the caller can't use, or 0. Kernel callers may
-    // use attributes games can't.
-    static SceInt32 check_create(const char *name, SceUInt32 attr, SceInt32 init_count, bool kernel);
+    // Returns the error for a name, an attribute outside attrs or a count the caller can't use, or 0
+    static SceInt32 check_create(const char *name, SceUInt32 attr, SceUInt32 attrs, SceInt32 init_count);
 
     SceInt32 acquire(MemState &mem, const ThreadStatePtr &thread, SceInt32 count, SceUInt32 *timeout, bool callbacks);
     // Relocks the mutex after a condition variable wait. No timeout, and target is the reported wait.
@@ -356,6 +361,9 @@ private:
 
 class LwMutex final : public WithUidClass<Mutex, UidClass::lw_mutex> {
 public:
+    // The attributes a game's create takes
+    static constexpr SceUInt32 create_attrs = SCE_KERNEL_MUTEX_ATTR_RECURSIVE | SCE_KERNEL_ATTR_TH_PRIO;
+
     using WithUidClass::WithUidClass;
 
     // Fills info with what the lightweight mutex's info reports, or returns UNKNOWN_LW_MUTEX_ID if it
@@ -365,6 +373,9 @@ public:
 
 class HeavyMutex final : public WithUidClass<Mutex, UidClass::mutex> {
 public:
+    // The attributes a game's create takes
+    static constexpr SceUInt32 create_attrs = SCE_KERNEL_MUTEX_ATTR_RECURSIVE | SCE_KERNEL_MUTEX_ATTR_CEILING | SCE_KERNEL_ATTR_TH_PRIO | SCE_KERNEL_ATTR_OPENABLE;
+
     using WithUidClass::WithUidClass;
 
     // Fills info with what the mutex's info reports, or returns UNKNOWN_MUTEX_ID if it was deleted.
@@ -502,6 +513,9 @@ public:
     const MutexPtr associated_mutex;
 
     Condvar(SceUInt32 attr, const char *name, MutexPtr associated_mutex);
+
+    // Returns the error a create of either kind with these arguments gets, or SCE_KERNEL_OK
+    static SceInt32 check_create(const char *name, SceUInt32 attr);
 
     SceInt32 wait(MemState &mem, const ThreadStatePtr &thread, SceUInt32 *timeout, bool callbacks);
     SceInt32 signal(SignalTarget target);

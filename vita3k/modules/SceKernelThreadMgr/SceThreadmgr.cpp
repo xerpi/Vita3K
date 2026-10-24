@@ -110,7 +110,7 @@ EXPORT(int, __sceKernelCreateLwMutex, Ptr<SceKernelLwMutexWork> workarea, const 
     if (!workarea)
         return RET_ERROR(SCE_KERNEL_ERROR_ILLEGAL_ADDR);
     const int init_count = opt.get(emuenv.mem)->init_count;
-    if (const SceInt32 error = Mutex::check_create(name, attr, init_count, false))
+    if (const SceInt32 error = Mutex::check_create(name, attr, LwMutex::create_attrs, init_count))
         return RET_ERROR(error);
 
     const auto mutex = std::make_shared<LwMutex>(attr, name, init_count, emuenv.kernel.get_thread(thread_id), workarea);
@@ -217,7 +217,7 @@ EXPORT(SceInt32, _sceKernelCancelTimer, SceUID timerId, SceUInt32 *pNumWaitThrea
 
 EXPORT(SceUID, _sceKernelCreateCond, const char *pName, SceUInt32 attr, SceUID mutexId, const SceKernelCondOptParam *pOptParam) {
     TRACY_FUNC(_sceKernelCreateCond, pName, attr, mutexId, pOptParam);
-    if (const SceInt32 error = SyncPrimitive::check_name(pName, attr))
+    if (const SceInt32 error = Condvar::check_create(pName, attr))
         return RET_ERROR(error);
     const MutexPtr mutex = emuenv.kernel.objects.find<HeavyMutex>(mutexId);
     if (!mutex)
@@ -242,7 +242,7 @@ EXPORT(int, _sceKernelCreateLwCond, Ptr<SceKernelLwCondWork> workarea, const cha
         return RET_ERROR(SCE_KERNEL_ERROR_ILLEGAL_ADDR);
     const auto assoc_mutex_uid = opt.get(emuenv.mem)->workarea_mutex.get(emuenv.mem)->uid;
 
-    if (const SceInt32 error = SyncPrimitive::check_name(name, attr))
+    if (const SceInt32 error = Condvar::check_create(name, attr))
         return RET_ERROR(error);
     const MutexPtr mutex = emuenv.kernel.objects.find<LwMutex>(assoc_mutex_uid);
     if (!mutex)
@@ -263,8 +263,11 @@ EXPORT(int, _sceKernelCreateMsgPipeWithLR) {
 
 EXPORT(int, _sceKernelCreateMutex, const char *name, SceUInt attr, int init_count, SceKernelMutexOptParam *opt_param) {
     TRACY_FUNC(_sceKernelCreateMutex, name, attr, init_count, opt_param);
-    if (const SceInt32 error = Mutex::check_create(name, attr, init_count, false))
+    if (const SceInt32 error = Mutex::check_create(name, attr, HeavyMutex::create_attrs, init_count))
         return RET_ERROR(error);
+    // A ceiling's priority comes in the options
+    if ((attr & SCE_KERNEL_MUTEX_ATTR_CEILING) && !opt_param)
+        return RET_ERROR(SCE_KERNEL_ERROR_INVALID_ARGUMENT);
 
     const auto mutex = std::make_shared<HeavyMutex>(attr, name, init_count, emuenv.kernel.get_thread(thread_id));
     return emuenv.kernel.objects.add(mutex, emuenv.kernel.get_next_uid());
@@ -305,7 +308,7 @@ EXPORT(SceUID, _sceKernelCreateSimpleEvent, const char *name, SceUInt32 attr, Sc
 
 EXPORT(int, _sceKernelCreateTimer, const char *name, SceUInt32 attr, const uint32_t *opt_params) {
     TRACY_FUNC(_sceKernelCreateTimer, name, attr, opt_params);
-    if (const SceInt32 error = SyncPrimitive::check_name(name, attr))
+    if (const SceInt32 error = Timer::check_create(name, attr))
         return RET_ERROR(error);
 
     const auto timer = std::make_shared<Timer>(attr, name, thread_id);
