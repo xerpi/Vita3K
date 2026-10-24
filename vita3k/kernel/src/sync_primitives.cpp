@@ -1435,12 +1435,18 @@ void MsgPipe::on_delete(SceUID) {
     receivers.wake_all(SCE_KERNEL_ERROR_WAIT_DELETE);
 }
 
-// The size of all the pieces together
-static uint64_t total_size(std::span<const MsgPipeVector> pieces) {
+// Returns the size of all the pieces together, or the error of the first piece without a buffer,
+// even an empty one, or that takes the size past capacity
+static std::expected<SceSize, SceInt32> pieces_size(std::span<const MsgPipeVector> pieces, std::size_t capacity) {
     uint64_t total = 0;
-    for (const MsgPipeVector &piece : pieces)
+    for (const MsgPipeVector &piece : pieces) {
+        if (!piece.base)
+            return std::unexpected(SCE_KERNEL_ERROR_ILLEGAL_ADDR);
         total += piece.size;
-    return total;
+        if (total > capacity)
+            return std::unexpected(SCE_KERNEL_ERROR_ILLEGAL_SIZE);
+    }
+    return static_cast<SceSize>(total);
 }
 
 MsgPipe::Transfer::Transfer(MemState &mem, std::span<const MsgPipeVector> pieces, SceSize *size, SceSize total, bool full)
@@ -1590,14 +1596,14 @@ SceInt32 MsgPipe::receive(const ThreadStatePtr &thread, MemState &mem, SceUInt32
             thread->process_callbacks();
         return result;
     }
-    const uint64_t total = total_size(pieces);
-    if (total > data_buffer.Capacity())
-        return SCE_KERNEL_ERROR_ILLEGAL_SIZE;
+    const std::expected<SceSize, SceInt32> total = pieces_size(pieces, data_buffer.Capacity());
+    if (!total)
+        return total.error();
 
     auto guard = lock();
     if (!guard)
         return SCE_KERNEL_ERROR_UNKNOWN_MSG_PIPE_ID;
-    Receiver receiver(mem, pieces, size, static_cast<SceSize>(total), wait_mode & SCE_KERNEL_MSG_PIPE_MODE_FULL, wait_mode & SCE_KERNEL_MSG_PIPE_MODE_DONT_REMOVE);
+    Receiver receiver(mem, pieces, size, *total, wait_mode & SCE_KERNEL_MSG_PIPE_MODE_FULL, wait_mode & SCE_KERNEL_MSG_PIPE_MODE_DONT_REMOVE);
     // A receive of nothing ends at once, before any callback runs
     if (receiver.total == 0) {
         receiver.report();
@@ -1626,14 +1632,14 @@ SceInt32 MsgPipe::send(const ThreadStatePtr &thread, MemState &mem, SceUInt32 wa
             thread->process_callbacks();
         return result;
     }
-    const uint64_t total = total_size(pieces);
-    if (total > data_buffer.Capacity())
-        return SCE_KERNEL_ERROR_ILLEGAL_SIZE;
+    const std::expected<SceSize, SceInt32> total = pieces_size(pieces, data_buffer.Capacity());
+    if (!total)
+        return total.error();
 
     auto guard = lock();
     if (!guard)
         return SCE_KERNEL_ERROR_UNKNOWN_MSG_PIPE_ID;
-    Sender sender(mem, pieces, size, static_cast<SceSize>(total), wait_mode & SCE_KERNEL_MSG_PIPE_MODE_FULL);
+    Sender sender(mem, pieces, size, *total, wait_mode & SCE_KERNEL_MSG_PIPE_MODE_FULL);
     // A send of nothing ends at once, before any callback runs
     if (sender.total == 0) {
         sender.report();
@@ -1655,14 +1661,14 @@ SceInt32 MsgPipe::send(const ThreadStatePtr &thread, MemState &mem, SceUInt32 wa
 SceInt32 MsgPipe::try_receive(const ThreadStatePtr &thread, MemState &mem, SceUInt32 wait_mode, std::span<const MsgPipeVector> pieces, SceSize *size) {
     if (!is_msg_pipe_mode(wait_mode))
         return SCE_KERNEL_ERROR_ILLEGAL_MODE;
-    const uint64_t total = total_size(pieces);
-    if (total > data_buffer.Capacity())
-        return SCE_KERNEL_ERROR_ILLEGAL_SIZE;
+    const std::expected<SceSize, SceInt32> total = pieces_size(pieces, data_buffer.Capacity());
+    if (!total)
+        return total.error();
 
     const auto guard = lock();
     if (!guard)
         return SCE_KERNEL_ERROR_UNKNOWN_MSG_PIPE_ID;
-    Receiver receiver(mem, pieces, size, static_cast<SceSize>(total), wait_mode & SCE_KERNEL_MSG_PIPE_MODE_FULL, wait_mode & SCE_KERNEL_MSG_PIPE_MODE_DONT_REMOVE);
+    Receiver receiver(mem, pieces, size, *total, wait_mode & SCE_KERNEL_MSG_PIPE_MODE_FULL, wait_mode & SCE_KERNEL_MSG_PIPE_MODE_DONT_REMOVE);
     // Behind the receivers already waiting, or short of bytes for all of a FULL receive, it fails
     // without writing a size
     if (!receivers.first_for(thread->get_priority()) || (receiver.full && receiver.total > available()))
@@ -1673,14 +1679,14 @@ SceInt32 MsgPipe::try_receive(const ThreadStatePtr &thread, MemState &mem, SceUI
 SceInt32 MsgPipe::try_send(const ThreadStatePtr &thread, MemState &mem, SceUInt32 wait_mode, std::span<const MsgPipeVector> pieces, SceSize *size) {
     if (!is_msg_pipe_mode(wait_mode))
         return SCE_KERNEL_ERROR_ILLEGAL_MODE;
-    const uint64_t total = total_size(pieces);
-    if (total > data_buffer.Capacity())
-        return SCE_KERNEL_ERROR_ILLEGAL_SIZE;
+    const std::expected<SceSize, SceInt32> total = pieces_size(pieces, data_buffer.Capacity());
+    if (!total)
+        return total.error();
 
     const auto guard = lock();
     if (!guard)
         return SCE_KERNEL_ERROR_UNKNOWN_MSG_PIPE_ID;
-    Sender sender(mem, pieces, size, static_cast<SceSize>(total), wait_mode & SCE_KERNEL_MSG_PIPE_MODE_FULL);
+    Sender sender(mem, pieces, size, *total, wait_mode & SCE_KERNEL_MSG_PIPE_MODE_FULL);
     // Behind the senders already waiting, or short of room for all of a FULL send, it fails without
     // writing a size
     if (!senders.first_for(thread->get_priority()) || (sender.full && sender.total > data_buffer.Free()))

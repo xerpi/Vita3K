@@ -238,6 +238,8 @@ EXPORT(SceUID, _sceKernelCreateEventFlag, const char *pName, SceUInt32 attr, Sce
 
 EXPORT(int, _sceKernelCreateLwCond, Ptr<SceKernelLwCondWork> workarea, const char *name, SceUInt attr, Ptr<SceKernelCreateLwCond_opt> opt) {
     TRACY_FUNC(_sceKernelCreateLwCond, workarea, name, attr, opt);
+    if (!workarea || !opt || !opt.get(emuenv.mem)->workarea_mutex)
+        return RET_ERROR(SCE_KERNEL_ERROR_ILLEGAL_ADDR);
     const auto assoc_mutex_uid = opt.get(emuenv.mem)->workarea_mutex.get(emuenv.mem)->uid;
 
     if (const SceInt32 error = SyncPrimitive::check_name(name, attr))
@@ -514,7 +516,7 @@ EXPORT(SceInt32, _sceKernelGetMsgPipeInfo, SceUID msgPipeId, SceKernelMppInfo *p
 EXPORT(int, _sceKernelGetMutexInfo, SceUID mutexId, SceKernelMutexInfo *pInfo) {
     TRACY_FUNC(_sceKernelGetMutexInfo, mutexId, pInfo);
     if (!pInfo)
-        return RET_ERROR(SCE_KERNEL_ERROR_INVALID_ARGUMENT);
+        return RET_ERROR(SCE_KERNEL_ERROR_ILLEGAL_ADDR);
     if (pInfo->size > sizeof(*pInfo))
         return RET_ERROR(SCE_KERNEL_ERROR_NO_MEMORY);
     const std::shared_ptr<HeavyMutex> mutex = emuenv.kernel.objects.find<HeavyMutex>(mutexId);
@@ -1325,8 +1327,10 @@ EXPORT(int, sceKernelCloseTimer) {
 
 EXPORT(SceUID, sceKernelCreateCallback, char *name, SceUInt32 attr, Ptr<SceKernelCallbackFunction> callbackFunc, Ptr<void> pCommon) {
     TRACY_FUNC(sceKernelCreateCallback, name, attr, callbackFunc, pCommon);
-    if (attr || !callbackFunc.address())
+    if (attr)
         return RET_ERROR(SCE_KERNEL_ERROR_ILLEGAL_ATTR);
+    if (!name || !callbackFunc)
+        return RET_ERROR(SCE_KERNEL_ERROR_ILLEGAL_ADDR);
 
     return emuenv.kernel.create_callback(emuenv.kernel.get_thread(thread_id), name, callbackFunc, pCommon);
 }
@@ -1591,13 +1595,18 @@ EXPORT(SceInt32, sceKernelNotifyCallback, SceUID callbackId, SceInt32 notifyArg)
     return SCE_KERNEL_OK;
 }
 
-EXPORT(int, sceKernelOpenCond) {
-    TRACY_FUNC(sceKernelOpenCond);
+EXPORT(int, sceKernelOpenCond, const char *pName) {
+    TRACY_FUNC(sceKernelOpenCond, pName);
+    if (!pName)
+        return RET_ERROR(SCE_KERNEL_ERROR_ILLEGAL_ADDR);
     return UNIMPLEMENTED();
 }
 
 EXPORT(SceUID, sceKernelOpenEventFlag, const char *pName) {
     TRACY_FUNC(sceKernelOpenEventFlag, pName);
+    if (!pName)
+        return RET_ERROR(SCE_KERNEL_ERROR_ILLEGAL_ADDR);
+
     if (strlen(pName) > KERNELOBJECT_MAX_NAME_LENGTH)
         return RET_ERROR(SCE_KERNEL_ERROR_UID_NAME_TOO_LONG);
 
@@ -1612,6 +1621,9 @@ EXPORT(SceUID, sceKernelOpenEventFlag, const char *pName) {
 
 EXPORT(SceUID, sceKernelOpenMsgPipe, const char *pName) {
     TRACY_FUNC(sceKernelOpenMsgPipe, pName);
+    if (!pName)
+        return RET_ERROR(SCE_KERNEL_ERROR_ILLEGAL_ADDR);
+
     if (strlen(pName) > KERNELOBJECT_MAX_NAME_LENGTH)
         return RET_ERROR(SCE_KERNEL_ERROR_UID_NAME_TOO_LONG);
 
@@ -1626,6 +1638,9 @@ EXPORT(SceUID, sceKernelOpenMsgPipe, const char *pName) {
 
 EXPORT(SceUID, sceKernelOpenMutex, const char *pName) {
     TRACY_FUNC(sceKernelOpenMutex, pName);
+    if (!pName)
+        return RET_ERROR(SCE_KERNEL_ERROR_ILLEGAL_ADDR);
+
     if (strlen(pName) > KERNELOBJECT_MAX_NAME_LENGTH)
         return RET_ERROR(SCE_KERNEL_ERROR_UID_NAME_TOO_LONG);
 
@@ -1650,6 +1665,9 @@ EXPORT(int, sceKernelOpenRWLock) {
 
 EXPORT(SceUID, sceKernelOpenSema, const char *pName) {
     TRACY_FUNC(sceKernelOpenSema, pName);
+    if (!pName)
+        return RET_ERROR(SCE_KERNEL_ERROR_ILLEGAL_ADDR);
+
     if (strlen(pName) > KERNELOBJECT_MAX_NAME_LENGTH)
         return RET_ERROR(SCE_KERNEL_ERROR_UID_NAME_TOO_LONG);
 
@@ -1684,6 +1702,9 @@ EXPORT(SceUID, sceKernelOpenSimpleEvent, const char *pName) {
 
 EXPORT(SceUID, sceKernelOpenTimer, const char *pName) {
     TRACY_FUNC(sceKernelOpenTimer, pName);
+    if (!pName)
+        return RET_ERROR(SCE_KERNEL_ERROR_ILLEGAL_ADDR);
+
     if (strlen(pName) > KERNELOBJECT_MAX_NAME_LENGTH)
         return RET_ERROR(SCE_KERNEL_ERROR_UID_NAME_TOO_LONG);
 

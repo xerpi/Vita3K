@@ -17,7 +17,7 @@ callback_after_wake             skip     # threads ignore their core and priorit
 callback_changes                pass
 callback_deleted_object         pass
 callback_edges                  pass
-callback_errors                 crash    # callback NULL argument errors, a NULL name
+callback_errors                 pass
 callback_event_results          fail     # event calls don't take message pipe UIDs
 callback_event_waits            pass
 callback_info                   pass
@@ -60,7 +60,7 @@ cond                            pass
 cond_callback_after_wake        skip     # threads ignore their core and priority, so whether the waiter ran before the notify is a race
 cond_callback_departure         pass
 cond_delete_relock              fail     # a condition or a mutex deleted after a signal, before the waiter relocks
-cond_errors                     fail     # close, signal to a thread errors, create attributes, open with a NULL name
+cond_errors                     fail     # close, signal to a thread errors, create attributes
 cond_mutex_delete               pass
 cond_mutex_delete_wakes         fail     # a mutex delete ends its conditions' waits only at their timeout
 cond_relock_requeue             pass
@@ -90,7 +90,7 @@ event_bits                      pass
 event_edges                     pass
 event_flag                      pass
 event_flag_delete_bits          pass
-event_flag_errors               crash    # closing unknown UIDs, a NULL name
+event_flag_errors               fail     # closing unknown UIDs
 event_flag_hold_callback_events pass
 event_flag_hold_callbacks       pass
 event_flag_hold_leak            pass
@@ -138,7 +138,7 @@ info_sizes                      pass
 local_ready_requeue             fail     # threads are never READY or STANDBY
 lowered_to_shared               fail     # threads ignore their core
 lw_cond                         pass
-lw_cond_errors                  fail     # create checks of the attribute, a NULL mutex and a NULL work area, a signal to thread 0
+lw_cond_errors                  fail     # create checks of the attribute, a signal to thread 0
 lw_cond_relock_requeue          pass
 lw_cond_semantics               pass
 lw_info_by_id_uid               fail     # the uid the lightweight condition variable info by UID reports
@@ -186,7 +186,7 @@ msgpipe_async                   fail     # message pipe sends and receives that 
 msgpipe_callback_partial        pass
 msgpipe_callback_rejoin_order   pass
 msgpipe_edges                   pass
-msgpipe_errors                  crash    # closing unknown UIDs, a NULL buffer
+msgpipe_errors                  fail     # closing unknown UIDs, the modes a try send takes, a create past the memory budget
 msgpipe_failed_sizes            pass
 msgpipe_modes                   pass
 msgpipe_order                   pass
@@ -212,7 +212,7 @@ multi_events_waits              fail     # multiple event wait results, wait typ
 mutex                           pass
 mutex_cancel_counts             pass
 mutex_ceiling                   fail     # mutex priority ceilings
-mutex_errors                    crash    # closing unknown UIDs, a NULL name
+mutex_errors                    fail     # closing unknown UIDs
 mutex_waits                     pass
 name_lookup                     fail     # opening gives the object's own UID, opening objects of another type or that aren't openable
 nonblocking_wait_preempt        fail     # threads ignore their core and priority
@@ -268,7 +268,7 @@ rwlock_wake_order               pass
 savedata_slot_id                fail     # save data slot ID range checks
 self_lower_order                fail     # a thread that lowers itself doesn't go to the head of its new priority
 self_priority_drop              fail     # threads ignore their core and priority
-sema_errors                     crash    # closing unknown UIDs, a NULL name
+sema_errors                     fail     # closing unknown UIDs
 sema_head_leaves                pass
 sema_mutex_edges                pass
 sema_poll_negative              pass
@@ -363,7 +363,7 @@ timer_base_remaining            pass
 timer_callback                  fail     # callbacks registered to timers
 timer_delete_event              pass
 timer_edges                     pass
-timer_errors                    crash    # close of unknown UIDs, open and create with a NULL name
+timer_errors                    fail     # closing unknown UIDs, the attributes a create takes
 timer_event_interval_zero       pass
 timer_event_wakes_all           pass
 timer_info_cancel               pass
