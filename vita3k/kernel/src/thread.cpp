@@ -603,17 +603,10 @@ void ThreadState::set_queue_object(SceUID object) {
 
 bool ThreadState::has_pending_callbacks() {
     const std::lock_guard<std::mutex> lock(mutex);
-    return !is_processing_callbacks && callbacks_notified();
+    return callbacks_notified();
 }
 
 SceUInt32 ThreadState::process_callbacks() {
-    {
-        // Thread info reads the flag too, through wait_over()
-        const std::lock_guard<std::mutex> lock(mutex);
-        if (is_processing_callbacks)
-            return 0;
-        is_processing_callbacks = true;
-    }
     SceUInt32 processed = 0;
     for (auto it = callbacks.begin(); it != callbacks.end();) {
         const CallbackPtr cb = it->lock();
@@ -622,11 +615,13 @@ SceUInt32 ThreadState::process_callbacks() {
             it = callbacks.erase(it);
             continue;
         }
-        ++it;
         const std::optional<Callback::Notification> notification = cb->take_notification();
-        if (!notification)
+        if (!notification) {
+            ++it;
             continue;
-        // A callback starts with the VFP state of a new thread, and the thread gets its own back after it
+        }
+        // A callback starts with the VFP state of a new thread, and the thread gets its own back after
+        // it. A wait or check inside it runs the callbacks notified meanwhile, this one too.
         const uint32_t ret = run_callback(cb->cb_func.address(),
             { static_cast<uint32_t>(notification->notifier_id), notification->count, static_cast<uint32_t>(notification->arg), cb->userdata.address() }, true);
         ++processed;
@@ -640,9 +635,10 @@ SceUInt32 ThreadState::process_callbacks() {
         // A callback that returns nonzero deletes itself
         if (ret != 0)
             kernel.delete_callback(cb->uid, id);
+        // Read the next entry only now, since a nested pass may have dropped deleted ones. This one
+        // stays, cb keeps its callback alive.
+        ++it;
     }
-    const std::lock_guard<std::mutex> lock(mutex);
-    is_processing_callbacks = false;
     return processed;
 }
 

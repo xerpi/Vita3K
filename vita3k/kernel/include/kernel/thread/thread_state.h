@@ -162,7 +162,7 @@ struct ThreadState {
     // Callbacks
     // Runs the notified callbacks of this thread and returns how many ran. Called by the thread itself.
     SceUInt32 process_callbacks();
-    // Returns whether a notified callback would run now, which none does inside a callback. Takes mutex.
+    // Returns whether a notified callback would run now. Takes mutex.
     bool has_pending_callbacks();
     // Adds a callback this thread created. Called by the thread itself.
     void add_callback(const CallbackPtr &cb);
@@ -250,9 +250,8 @@ private:
     int start_at(Address entry, SceSize arglen, Ptr<void> argp, bool run_entry_callback);
     // Whether a callback of this thread was notified and hasn't run yet
     bool callbacks_notified() const { return notified_callbacks > 0; }
-    // Whether a notified callback ends the current wait. Callbacks don't nest, so a wait inside a
-    // callback runs none. With mutex held.
-    bool callback_ends_wait() const { return wait_target.callbacks && !is_processing_callbacks && callbacks_notified(); }
+    // Whether a notified callback ends the current wait. With mutex held.
+    bool callback_ends_wait() const { return wait_target.callbacks && callbacks_notified(); }
     // Whether the thread's current wait is over, by a wake, its end or a callback it runs, though
     // the thread hasn't gone on yet. With mutex held.
     bool wait_over() const { return exiting() || wake_pending || callback_ends_wait(); }
@@ -312,8 +311,6 @@ private:
     // Callbacks
     // Callbacks of this thread with notifications they haven't run for.
     SceUInt32 notified_callbacks = 0;
-    // Set while the thread runs its callbacks. They don't nest. With mutex held.
-    bool is_processing_callbacks = false;
     // Callbacks this thread created, in creation order. The kernel owns them. Only this thread
     // touches the list.
     std::list<std::weak_ptr<Callback>> callbacks;

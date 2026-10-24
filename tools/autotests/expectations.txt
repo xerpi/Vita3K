@@ -24,7 +24,7 @@ callback_info                   pass
 callback_inner_same_object      pass
 callback_inner_same_pipe        pass
 callback_inner_wait             pass
-callback_nesting                fail     # callbacks don't run inside callbacks
+callback_nesting                pass
 callback_notify_departure_state skip     # threads ignore their core and priority, so whether the notified waiter already ran when the main thread looks is a race
 callback_notify_equal_priority  skip     # threads ignore their core and priority, so whether a notify switches to the waiter is a race
 callback_notify_preempt         skip     # threads ignore their core and priority, so whether the callback runs inside the notify is a race
@@ -39,7 +39,7 @@ callback_priority_requeue       pass
 callback_requeue_order          pass
 callback_retake                 pass
 callback_retake_more            pass
-callback_stack                  fail     # callbacks don't run inside callbacks
+callback_stack                  pass
 callback_wait_requeue           pass
 cancel_calls                    pass
 cancel_unknown_counts           fail     # failed event flag, simple event, message pipe and timer cancels leave their counts as they were
