@@ -24,7 +24,9 @@
 #include <kernel/types.h>
 #include <packages/functions.h>
 
+#include <algorithm>
 #include <chrono>
+#include <span>
 #include <thread>
 #include <utility>
 
@@ -1120,14 +1122,147 @@ EXPORT(SceInt32, _sceKernelWaitLwCondCB, Ptr<SceKernelLwCondWork> pWork, SceUInt
     return result;
 }
 
-EXPORT(int, _sceKernelWaitMultipleEvents) {
-    TRACY_FUNC(_sceKernelWaitMultipleEvents);
-    return UNIMPLEMENTED();
+// The wait UID a thread in a multiple event wait reports, the UID of none of its events
+constexpr SceUID MULTI_EVENTS_WAIT_ID = static_cast<SceUID>(0x80000000);
+
+// Waits for any or all of the events of a list, and writes how each of them that ended did. Returns
+// how many ended if there is a result list, else 0.
+static SceInt32 wait_multiple_events(EmuEnvState &emuenv, SceUID thread_id, const SceKernelWaitEvent *list, SceUInt32 count, SceUInt32 mode, SceKernelResultEvent *results, SceUInt32 *timeout, bool callbacks) {
+    if (!list)
+        return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
+    if (count > SCE_KERNEL_MULTIPLE_EVENTS_MAX)
+        return SCE_KERNEL_ERROR_ILLEGAL_SIZE;
+    if (mode & ~(SCE_KERNEL_EVENT_WAIT_MODE_OR | SCE_KERNEL_EVENT_WAIT_MODE_AND))
+        return SCE_KERNEL_ERROR_ILLEGAL_MODE;
+    // Only the OR bit counts, so a mode of 0 waits for all the events
+    const bool any = mode & SCE_KERNEL_EVENT_WAIT_MODE_OR;
+
+    // The call works on copies of the list and the timeout, which the callbacks it runs can't change
+    std::array<SceKernelWaitEvent, SCE_KERNEL_MULTIPLE_EVENTS_MAX> requests;
+    std::ranges::copy(std::span{ list, count }, requests.begin());
+    SceUInt32 time_left = timeout ? *timeout : 0;
+
+    const ThreadStatePtr thread = emuenv.kernel.get_thread(thread_id);
+    MultiEventWait wait(thread, any, count);
+    // A UID that names nothing is one unknown UID for the kernel, so its entry reports the first such
+    // UID of the list
+    const auto names_something = [&](SceUID uid) { return emuenv.kernel.objects.find(uid) || emuenv.kernel.get_thread(uid); };
+    const auto reported_uid = [&](SceUInt32 i) {
+        if (!names_something(requests[i].eventId)) {
+            for (SceUInt32 j = 0; j < i; j++) {
+                if (!names_something(requests[j].eventId))
+                    return requests[j].eventId;
+            }
+        }
+        return requests[i].eventId;
+    };
+    std::array<EventPtr, SCE_KERNEL_MULTIPLE_EVENTS_MAX> events;
+    std::array<Event::Token, SCE_KERNEL_MULTIPLE_EVENTS_MAX> tokens;
+    for (SceUInt32 i = 0; i < count; i++)
+        tokens[i] = { .thread = thread, .entry = { requests[i].eventPattern, nullptr, nullptr, &wait, i } };
+    const Deadline deadline = deadline_from(timeout ? &time_left : nullptr);
+    WaitResult result = SCE_KERNEL_OK;
+    while (true) {
+        // Before any event is looked up
+        if (callbacks && thread->has_pending_callbacks()) {
+            result = thread->run_callbacks();
+            if (!result)
+                break;
+        }
+        // Every entry already set ends now, and the others queue a token on their event, but in OR
+        // mode the first entry that ends stops the queueing
+        wait.begin_scan();
+        std::bitset<SCE_KERNEL_MULTIPLE_EVENTS_MAX> queued;
+        bool queueing = true;
+        for (SceUInt32 i = 0; i < count; i++) {
+            if (wait.finished(i))
+                continue;
+            events[i] = find_event(emuenv, requests[i].eventId);
+            const SceInt32 scan = events[i] ? events[i]->scan_token(tokens[i], queueing) : SCE_KERNEL_ERROR_UNKNOWN_EVENT_ID;
+            if (scan == SCE_KERNEL_ERROR_UNKNOWN_EVENT_ID)
+                wait.finish(i, { reported_uid(i), static_cast<SceInt32>(SCE_KERNEL_ERROR_UNKNOWN_EVENT_ID), SCE_KERNEL_EVENT_ERROR, 0, 0 });
+            if (scan != SCE_KERNEL_ERROR_EVENT_COND)
+                queueing = queueing && !any;
+            else if (queueing)
+                queued.set(i);
+        }
+        const auto remove_tokens = [&] {
+            for (SceUInt32 i = 0; i < count; i++) {
+                if (queued.test(i))
+                    events[i]->remove_token(tokens[i]);
+            }
+        };
+        if (wait.end_scan() || queued.none()) {
+            remove_tokens();
+            result = SCE_KERNEL_OK;
+            break;
+        }
+        if (std::chrono::steady_clock::now() >= deadline) {
+            remove_tokens();
+            time_left = 0;
+            result = SCE_KERNEL_ERROR_WAIT_TIMEOUT;
+            break;
+        }
+        while (true) {
+            // A timer among the events fires only when something looks at it
+            Deadline wake = deadline;
+            for (SceUInt32 i = 0; i < count; i++) {
+                if (queued.test(i))
+                    wake = std::min(wake, events[i]->next_fire());
+            }
+            result = thread->wait({ SCE_KERNEL_WAITTYPE_MP_EVENTS, MULTI_EVENTS_WAIT_ID, callbacks }, wake);
+            if (wait.ended() || !result || *result == SCE_KERNEL_ERROR_NOTIFY_CALLBACK)
+                break;
+            // A timer event due before the deadline still ends the wait after a late wake
+            const Deadline now = std::chrono::steady_clock::now();
+            for (SceUInt32 i = 0; i < count; i++) {
+                if (queued.test(i))
+                    events[i]->update(std::min(now, deadline));
+            }
+            if (wait.ended())
+                break;
+            if (now >= deadline) {
+                result = SCE_KERNEL_ERROR_WAIT_TIMEOUT;
+                break;
+            }
+        }
+        remove_tokens();
+        time_left = time_left_until(deadline);
+        // An event that ended the wait wins over the deadline
+        if (wait.ended() && result) {
+            result = SCE_KERNEL_OK;
+            break;
+        }
+        // The tokens left for the callbacks, the next pass runs them and queues again
+        if (!result || *result != SCE_KERNEL_ERROR_NOTIFY_CALLBACK)
+            break;
+    }
+    // A wait with callbacks runs the ones notified during it before it returns
+    if (callbacks && result) {
+        if (const WaitResult ran = thread->run_callbacks(); !ran)
+            result = ran;
+    }
+
+    // The whole list is written, the entries past the ones that ended too
+    std::array<SceKernelResultEvent, SCE_KERNEL_MULTIPLE_EVENTS_MAX> kernel_results{};
+    const SceUInt32 ended = wait.copy_results(std::span{ kernel_results }.first(count));
+    if (results)
+        std::ranges::copy(std::span{ kernel_results }.first(count), results);
+    if (timeout)
+        *timeout = time_left;
+    if (!result || *result != SCE_KERNEL_OK)
+        return guest_result(result);
+    return results ? static_cast<SceInt32>(ended) : 0;
 }
 
-EXPORT(int, _sceKernelWaitMultipleEventsCB) {
-    TRACY_FUNC(_sceKernelWaitMultipleEventsCB);
-    return UNIMPLEMENTED();
+EXPORT(SceInt32, _sceKernelWaitMultipleEvents, SceKernelWaitEvent *events, SceUInt32 count, SceUInt32 mode, SceKernelWaitMultipleEventsOpt *opt) {
+    TRACY_FUNC(_sceKernelWaitMultipleEvents, events, count, mode, opt);
+    return wait_multiple_events(emuenv, thread_id, events, count, mode, opt->results.get(emuenv.mem), opt->timeout.get(emuenv.mem), false);
+}
+
+EXPORT(SceInt32, _sceKernelWaitMultipleEventsCB, SceKernelWaitEvent *events, SceUInt32 count, SceUInt32 mode, SceKernelWaitMultipleEventsOpt *opt) {
+    TRACY_FUNC(_sceKernelWaitMultipleEventsCB, events, count, mode, opt);
+    return wait_multiple_events(emuenv, thread_id, events, count, mode, opt->results.get(emuenv.mem), opt->timeout.get(emuenv.mem), true);
 }
 
 EXPORT(SceInt32, _sceKernelWaitSema, SceUID semaId, SceInt32 needCount, SceUInt32 *pTimeout) {

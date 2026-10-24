@@ -149,6 +149,23 @@ public:
         return woken;
     }
 
+    // Takes every waiter accepted by pick off the queue, in queue order, without waking it. Returns
+    // how many were taken.
+    std::size_t remove_if(std::predicate<Waiter &> auto pick) {
+        std::size_t removed = 0;
+        for (auto it = waiters.begin(); it != waiters.end();) {
+            Waiter &waiter = **it;
+            if (!pick(waiter)) {
+                ++it;
+                continue;
+            }
+            it = waiters.erase(it);
+            waiter.thread->set_queue_object(0);
+            ++removed;
+        }
+        return removed;
+    }
+
     // Ends the wait of every waiter with result. Returns how many were woken.
     std::size_t wake_all(SceInt32 result = SCE_KERNEL_OK) {
         return wake_if([](Waiter &) { return true; }, result);
