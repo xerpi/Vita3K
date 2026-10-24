@@ -583,8 +583,6 @@ private:
         Transfer(MemState &mem, std::span<const MsgPipeVector> pieces, SceSize *size, SceSize total, bool full);
         // Returns whether it moved what its mode asks for
         bool done() const;
-        // Returns whether it moved part of its bytes, which keeps it at the head of its queue
-        bool keeps_place() const;
         // Returns the guest bytes at its position, at most n and within one piece
         std::span<char> run(SceSize n);
         void advance(SceSize n);
@@ -621,10 +619,6 @@ private:
     // Copies n bytes from the sender to the receiver, and takes them from the sender unless the
     // receiver peeks
     static void copy(Sender &sender, Receiver &receiver, SceSize n);
-    // Returns whether a new call goes ahead of the calls already waiting on its side
-    template <typename Side>
-    static bool goes_first(WaitQueue<Side> &side, int priority);
-
     // Guarded by the lock. At most one side waits, except right after a waiter came back from its
     // callbacks.
     WaitQueue<Sender> senders;

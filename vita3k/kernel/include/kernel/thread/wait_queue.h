@@ -52,11 +52,15 @@ public:
         priority,
     };
 
+    // Returns whether the front waiter keeps its place when another would go ahead of it
+    using KeepsFront = bool (*)(const Entry &);
+
     WaitQueue() = default;
     explicit WaitQueue(SceUInt32 attr)
         : by_priority(attr & SCE_KERNEL_ATTR_TH_PRIO) {}
-    explicit WaitQueue(Order order)
-        : by_priority(order == Order::priority) {}
+    explicit WaitQueue(Order order, KeepsFront keeps_front = nullptr)
+        : by_priority(order == Order::priority)
+        , keeps_front(keeps_front) {}
 
     // Blocks thread on target until a waker gives it a result, it is being deleted, or the deadline passes.
     // thread must be the guest thread making this HLE call.
@@ -104,10 +108,7 @@ public:
 
     // Returns whether a thread of this priority would be first in the queue, ahead of every waiter.
     bool first_for(int priority) const {
-        if (waiters.empty())
-            return true;
-        // Lower value is higher priority, and equal priorities keep FIFO order
-        return by_priority && waiters.front()->priority > priority;
+        return place_for(priority) == waiters.begin();
     }
 
     // Returns the first waiter accepted by pick, or null.
@@ -152,16 +153,7 @@ public:
 
     // Queues a waiter that the caller will block itself. Used by waits that need their own loop.
     void push(Waiter &waiter) {
-        auto pos = waiters.end();
-        if (by_priority) {
-            // Lower value is higher priority, equal priorities keep FIFO order
-            pos = std::find_if(waiters.begin(), waiters.end(), [&](const Waiter *w) { return w->priority > waiter.priority; });
-            // A waiter whose place is the front goes right behind a head that keeps its place, so
-            // it lands ahead of the waiters already behind that head, whatever their priority
-            if (pos == waiters.begin() && pos != waiters.end() && keeps_place((*pos)->entry))
-                ++pos;
-        }
-        waiters.insert(pos, &waiter);
+        waiters.insert(place_for(waiter.priority), &waiter);
     }
 
     // Takes a waiter off the queue if it is still on it.
@@ -184,15 +176,19 @@ public:
     }
 
 private:
-    // Returns whether a waiter at the head stays there when another one would go in front of it, for
-    // entries that can say so
-    static bool keeps_place(const Entry &entry) {
-        if constexpr (requires { entry.keeps_place(); })
-            return entry.keeps_place();
-        else
-            return false;
+    // Returns where a waiter of this priority goes: behind every waiter of the same or a higher
+    // priority in a priority queue, else at the end. A waiter whose place is the front goes right
+    // behind a front waiter that keeps its place, so it lands ahead of the waiters already behind
+    // that one, whatever their priority.
+    auto place_for(int priority) const {
+        // Lower value is higher priority
+        auto pos = by_priority ? std::find_if(waiters.begin(), waiters.end(), [&](const Waiter *w) { return w->priority > priority; }) : waiters.end();
+        if (pos == waiters.begin() && pos != waiters.end() && keeps_front && keeps_front(waiters.front()->entry))
+            ++pos;
+        return pos;
     }
 
     bool by_priority = false;
+    KeepsFront keeps_front = nullptr;
     std::list<Waiter *> waiters;
 };

@@ -1406,8 +1406,9 @@ SceInt32 EventFlag::info(SceKernelEventFlagInfo &info) const {
 
 MsgPipe::MsgPipe(SceUInt32 attr, const char *name, std::size_t buf_size)
     : WithUidClass(attr, name)
-    , senders(attr & SCE_KERNEL_MSG_PIPE_ATTR_TH_PRIO_S ? WaitQueue<Sender>::Order::priority : WaitQueue<Sender>::Order::fifo)
-    , receivers(attr & SCE_KERNEL_MSG_PIPE_ATTR_TH_PRIO_R ? WaitQueue<Receiver>::Order::priority : WaitQueue<Receiver>::Order::fifo)
+    // A call at the front of its side that moved part of its bytes keeps its place
+    , senders(attr & SCE_KERNEL_MSG_PIPE_ATTR_TH_PRIO_S ? WaitQueue<Sender>::Order::priority : WaitQueue<Sender>::Order::fifo, [](const Sender &front) { return front.left != front.total; })
+    , receivers(attr & SCE_KERNEL_MSG_PIPE_ATTR_TH_PRIO_R ? WaitQueue<Receiver>::Order::priority : WaitQueue<Receiver>::Order::fifo, [](const Receiver &front) { return front.left != front.total; })
     // A pipe's buffer is a whole number of 4 KiB pages
     , data_buffer(align(buf_size, 0x1000)) {}
 
@@ -1456,10 +1457,6 @@ MsgPipe::Receiver::Receiver(MemState &mem, std::span<const MsgPipeVector> pieces
 
 bool MsgPipe::Transfer::done() const {
     return full ? left == 0 : left < total;
-}
-
-bool MsgPipe::Transfer::keeps_place() const {
-    return left != total;
 }
 
 std::span<char> MsgPipe::Transfer::run(SceSize n) {
@@ -1583,13 +1580,6 @@ void MsgPipe::serve() {
     }
 }
 
-template <typename Side>
-bool MsgPipe::goes_first(WaitQueue<Side> &side, int priority) {
-    // Nothing goes ahead of a head that moved part of its bytes
-    const auto *const head = side.front();
-    return side.first_for(priority) && (!head || !head->entry.keeps_place());
-}
-
 SceInt32 MsgPipe::receive(const ThreadStatePtr &thread, MemState &mem, SceUInt32 wait_mode, std::span<const MsgPipeVector> pieces, SceSize *size, SceUInt32 *timeout, bool callbacks) {
     if (!is_msg_pipe_mode(wait_mode))
         return SCE_KERNEL_ERROR_ILLEGAL_MODE;
@@ -1617,7 +1607,7 @@ SceInt32 MsgPipe::receive(const ThreadStatePtr &thread, MemState &mem, SceUInt32
     const WaitResult r = wait_loop(receivers, guard, thread, { SCE_KERNEL_WAITTYPE_MSG_PIPE, uid, callbacks }, receiver, timeout, CallbacksCheck::after_take_or_wait, [&](Receiver &transfer, SceInt32) -> std::optional<SceInt32> {
         // Don't take anything while other receivers are ahead in the queue. The size is written
         // after every attempt.
-        const bool done = goes_first(receivers, thread->get_priority()) && take(transfer);
+        const bool done = receivers.first_for(thread->get_priority()) && take(transfer);
         transfer.report();
         if (done)
             return SCE_KERNEL_OK;
@@ -1653,7 +1643,7 @@ SceInt32 MsgPipe::send(const ThreadStatePtr &thread, MemState &mem, SceUInt32 wa
     const WaitResult r = wait_loop(senders, guard, thread, { SCE_KERNEL_WAITTYPE_MSG_PIPE, uid, callbacks }, sender, timeout, CallbacksCheck::after_take_or_wait, [&](Sender &transfer, SceInt32) -> std::optional<SceInt32> {
         // Don't send anything while other senders are ahead in the queue. The size is written
         // after every attempt.
-        const bool done = goes_first(senders, thread->get_priority()) && give(transfer);
+        const bool done = senders.first_for(thread->get_priority()) && give(transfer);
         transfer.report();
         if (done)
             return SCE_KERNEL_OK;
@@ -1675,7 +1665,7 @@ SceInt32 MsgPipe::try_receive(const ThreadStatePtr &thread, MemState &mem, SceUI
     Receiver receiver(mem, pieces, size, static_cast<SceSize>(total), wait_mode & SCE_KERNEL_MSG_PIPE_MODE_FULL, wait_mode & SCE_KERNEL_MSG_PIPE_MODE_DONT_REMOVE);
     // Behind the receivers already waiting, or short of bytes for all of a FULL receive, it fails
     // without writing a size
-    if (!goes_first(receivers, thread->get_priority()) || (receiver.full && receiver.total > available()))
+    if (!receivers.first_for(thread->get_priority()) || (receiver.full && receiver.total > available()))
         return SCE_KERNEL_ERROR_MSG_PIPE_EMPTY;
     return take(receiver) ? SCE_KERNEL_OK : SCE_KERNEL_ERROR_MSG_PIPE_EMPTY;
 }
@@ -1693,7 +1683,7 @@ SceInt32 MsgPipe::try_send(const ThreadStatePtr &thread, MemState &mem, SceUInt3
     Sender sender(mem, pieces, size, static_cast<SceSize>(total), wait_mode & SCE_KERNEL_MSG_PIPE_MODE_FULL);
     // Behind the senders already waiting, or short of room for all of a FULL send, it fails without
     // writing a size
-    if (!goes_first(senders, thread->get_priority()) || (sender.full && sender.total > data_buffer.Free()))
+    if (!senders.first_for(thread->get_priority()) || (sender.full && sender.total > data_buffer.Free()))
         return SCE_KERNEL_ERROR_MSG_PIPE_FULL;
     return give(sender) ? SCE_KERNEL_OK : SCE_KERNEL_ERROR_MSG_PIPE_FULL;
 }
