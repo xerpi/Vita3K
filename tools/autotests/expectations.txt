@@ -60,7 +60,7 @@ cond                            pass
 cond_callback_after_wake        skip     # threads ignore their core and priority, so whether the waiter ran before the notify is a race
 cond_callback_departure         pass
 cond_delete_relock              fail     # a condition or a mutex deleted after a signal, before the waiter relocks
-cond_errors                     fail     # close, signal to a thread errors
+cond_errors                     fail     # closing unknown UIDs
 cond_mutex_delete               pass
 cond_mutex_delete_wakes         fail     # a mutex delete ends its conditions' waits only at their timeout
 cond_relock_requeue             pass
@@ -138,7 +138,7 @@ info_sizes                      pass
 local_ready_requeue             fail     # threads are never READY or STANDBY
 lowered_to_shared               fail     # threads ignore their core
 lw_cond                         pass
-lw_cond_errors                  fail     # a signal to thread 0
+lw_cond_errors                  pass
 lw_cond_relock_requeue          pass
 lw_cond_semantics               pass
 lw_info_by_id_uid               fail     # the uid the lightweight condition variable info by UID reports

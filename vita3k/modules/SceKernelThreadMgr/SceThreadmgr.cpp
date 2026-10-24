@@ -1809,11 +1809,18 @@ EXPORT(int, sceKernelSignalCondAll, SceUID condid) {
 
 EXPORT(int, sceKernelSignalCondTo, SceUID condid, SceUID thread_target) {
     TRACY_FUNC(sceKernelSignalCondTo, condid, thread_target);
+    if (thread_target == 0)
+        return RET_ERROR(SCE_KERNEL_ERROR_ILLEGAL_THREAD_ID);
+    if (!emuenv.kernel.objects.find(condid))
+        return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_COND_ID);
+    // The caller can't be waiting, which is checked before the UID's class
+    if (thread_target == thread_id)
+        return RET_ERROR(SCE_KERNEL_ERROR_ILLEGAL_THREAD_ID);
+    if (!emuenv.kernel.get_thread(thread_target))
+        return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_THREAD_ID);
     const CondvarPtr condvar = emuenv.kernel.objects.find<HeavyCond>(condid);
     if (!condvar)
         return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_COND_ID);
-    if (!emuenv.kernel.get_thread(thread_target))
-        return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_THREAD_ID);
     return condvar->signal(Condvar::SignalTarget(Condvar::SignalTarget::Type::Specific, thread_target));
 }
 
