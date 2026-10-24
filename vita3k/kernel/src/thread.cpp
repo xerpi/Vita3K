@@ -120,6 +120,9 @@ int ThreadState::start_at(Address entry, SceSize arglen, const Ptr<void> argp, b
     std::unique_lock<std::mutex> thread_lock(mutex);
     if (status != ThreadStatus::dormant)
         return SCE_KERNEL_ERROR_NOT_DORMANT;
+    // The arguments go on the thread's stack
+    if (arglen > static_cast<SceSize>(stack_size))
+        return SCE_KERNEL_ERROR_INVALID_ARGUMENT;
 
     run_start_callback = run_entry_callback;
     returned_value = SCE_KERNEL_ERROR_NOT_DORMANT;
