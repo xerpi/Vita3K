@@ -183,18 +183,26 @@ public:
             waiter.thread->set_queue_object(0);
     }
 
-    // Moves the waiter of thread behind every waiter of the thread's current priority, even if it
-    // didn't change, in a priority queue. Returns whether thread waits in this queue.
+    // Moves the waiters of thread behind every waiter of the thread's current priority, even if it
+    // didn't change, in a priority queue, keeping their own order. A multiple event wait has one for
+    // each time it lists the event. Returns whether thread waits in this queue.
     bool requeue(const ThreadState &thread) {
-        Waiter *const waiter = find_if([&](const Waiter &w) { return w.thread.get() == &thread; });
-        if (!waiter)
-            return false;
-        if (by_priority) {
-            remove(*waiter);
-            waiter->priority = waiter->thread->get_priority();
-            push(*waiter);
+        const auto of_thread = [&](const Waiter *w) { return w->thread.get() == &thread; };
+        if (!by_priority)
+            return std::ranges::any_of(waiters, of_thread);
+        // Taken off together, so one put back isn't taken again
+        std::list<Waiter *> moved;
+        for (auto it = waiters.begin(); it != waiters.end();) {
+            const auto next = std::next(it);
+            if (of_thread(*it))
+                moved.splice(moved.end(), waiters, it);
+            it = next;
         }
-        return true;
+        for (Waiter *const waiter : moved) {
+            waiter->priority = waiter->thread->get_priority();
+            waiters.insert(place_for(waiter->priority), waiter);
+        }
+        return !moved.empty();
     }
 
 private:

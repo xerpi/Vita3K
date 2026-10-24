@@ -30,6 +30,7 @@
 #include <list>
 #include <mutex>
 #include <optional>
+#include <span>
 #include <string>
 
 struct CPUContext;
@@ -152,6 +153,9 @@ struct ThreadState {
     // Records the UID of the object whose wait queue holds the thread, or 0 once it left it. Called
     // by the queue with the object's lock held.
     void set_queue_object(SceUID object);
+    // Records the events a multiple event wait of the thread has a token queued on, none once they
+    // left. Takes mutex.
+    void set_multi_wait_events(std::span<const SceUID> events);
     // Shows the thread WAITING while a host call blocks it, such as an audio output, and RUNNING after
     void begin_host_wait();
     void end_host_wait();
@@ -306,6 +310,9 @@ private:
     // The UID of the object whose wait queue holds the thread, or 0. Unlike wait_target, it stays
     // set between two sleeps of the same wait, so a priority change always finds the queue.
     SceUID queue_object = 0;
+    // The events the thread's multiple event wait has a token queued on, which a priority change
+    // moves too
+    std::span<const SceUID> multi_wait_events;
     // Set by wake() and consumed by the next wait().
     bool wake_pending = false;
     // A sceKernelSendSignal is pending for this thread.

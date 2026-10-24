@@ -216,9 +216,9 @@ multi_events_and_delete         pass
 multi_events_callback_copies    pass
 multi_events_errors             pass
 multi_events_pipe               fail     # a message pipe isn't an event
-multi_events_requeue            fail     # a priority change doesn't requeue the entries of a multiple event wait
+multi_events_requeue            pass
 multi_events_results_past       pass
-multi_events_same_event         fail     # a priority change doesn't requeue the entries of a multiple event wait
+multi_events_same_event         pass
 multi_events_unknown_uid        pass
 multi_events_waits              pass
 mutex                           pass

@@ -1203,6 +1203,14 @@ static SceInt32 wait_multiple_events(EmuEnvState &emuenv, SceUID thread_id, cons
             result = SCE_KERNEL_ERROR_WAIT_TIMEOUT;
             break;
         }
+        // A priority change moves the tokens too
+        std::array<SceUID, SCE_KERNEL_MULTIPLE_EVENTS_MAX> queued_events;
+        std::size_t num_queued = 0;
+        for (SceUInt32 i = 0; i < count; i++) {
+            if (queued.test(i))
+                queued_events[num_queued++] = requests[i].eventId;
+        }
+        thread->set_multi_wait_events(std::span{ queued_events }.first(num_queued));
         while (true) {
             // A timer among the events fires only when something looks at it
             Deadline wake = deadline;
@@ -1226,6 +1234,7 @@ static SceInt32 wait_multiple_events(EmuEnvState &emuenv, SceUID thread_id, cons
                 break;
             }
         }
+        thread->set_multi_wait_events({});
         remove_tokens();
         time_left = time_left_until(deadline);
         // An event that ended the wait wins over the deadline
