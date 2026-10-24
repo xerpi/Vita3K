@@ -370,8 +370,10 @@ timer_info_cancel               pass
 timer_modes                     pass
 timer_oneshot_refire            pass
 timer_period                    skip     # timing, how evenly a repeating timer fires
+timer_requeue                   fail     # no requeue on a priority change
 timer_wait_no_event             pass
 timer_wait_pattern              pass
+timer_waiter_handoff            pass
 timer_waiters                   pass
 timer_wake_cores                fail     # threads ignore their core and priority
 timer_wake_order                fail     # threads ignore their core and priority
