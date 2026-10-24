@@ -33,6 +33,8 @@
 #include <SDL3/SDL_mutex.h>
 #include <SDL3/SDL_thread.h>
 
+#include <algorithm>
+
 int CorenumAllocator::new_corenum() {
     const std::lock_guard<std::mutex> guard(lock);
 
@@ -163,6 +165,29 @@ SceUID KernelState::create_callback(const ThreadStatePtr &thread, const char *na
     return uid;
 }
 
+SceUID KernelState::register_thread_event_handler(SceUID thread, SceUInt32 mask, Address handler, Address common) {
+    const std::lock_guard<std::mutex> lock(mutex);
+    const SceUID uid = get_next_uid();
+    thread_event_handlers.push_back({ uid, thread, mask, handler, common });
+    return uid;
+}
+
+bool KernelState::unregister_thread_event_handler(SceUID uid) {
+    const std::lock_guard<std::mutex> lock(mutex);
+    return std::erase_if(thread_event_handlers, [&](const ThreadEventHandler &handler) { return handler.uid == uid; }) != 0;
+}
+
+std::optional<ThreadEventHandler> KernelState::next_thread_event_handler(SceUID thread, SceUInt32 event, SceUID after) {
+    const std::lock_guard<std::mutex> lock(mutex);
+    const auto it = std::ranges::find_if(thread_event_handlers, [&](const ThreadEventHandler &handler) {
+        return handler.uid > after && (handler.mask & event)
+            && (handler.thread == thread || handler.thread == SCE_KERNEL_THREAD_ID_PROCESS_ALL_ID);
+    });
+    if (it == thread_event_handlers.end())
+        return std::nullopt;
+    return *it;
+}
+
 bool KernelState::delete_callback(SceUID id, SceUID deleter) {
     return objects.remove<Callback>(id, deleter);
 }
@@ -291,10 +316,7 @@ void KernelState::deinit(MemState &mem) {
     tls_psize = 0;
     tls_msize = 0;
 
-    thread_event_start = Ptr<const void>(0);
-    thread_event_start_arg = 0;
-    thread_event_end = Ptr<const void>(0);
-    thread_event_end_arg = 0;
+    thread_event_handlers.clear();
 
     codec_blocks.clear();
 

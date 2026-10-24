@@ -206,26 +206,20 @@ void ThreadState::run_loop(bool top_level) {
 
     std::unique_lock<std::mutex> lock(mutex);
 
-    auto run_thread_end_callback = [&]() {
-        if (!kernel.thread_event_end)
-            return;
-
-        const ThreadStatus old_status = status;
-        const uint32_t old_returned_value = returned_value;
-        // The handler runs guest code on this thread, which a pending ending would end at once
+    // The thread still runs and has no exit status while its end handlers run
+    auto run_end_handlers = [&]() {
+        const ThreadStatus old_status = std::exchange(status, ThreadStatus::running);
+        const uint32_t exit_status = std::exchange(returned_value, SCE_KERNEL_ERROR_NOT_DORMANT);
+        // The handlers run guest code on this thread, which a pending ending would end at once
         const Ending old_ending = std::exchange(ending, Ending::none);
-        status = ThreadStatus::running;
 
         lock.unlock();
-        // A thread event handler starts with the VFP state of a new thread, like a callback
-        const int ret = run_callback(kernel.thread_event_end.address(), { SCE_KERNEL_THREAD_EVENT_TYPE_END, static_cast<uint32_t>(id), 0, kernel.thread_event_end_arg }, true);
-        if (ret != 0)
-            LOG_WARN("Thread end event handler returned {}", log_hex(ret));
+        run_event_handlers(SCE_KERNEL_THREAD_EVENT_TYPE_END);
         lock.lock();
 
         status = old_status;
-        returned_value = old_returned_value;
-        // Keeping a stronger request that came while the handler ran, like a teardown's remove
+        returned_value = exit_status;
+        // Keeping a stronger request that came while the handlers ran, like a teardown's remove
         request_ending(old_ending);
     };
 
@@ -263,7 +257,7 @@ void ThreadState::run_loop(bool top_level) {
             // it gone for guest calls before its end waiters wake.
             if (status != ThreadStatus::dormant && status != ThreadStatus::deleted) {
                 if (ending != Ending::remove)
-                    run_thread_end_callback();
+                    run_end_handlers();
                 release_locks();
                 delete_callbacks();
                 update_status(ending == Ending::exit ? ThreadStatus::dormant : ThreadStatus::deleted);
@@ -285,12 +279,7 @@ void ThreadState::run_loop(bool top_level) {
         if (run_start_callback) {
             run_start_callback = false;
             lock.unlock();
-            if (kernel.thread_event_start) {
-                // A thread event handler starts with the VFP state of a new thread, like a callback
-                const int ret = run_callback(kernel.thread_event_start.address(), { SCE_KERNEL_THREAD_EVENT_TYPE_START, static_cast<uint32_t>(id), 0, kernel.thread_event_start_arg }, true);
-                if (ret != 0)
-                    LOG_WARN("Thread start event handler returned {}", log_hex(ret));
-            }
+            run_event_handlers(SCE_KERNEL_THREAD_EVENT_TYPE_START);
             lock.lock();
         }
 
@@ -655,6 +644,23 @@ void ThreadState::remove_notified_callback() {
     const std::lock_guard<std::mutex> lock(mutex);
     if (notified_callbacks > 0)
         --notified_callbacks;
+}
+
+void ThreadState::run_event_handlers(SceUInt32 event) {
+    SceUID after = 0;
+    while (const std::optional<ThreadEventHandler> handler = kernel.next_thread_event_handler(id, event, after)) {
+        after = handler->uid;
+        running_event_handler = true;
+        // A thread event handler starts with the VFP state of a new thread, like a callback
+        const uint32_t ret = run_callback(handler->handler, { event, static_cast<uint32_t>(id), 0, handler->common }, true);
+        running_event_handler = false;
+        // A handler that returns nonzero is unregistered
+        if (ret != 0)
+            kernel.unregister_thread_event_handler(handler->uid);
+        const std::lock_guard<std::mutex> lock(mutex);
+        if (exiting())
+            break;
+    }
 }
 
 void ThreadState::add_callback(const CallbackPtr &cb) {

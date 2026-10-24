@@ -905,26 +905,26 @@ EXPORT(int, _sceKernelReceiveMsgPipeVectorCB) {
 
 EXPORT(int, _sceKernelRegisterThreadEventHandler, const char *name, SceUID thread_mask, SceUInt32 mask, sceKernelRegisterThreadEventHandlerOpt *opt) {
     TRACY_FUNC(_sceKernelRegisterThreadEventHandler, name, thread_mask, mask, opt);
+    if (emuenv.kernel.get_thread(thread_id)->in_event_handler())
+        return RET_ERROR(SCE_KERNEL_ERROR_ILLEGAL_CONTEXT);
+    if (!name)
+        return RET_ERROR(SCE_KERNEL_ERROR_ILLEGAL_ADDR);
     if (!opt)
         return RET_ERROR(SCE_KERNEL_ERROR_INVALID_ARGUMENT);
 
-    if (mask & SCE_KERNEL_THREAD_EVENT_TYPE_START) {
-        if (emuenv.kernel.thread_event_start)
-            LOG_WARN("Multiple thread handlers are not supported");
-
-        emuenv.kernel.thread_event_start = opt->handler;
-        emuenv.kernel.thread_event_start_arg = opt->common;
+    SceUID thread = thread_mask;
+    if (thread_mask == 0 || thread_mask == thread_id) {
+        // The calling thread already started, so it can only register for its end
+        if (mask != SCE_KERNEL_THREAD_EVENT_TYPE_END)
+            return RET_ERROR(SCE_KERNEL_ERROR_INVALID_ARGUMENT);
+        thread = thread_id;
+    } else if (thread_mask != SCE_KERNEL_THREAD_ID_PROCESS_ALL_ID && !emuenv.kernel.get_thread(thread_mask)) {
+        return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_THREAD_ID);
     }
+    if (mask & ~(SCE_KERNEL_THREAD_EVENT_TYPE_START | SCE_KERNEL_THREAD_EVENT_TYPE_END))
+        return RET_ERROR(SCE_KERNEL_ERROR_INVALID_ARGUMENT);
 
-    if (mask & SCE_KERNEL_THREAD_EVENT_TYPE_END) {
-        if (emuenv.kernel.thread_event_end)
-            LOG_WARN("Multiple thread handlers are not supported");
-
-        emuenv.kernel.thread_event_end = opt->handler;
-        emuenv.kernel.thread_event_end_arg = opt->common;
-    }
-
-    return SCE_KERNEL_OK;
+    return emuenv.kernel.register_thread_event_handler(thread, mask, opt->handler.address(), opt->common);
 }
 
 EXPORT(int, _sceKernelSendMsgPipeVector) {
@@ -1970,9 +1970,13 @@ EXPORT(int, sceKernelUnregisterCallbackFromEventAll) {
     return UNIMPLEMENTED();
 }
 
-EXPORT(int, sceKernelUnregisterThreadEventHandler) {
-    TRACY_FUNC(sceKernelUnregisterThreadEventHandler);
-    return UNIMPLEMENTED();
+EXPORT(int, sceKernelUnregisterThreadEventHandler, SceUID uid) {
+    TRACY_FUNC(sceKernelUnregisterThreadEventHandler, uid);
+    if (emuenv.kernel.get_thread(thread_id)->in_event_handler())
+        return RET_ERROR(SCE_KERNEL_ERROR_ILLEGAL_CONTEXT);
+    if (!emuenv.kernel.unregister_thread_event_handler(uid))
+        return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_THREAD_EVENT_ID);
+    return SCE_KERNEL_OK;
 }
 
 EXPORT(int, sceKernelWaitThreadEndCB_089) {

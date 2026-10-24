@@ -166,6 +166,8 @@ struct ThreadState {
     bool has_pending_callbacks();
     // Adds a callback this thread created. Called by the thread itself.
     void add_callback(const CallbackPtr &cb);
+    // Whether a thread event handler runs on this thread now. Called by the thread itself.
+    bool in_event_handler() const { return running_event_handler; }
     // Counts a callback of this thread that was notified and hasn't run for it yet, waking a wait
     // with callbacks, and stops counting it. Called by the callback with its lock held.
     void add_notified_callback();
@@ -248,6 +250,9 @@ private:
     void set_affinity_mask(SceInt32 new_affinity_mask);
     // Starts a dormant thread at entry, like start() does at its entry point. Takes mutex.
     int start_at(Address entry, SceSize arglen, Ptr<void> argp, bool run_entry_callback);
+    // Runs the thread event handlers for event of this thread in the order they were registered.
+    // Called by the thread itself without mutex.
+    void run_event_handlers(SceUInt32 event);
     // Whether a callback of this thread was notified and hasn't run yet
     bool callbacks_notified() const { return notified_callbacks > 0; }
     // Whether a notified callback ends the current wait. With mutex held.
@@ -286,6 +291,8 @@ private:
     Ending ending = Ending::none;
     // when calling sceKernelStartThread
     bool run_start_callback = false;
+    // Set while a thread event handler runs on the thread. Only the thread itself uses it.
+    bool running_event_handler = false;
     // Notified whenever the status or a hold changes
     std::condition_variable status_cond;
 

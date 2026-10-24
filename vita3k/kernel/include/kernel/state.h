@@ -104,6 +104,17 @@ using FuncBindingInfos = std::multimap<uint32_t, FuncBindingInfo>;
 
 using ModuleUidByNid = std::map<uint32_t, uint32_t>;
 
+// A thread event handler a game registered
+struct ThreadEventHandler {
+    SceUID uid;
+    // The thread it runs for, or SCE_KERNEL_THREAD_ID_PROCESS_ALL_ID for every thread
+    SceUID thread;
+    // The SCE_KERNEL_THREAD_EVENT_TYPE_* events it runs for
+    SceUInt32 mask;
+    Address handler;
+    Address common;
+};
+
 struct KernelState {
     KernelState();
 
@@ -114,10 +125,9 @@ struct KernelState {
     unsigned int tls_psize = 0;
     unsigned int tls_msize = 0;
 
-    Ptr<const void> thread_event_start = Ptr<const void>(0);
-    Address thread_event_start_arg = 0;
-    Ptr<const void> thread_event_end = Ptr<const void>(0);
-    Address thread_event_end_arg = 0;
+    // The thread event handlers in the order they were registered, which is UID order since UIDs only
+    // grow. Guarded by mutex.
+    std::vector<ThreadEventHandler> thread_event_handlers;
 
     // Thread manager objects other than threads, by UID
     KernelObjects objects;
@@ -168,6 +178,14 @@ struct KernelState {
     SceUID get_next_uid() {
         return next_uid++;
     }
+
+    // Registers a thread event handler and returns its UID.
+    SceUID register_thread_event_handler(SceUID thread, SceUInt32 mask, Address handler, Address common);
+    // Removes the thread event handler with this UID, or returns false if there is none.
+    bool unregister_thread_event_handler(SceUID uid);
+    // Returns the first handler for event of thread registered after the one with UID after, or
+    // nothing.
+    std::optional<ThreadEventHandler> next_thread_event_handler(SceUID thread, SceUInt32 event, SceUID after);
 
     bool init(MemState &mem, const CallImportFunc &call_import, bool cpu_opt);
     void deinit(MemState &mem);
