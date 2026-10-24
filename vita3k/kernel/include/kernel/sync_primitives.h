@@ -23,6 +23,8 @@
 #include <kernel/types.h>
 #include <util/byte_ring_buffer.h>
 
+#include <array>
+#include <bitset>
 #include <expected>
 #include <limits>
 #include <span>
@@ -179,10 +181,23 @@ private:
     std::vector<Registration> registrations;
 };
 
+class MultiEventWait;
+
 // The event part of simple events and timers: a bit pattern, the user data of the last set, and the
 // waits for bits of the pattern.
 class Event : public CallbackNotifier {
 public:
+    struct WaitEntry {
+        SceUInt32 pattern;
+        SceUInt32 *result_pattern;
+        SceUInt64 *user_data;
+        // For an entry of a multiple event wait, the wait it belongs to and its index in it
+        MultiEventWait *multi = nullptr;
+        SceUInt32 index = 0;
+    };
+    // An entry of a multiple event wait, queued on its event
+    using Token = WaitQueue<WaitEntry>::Waiter;
+
     const bool auto_reset;
 
     SceInt32 poll(SceUInt32 wait_pattern, SceUInt32 *result_pattern, SceUInt64 *user_data);
@@ -195,6 +210,16 @@ public:
     // Fills info with what the event's info reports, or returns UNKNOWN_EVENT_ID if it was deleted.
     SceInt32 info(SceKernelEventInfo &info);
     void requeue(const ThreadState &thread) override;
+    // For a multiple event wait's scan: completes token with the event's bits if it has them, else
+    // queues it if queue is set. Returns SCE_KERNEL_OK if the entry ended, EVENT_COND if not, or
+    // UNKNOWN_EVENT_ID if the event was deleted.
+    SceInt32 scan_token(Token &token, bool queue);
+    // Takes a token off the queue if it is still on it, and serves the waits behind it.
+    void remove_token(Token &token);
+    // Returns when the event fires by itself next, the maximum if it never does. Only a timer does.
+    Deadline next_fire();
+    // Fires an event that was due by until.
+    void update(Deadline until);
 
 protected:
     // The attributes a create takes. The notify attribute is accepted and reported, nothing reads it.
@@ -202,16 +227,21 @@ protected:
 
     Event(SceUInt32 attr, const char *name, SceUInt32 init_pattern, SceUInt64 init_user_data);
 
-    struct WaitEntry {
-        SceUInt32 pattern;
-        SceUInt32 *result_pattern;
-        SceUInt64 *user_data;
-    };
+    // Ends waiter's wait with result and the bits it got: a plain waiter gets them and wakes, a token
+    // gives them to its multiple event wait. Returns false for a token of a wait that already ended,
+    // which takes nothing. The caller takes the waiter off the queue. The lock must be held.
+    bool complete(WaitQueue<WaitEntry>::Waiter &waiter, SceInt32 result, SceUInt32 bits);
+    // Ends every wait queued here with result, as a delete or a cancel does, and returns how many
+    // took it. The lock must be held.
+    std::size_t end_waits(SceInt32 result);
 
     void on_delete(SceUID deleter) override;
     // Brings the event up to date before an event operation looks at it. Called with the lock held.
     // Only a timer has anything to do.
     virtual void catch_up() {}
+    // Returns when the event fires by itself next, also if that already passed, or the maximum if it
+    // never does. The lock must be held.
+    virtual Deadline event_deadline() const { return Deadline::max(); }
     // Takes the event if wait_pattern matches, or returns SCE_KERNEL_ERROR_EVENT_COND. The lock must be held.
     SceInt32 try_take(SceUInt32 wait_pattern, SceUInt32 *result_pattern, SceUInt64 *user_data);
     // Returns the guest's result of a wait, and gives a wait that a delete or a cancel ended the error
@@ -284,11 +314,13 @@ private:
     void queue_event(uint64_t deadline);
     // Gives the event's bits to the waits they match, and wakes the first waiter left.
     void serve() override;
-    // Returns when the next event is due, on the clock of wait deadlines. The lock must be held.
-    Deadline event_deadline() const;
+    // Returns when the next event is due, on the clock of wait deadlines, also if that already
+    // passed. The lock must be held.
+    Deadline event_deadline() const override;
     // Returns how much time the timer counted. The lock must be held.
     uint64_t count() const;
 
+public:
     // Guarded by the lock
     bool is_started = false;
     // An event is set, and a fired one shot event stays armed
@@ -307,6 +339,72 @@ private:
 };
 
 using TimerPtr = std::shared_ptr<Timer>;
+
+// Returns the simple event or the timer uid names, or nothing.
+EventPtr find_event(const KernelObjects &objects, SceUID uid);
+
+// One sceKernelWaitMultipleEvents call: its copy of the list, a token on the event of each entry that
+// waits, and how the entries ended. An event takes its mutex inside the event's lock.
+class MultiEventWait {
+public:
+    MultiEventWait(KernelState &kernel, ThreadStatePtr thread, std::span<const SceKernelWaitEvent> list, bool any);
+
+    // Waits for any or all of the events. time_left is the call's copy of the timeout, or null.
+    WaitResult run(SceUInt32 *time_left, bool callbacks);
+    // Records how entry index ended. Returns false if the entry ended before or the wait takes no
+    // more results, so the event keeps its bits.
+    bool finish(SceUInt32 index, SceInt32 result, SceUInt32 bits, SceUInt64 user_data);
+    // Writes the results, with the UIDs the call listed, and returns how many entries ended.
+    SceUInt32 copy_results(std::span<SceKernelResultEvent> out);
+
+private:
+    using Entries = std::bitset<SCE_KERNEL_MULTIPLE_EVENTS_MAX>;
+    // Scanning: the call looks at the events, and every entry that ends is recorded. Waiting: the
+    // thread sleeps until an entry ends the wait. Ended: an entry ended it. Closed: the thread ended
+    // it, by a timeout, a callback or its exit. Neither of the last two takes more results.
+    enum class Phase { scanning, waiting, ended, closed };
+    // How an entry ended
+    struct Ended {
+        SceUInt32 index;
+        SceInt32 result;
+        SceUInt32 bits;
+        SceUInt64 user_data;
+    };
+
+    // Ends the entries whose event is set or gone and queues a token for the others. Returns the
+    // entries it queued.
+    Entries scan();
+    // Starts the sleep, unless no queued token is left or an entry ended an OR wait.
+    bool begin_wait(const Entries &queued);
+    // Ends the wait: an entry that ended it wins over the sleep's result, else the result stands and
+    // the wait takes no more results.
+    WaitResult finish_wait(const WaitResult &result);
+    // Sleeps until an entry ends the wait, the deadline or a callback. A timer among the events fires
+    // while the thread sleeps.
+    WaitResult sleep(Deadline deadline, bool callbacks, const Entries &queued);
+    // Whether an entry ended the wait.
+    bool ended();
+    // Takes the queued tokens off their events.
+    void dequeue(const Entries &queued);
+
+    const ThreadStatePtr thread;
+    const bool any;
+    const SceUInt32 count;
+    std::array<SceKernelWaitEvent, SCE_KERNEL_MULTIPLE_EVENTS_MAX> list;
+    // The UID of the object each entry names, or none, so the results report the first entry that
+    // names the same one
+    std::array<SceUID, SCE_KERNEL_MULTIPLE_EVENTS_MAX> objects;
+    std::array<EventPtr, SCE_KERNEL_MULTIPLE_EVENTS_MAX> events;
+    std::array<Event::Token, SCE_KERNEL_MULTIPLE_EVENTS_MAX> tokens;
+
+    std::mutex mutex;
+    // Guarded by mutex
+    Phase phase = Phase::scanning;
+    Entries waiting_on;
+    Entries finished;
+    std::array<Ended, SCE_KERNEL_MULTIPLE_EVENTS_MAX> results{};
+    SceUInt32 num_results = 0;
+};
 
 class Semaphore final : public WithUidClass<SyncPrimitive, UidClass::semaphore> {
 public:

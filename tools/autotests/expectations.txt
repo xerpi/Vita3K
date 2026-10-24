@@ -52,7 +52,7 @@ cb_wait_initial_callback_deadline pass
 cb_wait_take_final_check        pass
 cb_wait_timeout_copy            pass
 cb_wait_zero_timeout_notify     pass
-cb_waits                        fail     # sceKernelWaitMultipleEvents
+cb_waits                        pass
 ceiling_base_change             fail     # a mutex ceiling doesn't raise its owner's priority
 ceiling_unlock_order            fail     # a mutex ceiling doesn't raise its owner's priority
 ceiling_waiter                  fail     # a mutex ceiling doesn't raise its owner's priority
@@ -211,19 +211,19 @@ msgpipe_waits                   pass
 msgpipe_wake_state              skip     # threads ignore their core and priority, so whether the woken waiter ran before its status is read is a race
 msgpipe_zero_bytes              pass
 mspace                          fail     # sceClib memory space info
-multi_events                    fail     # waiting on several events, callbacks registered to events
-multi_events_and_delete         fail     # sceKernelWaitMultipleEvents, deleted events and the wait type and UID
-multi_events_callback_copies    fail     # sceKernelWaitMultipleEvents
-multi_events_cancel_after_end   fail     # sceKernelWaitMultipleEvents
-multi_events_errors             fail     # waiting on several events with unknown UIDs
-multi_events_final_check        fail     # sceKernelWaitMultipleEvents
-multi_events_pipe               fail     # sceKernelWaitMultipleEvents
-multi_events_requeue            fail     # sceKernelWaitMultipleEvents
-multi_events_results_past       fail     # sceKernelWaitMultipleEvents
-multi_events_same_event         fail     # sceKernelWaitMultipleEvents
-multi_events_two_handles        fail     # sceKernelWaitMultipleEvents
-multi_events_unknown_uid        fail     # sceKernelWaitMultipleEvents with unusable entries and cancels
-multi_events_waits              fail     # multiple event wait results, wait type and auto reset
+multi_events                    pass
+multi_events_and_delete         pass
+multi_events_callback_copies    pass
+multi_events_cancel_after_end   pass
+multi_events_errors             pass
+multi_events_final_check        fail     # a callback pending since the start of a multiple event wait ends its sleep
+multi_events_pipe               fail     # a message pipe isn't an event
+multi_events_requeue            fail     # a priority change doesn't requeue the entries of a multiple event wait
+multi_events_results_past       pass
+multi_events_same_event         fail     # a priority change doesn't requeue the entries of a multiple event wait
+multi_events_two_handles        fail     # an opened event's UID is its creating one
+multi_events_unknown_uid        pass
+multi_events_waits              pass
 mutex                           pass
 mutex_cancel_counts             pass
 mutex_ceiling                   fail     # mutex priority ceilings
@@ -374,7 +374,7 @@ thread_status_matrix            fail     # READY, the current CPU of a thread th
 thread_suspend_for_vm_stops     pass
 thread_vfp_exception            pass
 thread_wait_id_idle             fail     # a thread that can run but hasn't reports RUNNING instead of READY
-timeout_left_kinds              fail     # sceKernelWaitMultipleEvents
+timeout_left_kinds              pass
 timeout_serves_before_run       fail     # a timed out thread isn't READY before it runs
 timeout_threshold               skip     # timing, which short timeouts end at once
 timeouts                        pass
@@ -416,7 +416,7 @@ wait_info_retries               fail     # a woken thread reports RUNNING instea
 wait_order                      pass
 wait_own_end                    pass
 wait_priority_change            pass
-wait_zero_timeout               fail     # multiple event waits with a timeout of 0
+wait_zero_timeout               pass
 wake_all_order                  fail     # threads ignore their core and priority
 wake_batch_cores                fail     # threads ignore their core
 wake_busy_cores                 fail     # threads are never READY or STANDBY and ignore their core

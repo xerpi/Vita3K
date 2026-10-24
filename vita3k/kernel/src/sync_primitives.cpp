@@ -41,6 +41,182 @@ SceInt32 SyncPrimitive::check_name(const char *name, SceUInt32 attr) {
 // * Simple events *
 // *****************
 
+EventPtr find_event(const KernelObjects &objects, SceUID uid) {
+    if (SimpleEventPtr event = objects.find<SimpleEvent>(uid))
+        return event;
+    return objects.find<Timer>(uid);
+}
+
+// The wait UID a thread in a multiple event wait reports, the UID of none of its events
+constexpr SceUID MULTI_EVENTS_WAIT_ID = static_cast<SceUID>(0x80000000);
+// The object UID of an entry whose UID names nothing, which no object has
+constexpr SceUID NO_OBJECT = SCE_KERNEL_ERROR_UNKNOWN_EVENT_ID;
+
+MultiEventWait::MultiEventWait(KernelState &kernel, ThreadStatePtr thread, std::span<const SceKernelWaitEvent> wait_list, bool any)
+    : thread(std::move(thread))
+    , any(any)
+    , count(static_cast<SceUInt32>(wait_list.size())) {
+    std::ranges::copy(wait_list, list.begin());
+    for (SceUInt32 i = 0; i < count; i++) {
+        const SceUID uid = list[i].eventId;
+        events[i] = find_event(kernel.objects, uid);
+        if (const auto object = kernel.objects.find(uid))
+            objects[i] = object->uid;
+        else
+            objects[i] = kernel.get_thread(uid) ? uid : NO_OBJECT;
+        tokens[i] = { .thread = this->thread, .entry = { list[i].eventPattern, nullptr, nullptr, this, i } };
+    }
+}
+
+WaitResult MultiEventWait::run(SceUInt32 *time_left, bool callbacks) {
+    const Deadline deadline = deadline_from(time_left);
+    while (true) {
+        // Before any event is looked up
+        if (callbacks && thread->has_pending_callbacks()) {
+            if (const WaitResult r = thread->run_callbacks(); !r)
+                return r;
+        }
+        const Entries queued = scan();
+        if (!begin_wait(queued)) {
+            dequeue(queued);
+            return SCE_KERNEL_OK;
+        }
+        // A deadline gone before the sleep ends the call without the final callback check
+        if (std::chrono::steady_clock::now() >= deadline) {
+            const WaitResult result = finish_wait(SCE_KERNEL_ERROR_WAIT_TIMEOUT);
+            dequeue(queued);
+            if (time_left)
+                *time_left = 0;
+            return result;
+        }
+        WaitResult result = finish_wait(sleep(deadline, callbacks, queued));
+        dequeue(queued);
+        if (time_left)
+            *time_left = time_left_until(deadline);
+        if (!result || *result != SCE_KERNEL_ERROR_NOTIFY_CALLBACK) {
+            // The callbacks notified during the sleep run before the call returns
+            if (callbacks && result) {
+                if (const WaitResult ran = thread->run_callbacks(); !ran)
+                    result = ran;
+            }
+            return result;
+        }
+    }
+}
+
+bool MultiEventWait::finish(SceUInt32 index, SceInt32 result, SceUInt32 bits, SceUInt64 user_data) {
+    const std::lock_guard<std::mutex> lock(mutex);
+    if (phase == Phase::ended || phase == Phase::closed || finished.test(index))
+        return false;
+    finished.set(index);
+    results[num_results++] = { index, result, bits, user_data };
+    // The entry that ends an OR wait, or the last of an AND wait, wakes the thread
+    if (phase == Phase::waiting && (any || (waiting_on & ~finished).none())) {
+        phase = Phase::ended;
+        thread->wake();
+    }
+    return true;
+}
+
+SceUInt32 MultiEventWait::copy_results(std::span<SceKernelResultEvent> out) {
+    const std::lock_guard<std::mutex> lock(mutex);
+    const auto listed = std::span{ objects }.first(count);
+    for (SceUInt32 i = 0; i < num_results; i++) {
+        const Ended &ended = results[i];
+        // Every entry reports the UID of the first entry that names the same object
+        const auto first = std::ranges::find(listed, objects[ended.index]) - listed.begin();
+        out[i] = { list[first].eventId, ended.result, ended.bits, 0, ended.user_data };
+    }
+    return num_results;
+}
+
+MultiEventWait::Entries MultiEventWait::scan() {
+    {
+        const std::lock_guard<std::mutex> lock(mutex);
+        phase = Phase::scanning;
+    }
+    Entries queued;
+    // In OR mode an entry that ends stops the queueing, but the scan still records the set ones
+    bool queueing = true;
+    for (SceUInt32 i = 0; i < count; i++) {
+        {
+            const std::lock_guard<std::mutex> lock(mutex);
+            if (finished.test(i))
+                continue;
+        }
+        const SceInt32 scanned = events[i] ? events[i]->scan_token(tokens[i], queueing) : SCE_KERNEL_ERROR_UNKNOWN_EVENT_ID;
+        if (scanned == SCE_KERNEL_ERROR_UNKNOWN_EVENT_ID)
+            finish(i, SCE_KERNEL_ERROR_UNKNOWN_EVENT_ID, SCE_KERNEL_EVENT_ERROR, 0);
+        if (scanned != SCE_KERNEL_ERROR_EVENT_COND)
+            queueing = queueing && !any;
+        else if (queueing)
+            queued.set(i);
+    }
+    return queued;
+}
+
+bool MultiEventWait::begin_wait(const Entries &queued) {
+    const std::lock_guard<std::mutex> lock(mutex);
+    // A token an event ended during the scan isn't queued any more
+    const std::size_t left = (queued & ~finished).count();
+    if (left == 0 || (any && left < count)) {
+        phase = Phase::ended;
+        return false;
+    }
+    waiting_on = queued;
+    phase = Phase::waiting;
+    return true;
+}
+
+WaitResult MultiEventWait::finish_wait(const WaitResult &result) {
+    const std::lock_guard<std::mutex> lock(mutex);
+    if (phase != Phase::ended) {
+        phase = Phase::closed;
+        return result;
+    }
+    // An entry ended the wait first, so the call has its results, unless the thread exits
+    if (!result)
+        return result;
+    return SCE_KERNEL_OK;
+}
+
+WaitResult MultiEventWait::sleep(Deadline deadline, bool callbacks, const Entries &queued) {
+    while (true) {
+        // A timer's event fires only when something looks at it, so the thread wakes for the next one
+        Deadline wake = deadline;
+        for (SceUInt32 i = 0; i < count; i++) {
+            if (queued.test(i))
+                wake = std::min(wake, events[i]->next_fire());
+        }
+        const WaitResult result = thread->wait({ SCE_KERNEL_WAITTYPE_MP_EVENTS, MULTI_EVENTS_WAIT_ID, callbacks }, wake);
+        if (!result || *result == SCE_KERNEL_ERROR_NOTIFY_CALLBACK)
+            return result;
+        // Woken by an entry, by a timer's new schedule, or for a timer's event. After a late wake only
+        // a timer event due by the deadline still ends the wait.
+        const Deadline now = std::chrono::steady_clock::now();
+        for (SceUInt32 i = 0; i < count; i++) {
+            if (queued.test(i))
+                events[i]->update(std::min(now, deadline));
+        }
+        if (ended())
+            return SCE_KERNEL_OK;
+        if (now >= deadline)
+            return SCE_KERNEL_ERROR_WAIT_TIMEOUT;
+    }
+}
+
+bool MultiEventWait::ended() {
+    const std::lock_guard<std::mutex> lock(mutex);
+    return phase == Phase::ended;
+}
+
+void MultiEventWait::dequeue(const Entries &queued) {
+    for (SceUInt32 i = 0; i < count; i++) {
+        if (queued.test(i))
+            events[i]->remove_token(tokens[i]);
+    }
+}
+
 Event::Event(SceUInt32 attr, const char *name, SceUInt32 init_pattern, SceUInt64 init_user_data)
     : CallbackNotifier(attr, name)
     , auto_reset(attr & SCE_KERNEL_EVENT_ATTR_AUTO_RESET)
@@ -66,7 +242,67 @@ void Event::on_delete(SceUID deleter) {
     // The waits for the delete event get it with the deleting thread's user data, then the others end
     fire(SCE_KERNEL_EVENT_DELETE, system_event_user_data(deleter), true);
     notify_callbacks(SCE_KERNEL_EVENT_DELETE);
-    waiters.wake_all(SCE_KERNEL_ERROR_WAIT_DELETE);
+    end_waits(SCE_KERNEL_ERROR_WAIT_DELETE);
+}
+
+bool Event::complete(WaitQueue<WaitEntry>::Waiter &waiter, SceInt32 result, SceUInt32 bits) {
+    const WaitEntry &wait = waiter.entry;
+    const SceUInt64 user_data = result == SCE_KERNEL_OK ? last_user_data : 0;
+    if (wait.multi)
+        return wait.multi->finish(wait.index, result, bits, user_data);
+    if (wait.result_pattern)
+        *wait.result_pattern = bits;
+    if (wait.user_data)
+        *wait.user_data = user_data;
+    waiter.result = result;
+    waiter.thread->wake();
+    return true;
+}
+
+std::size_t Event::end_waits(SceInt32 result) {
+    std::size_t ended = 0;
+    waiters.remove_if([&](auto &waiter) {
+        ended += complete(waiter, result, SCE_KERNEL_EVENT_ERROR);
+        return true;
+    });
+    return ended;
+}
+
+SceInt32 Event::scan_token(Token &token, bool queue) {
+    const auto guard = lock();
+    if (!guard)
+        return SCE_KERNEL_ERROR_UNKNOWN_EVENT_ID;
+    catch_up();
+    if (const SceUInt32 bits = pattern & token.entry.pattern) {
+        if (complete(token, SCE_KERNEL_OK, bits) && auto_reset)
+            pattern &= ~token.entry.pattern;
+        return SCE_KERNEL_OK;
+    }
+    if (queue) {
+        token.priority = token.thread->get_priority();
+        waiters.push(token);
+    }
+    return SCE_KERNEL_ERROR_EVENT_COND;
+}
+
+void Event::remove_token(Token &token) {
+    const auto guard = lock();
+    if (!guard)
+        return;
+    // A token that leaves without the bits lets the waits behind it have them
+    waiters.remove(token);
+    serve();
+}
+
+Deadline Event::next_fire() {
+    const auto guard = lock();
+    return guard ? event_deadline() : Deadline::max();
+}
+
+void Event::update(Deadline until) {
+    const auto guard = lock();
+    if (guard && event_deadline() <= until)
+        catch_up();
 }
 
 SceInt32 CallbackNotifier::register_callback(const CallbackPtr &callback, SceUID notify_id) {
@@ -202,21 +438,13 @@ void Event::fire(SceUInt32 set_pattern, SceUInt64 user_data, bool is_set) {
 }
 
 void Event::serve() {
-    waiters.wake_if([&](auto &waiter) {
-        const WaitEntry &wait = waiter.entry;
-        if (!(pattern & wait.pattern))
+    waiters.remove_if([&](auto &waiter) {
+        const SceUInt32 bits = pattern & waiter.entry.pattern;
+        if (!bits)
             return false;
-
-        if (wait.result_pattern)
-            *wait.result_pattern = pattern & wait.pattern;
-
-        if (wait.user_data)
-            *wait.user_data = last_user_data;
-
-        if (auto_reset)
-            // all common bit are zeroed
-            pattern &= ~wait.pattern;
-
+        // A token of a wait that already ended leaves without the bits, for the waits behind it
+        if (complete(waiter, SCE_KERNEL_OK, bits) && auto_reset)
+            pattern &= ~waiter.entry.pattern;
         return true;
     });
 }
@@ -240,7 +468,8 @@ SceInt32 Event::cancel(SceUInt32 *num_wait_threads) {
         return SCE_KERNEL_ERROR_UNKNOWN_EVENT_ID;
     catch_up();
 
-    const auto nb_threads = static_cast<SceUInt32>(waiters.wake_all(SCE_KERNEL_ERROR_WAIT_CANCEL));
+    // The entries of multiple event waits count as waiters too
+    const auto nb_threads = static_cast<SceUInt32>(end_waits(SCE_KERNEL_ERROR_WAIT_CANCEL));
     if (num_wait_threads)
         *num_wait_threads = nb_threads;
 
@@ -255,7 +484,8 @@ SceInt32 Event::cancel(SceUInt32 set_pattern, SceUInt64 user_data, SceUInt32 *nu
     if (set_pattern & ~SCE_KERNEL_EVENT_USER_DEFINED_MASK)
         return SCE_KERNEL_ERROR_ILLEGAL_PATTERN;
 
-    const auto nb_threads = static_cast<SceUInt32>(waiters.wake_all(SCE_KERNEL_ERROR_WAIT_CANCEL));
+    // The entries of multiple event waits count as waiters too
+    const auto nb_threads = static_cast<SceUInt32>(end_waits(SCE_KERNEL_ERROR_WAIT_CANCEL));
     // Every bit is replaced, the create event too, and no waiter is left to get them
     pattern = set_pattern;
     last_user_data = user_data;
@@ -351,8 +581,8 @@ void Timer::queue_event(uint64_t deadline) {
 Deadline Timer::event_deadline() const {
     if (next_event == std::numeric_limits<uint64_t>::max())
         return Deadline::max();
-    const uint64_t now = get_current_time();
-    return std::chrono::steady_clock::now() + std::chrono::microseconds(next_event > now ? next_event - now : 0);
+    const auto ahead = static_cast<int64_t>(next_event - get_current_time());
+    return std::chrono::steady_clock::now() + std::chrono::microseconds(ahead);
 }
 
 SceInt32 Timer::set_event(SceUID type, SceKernelSysClock interval, SceInt32 repeats) {
@@ -564,7 +794,8 @@ SceInt32 Timer::cancel(SceUInt32 *num_wait_threads) {
         return SCE_KERNEL_ERROR_UNKNOWN_TIMER_ID;
     catch_up();
 
-    const auto nb_threads = static_cast<SceUInt32>(waiters.wake_all(SCE_KERNEL_ERROR_WAIT_CANCEL));
+    // The entries of multiple event waits count as waiters too
+    const auto nb_threads = static_cast<SceUInt32>(end_waits(SCE_KERNEL_ERROR_WAIT_CANCEL));
     // The event set with sceKernelSetTimerEvent is canceled too, but the timer keeps running with
     // the event's interval and type
     armed = false;
