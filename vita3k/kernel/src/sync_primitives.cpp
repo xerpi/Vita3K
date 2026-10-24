@@ -89,7 +89,16 @@ WaitResult MultiEventWait::run(SceUInt32 *time_left, bool callbacks) {
                 *time_left = 0;
             return result;
         }
+        // A priority change moves the tokens too
+        std::array<SceUID, SCE_KERNEL_MULTIPLE_EVENTS_MAX> queued_events;
+        std::size_t num_queued = 0;
+        for (SceUInt32 i = 0; i < count; i++) {
+            if (queued.test(i))
+                queued_events[num_queued++] = list[i].eventId;
+        }
+        thread->set_multi_wait_events(std::span{ queued_events }.first(num_queued));
         WaitResult result = finish_wait(sleep(deadline, callbacks, queued));
+        thread->set_multi_wait_events({});
         dequeue(queued);
         if (time_left)
             *time_left = time_left_until(deadline);

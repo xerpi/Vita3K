@@ -26,6 +26,7 @@
 #include <util/log.h>
 
 #include <algorithm>
+#include <array>
 #include <cassert>
 #include <cstring>
 #include <memory>
@@ -593,6 +594,11 @@ void ThreadState::set_queue_object(SceUID object) {
     queue_object = object;
 }
 
+void ThreadState::set_multi_wait_events(std::span<const SceUID> events) {
+    const std::lock_guard<std::mutex> lock(mutex);
+    multi_wait_events = events;
+}
+
 bool ThreadState::has_pending_callbacks() {
     const std::lock_guard<std::mutex> lock(mutex);
     return callbacks_notified();
@@ -702,10 +708,16 @@ int ThreadState::change_priority(int new_priority) {
     const int old_priority = priority;
     set_priority(new_priority);
     const SceUID queued_on = queue_object;
+    std::array<SceUID, SCE_KERNEL_MULTIPLE_EVENTS_MAX> events;
+    const auto events_end = std::ranges::copy(multi_wait_events, events.begin()).out;
     lock.unlock();
-    // The object takes its own lock, and moves the thread only if it still waits on it
-    if (const auto object = std::dynamic_pointer_cast<SyncPrimitive>(kernel.objects.find(queued_on)))
-        object->requeue(*this);
+    // Each object takes its own lock, and moves the thread only if it still waits on it
+    const auto requeue = [&](SceUID uid) {
+        if (const auto object = std::dynamic_pointer_cast<SyncPrimitive>(kernel.objects.find(uid)))
+            object->requeue(*this);
+    };
+    requeue(queued_on);
+    std::ranges::for_each(events.begin(), events_end, requeue);
     return old_priority;
 }
 
