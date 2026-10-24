@@ -1425,9 +1425,11 @@ SceInt32 MsgPipe::check_create(const char *name, SceUInt32 type, SceUInt32 attr,
 }
 
 // Returns whether a send or receive takes this wait mode
-static bool is_msg_pipe_mode(SceUInt32 wait_mode) {
-    return !(wait_mode & ~(SCE_KERNEL_MSG_PIPE_MODE_FULL | SCE_KERNEL_MSG_PIPE_MODE_DONT_WAIT | SCE_KERNEL_MSG_PIPE_MODE_DONT_REMOVE));
-}
+// The mode bits each call takes
+constexpr SceUInt32 SEND_MODES = SCE_KERNEL_MSG_PIPE_MODE_FULL | SCE_KERNEL_MSG_PIPE_MODE_DONT_WAIT;
+constexpr SceUInt32 RECEIVE_MODES = SEND_MODES | SCE_KERNEL_MSG_PIPE_MODE_DONT_REMOVE;
+constexpr SceUInt32 TRY_SEND_MODES = SCE_KERNEL_MSG_PIPE_MODE_FULL;
+constexpr SceUInt32 TRY_RECEIVE_MODES = SCE_KERNEL_MSG_PIPE_MODE_FULL | SCE_KERNEL_MSG_PIPE_MODE_DONT_REMOVE;
 
 void MsgPipe::on_delete(SceUID) {
     // Wake up every thread
@@ -1587,11 +1589,11 @@ void MsgPipe::serve() {
 }
 
 SceInt32 MsgPipe::receive(const ThreadStatePtr &thread, MemState &mem, SceUInt32 wait_mode, std::span<const MsgPipeVector> pieces, SceSize *size, SceUInt32 *timeout, bool callbacks) {
-    if (!is_msg_pipe_mode(wait_mode))
+    if (wait_mode & ~RECEIVE_MODES)
         return SCE_KERNEL_ERROR_ILLEGAL_MODE;
     // DONT_WAIT ends like a try, and a wait with callbacks runs them after it
     if (wait_mode & SCE_KERNEL_MSG_PIPE_MODE_DONT_WAIT) {
-        const SceInt32 result = try_receive(thread, mem, wait_mode, pieces, size);
+        const SceInt32 result = try_receive(thread, mem, wait_mode & ~SCE_KERNEL_MSG_PIPE_MODE_DONT_WAIT, pieces, size);
         if (callbacks)
             thread->process_callbacks();
         return result;
@@ -1623,11 +1625,11 @@ SceInt32 MsgPipe::receive(const ThreadStatePtr &thread, MemState &mem, SceUInt32
 }
 
 SceInt32 MsgPipe::send(const ThreadStatePtr &thread, MemState &mem, SceUInt32 wait_mode, std::span<const MsgPipeVector> pieces, SceSize *size, SceUInt32 *timeout, bool callbacks) {
-    if (!is_msg_pipe_mode(wait_mode))
+    if (wait_mode & ~SEND_MODES)
         return SCE_KERNEL_ERROR_ILLEGAL_MODE;
     // DONT_WAIT ends like a try, and a wait with callbacks runs them after it
     if (wait_mode & SCE_KERNEL_MSG_PIPE_MODE_DONT_WAIT) {
-        const SceInt32 result = try_send(thread, mem, wait_mode, pieces, size);
+        const SceInt32 result = try_send(thread, mem, wait_mode & ~SCE_KERNEL_MSG_PIPE_MODE_DONT_WAIT, pieces, size);
         if (callbacks)
             thread->process_callbacks();
         return result;
@@ -1659,7 +1661,7 @@ SceInt32 MsgPipe::send(const ThreadStatePtr &thread, MemState &mem, SceUInt32 wa
 }
 
 SceInt32 MsgPipe::try_receive(const ThreadStatePtr &thread, MemState &mem, SceUInt32 wait_mode, std::span<const MsgPipeVector> pieces, SceSize *size) {
-    if (!is_msg_pipe_mode(wait_mode))
+    if (wait_mode & ~TRY_RECEIVE_MODES)
         return SCE_KERNEL_ERROR_ILLEGAL_MODE;
     const std::expected<SceSize, SceInt32> total = pieces_size(pieces, data_buffer.Capacity());
     if (!total)
@@ -1677,7 +1679,7 @@ SceInt32 MsgPipe::try_receive(const ThreadStatePtr &thread, MemState &mem, SceUI
 }
 
 SceInt32 MsgPipe::try_send(const ThreadStatePtr &thread, MemState &mem, SceUInt32 wait_mode, std::span<const MsgPipeVector> pieces, SceSize *size) {
-    if (!is_msg_pipe_mode(wait_mode))
+    if (wait_mode & ~TRY_SEND_MODES)
         return SCE_KERNEL_ERROR_ILLEGAL_MODE;
     const std::expected<SceSize, SceInt32> total = pieces_size(pieces, data_buffer.Capacity());
     if (!total)

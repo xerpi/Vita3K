@@ -186,7 +186,7 @@ msgpipe_async                   fail     # message pipe sends and receives that 
 msgpipe_callback_partial        pass
 msgpipe_callback_rejoin_order   pass
 msgpipe_edges                   pass
-msgpipe_errors                  fail     # closing unknown UIDs, the modes a try send takes, a create past the memory budget
+msgpipe_errors                  fail     # closing unknown UIDs, a create past the memory budget
 msgpipe_failed_sizes            pass
 msgpipe_modes                   pass
 msgpipe_order                   pass
