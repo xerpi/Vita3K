@@ -102,7 +102,7 @@ event_flag_wait_out_bits        pass
 event_flag_waits                pass
 event_flag_wake_release         fail     # a woken thread isn't READY before it runs, its out bits are written at the wake, and a notified waiter leaves the queue only once its thread runs
 event_initial_user_data         pass
-event_notify_callback           fail     # callbacks registered to simple events
+event_notify_callback           pass
 exit_process                    pass
 exit_process_thread             pass
 fiber_entry_returns             crash    # the fiber module doesn't load without firmware
@@ -360,7 +360,7 @@ timeout_threshold               skip     # timing, which short timeouts end at o
 timeouts                        pass
 timer                           pass
 timer_base_remaining            pass
-timer_callback                  fail     # callbacks registered to timers
+timer_callback                  fail     # a timer's events reach its registered callbacks only when something reads the timer, there is no timer service
 timer_delete_event              pass
 timer_edges                     pass
 timer_errors                    fail     # closing unknown UIDs

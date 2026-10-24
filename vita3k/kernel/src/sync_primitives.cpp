@@ -42,7 +42,7 @@ SceInt32 SyncPrimitive::check_name(const char *name, SceUInt32 attr) {
 // *****************
 
 Event::Event(SceUInt32 attr, const char *name, SceUInt32 init_pattern, SceUInt64 init_user_data)
-    : SyncPrimitive(attr, name)
+    : CallbackNotifier(attr, name)
     , auto_reset(attr & SCE_KERNEL_EVENT_ATTR_AUTO_RESET)
     , waiters(attr)
     , pattern(init_pattern | SCE_KERNEL_EVENT_CREATE)
@@ -65,7 +65,46 @@ SceInt32 SimpleEvent::check_create(const char *name, SceUInt32 attr, SceUInt32 i
 void Event::on_delete(SceUID deleter) {
     // The waits for the delete event get it with the deleting thread's user data, then the others end
     fire(SCE_KERNEL_EVENT_DELETE, system_event_user_data(deleter), true);
+    notify_callbacks(SCE_KERNEL_EVENT_DELETE);
     waiters.wake_all(SCE_KERNEL_ERROR_WAIT_DELETE);
+}
+
+SceInt32 CallbackNotifier::register_callback(const CallbackPtr &callback, SceUID notify_id) {
+    const auto guard = lock();
+    if (!guard)
+        return SCE_KERNEL_ERROR_UNKNOWN_EVENT_ID;
+    // After the registrations of the same callback
+    const auto pos = std::ranges::upper_bound(registrations, callback->uid, {}, &Registration::callback_uid);
+    registrations.insert(pos, { callback->uid, callback, notify_id });
+    return SCE_KERNEL_OK;
+}
+
+SceInt32 CallbackNotifier::unregister_callback(SceUID callback) {
+    const auto guard = lock();
+    if (!guard)
+        return SCE_KERNEL_ERROR_UNKNOWN_EVENT_ID;
+    const auto it = std::ranges::find(registrations, callback, &Registration::callback_uid);
+    if (it == registrations.end())
+        return SCE_KERNEL_ERROR_CALLBACK_NOT_REGISTERED;
+    registrations.erase(it);
+    return SCE_KERNEL_OK;
+}
+
+SceInt32 CallbackNotifier::unregister_callbacks() {
+    const auto guard = lock();
+    if (!guard)
+        return SCE_KERNEL_ERROR_UNKNOWN_EVENT_ID;
+    registrations.clear();
+    return SCE_KERNEL_OK;
+}
+
+void CallbackNotifier::notify_callbacks(SceInt32 arg) {
+    // A callback that is gone, or whose thread is gone with it, drops out
+    std::erase_if(registrations, [](const Registration &r) { return r.callback.expired(); });
+    for (const Registration &r : registrations) {
+        if (const CallbackPtr callback = r.callback.lock())
+            callback->notify(r.notify_id, arg);
+    }
 }
 
 SceInt32 Event::try_take(SceUInt32 wait_pattern, SceUInt32 *result_pattern, SceUInt64 *user_data) {
@@ -120,14 +159,20 @@ SceInt32 Event::poll(SceUInt32 wait_pattern, SceUInt32 *result_pattern, SceUInt6
     return try_take(wait_pattern, result_pattern, user_data);
 }
 
-SceInt32 SimpleEvent::set_or_pulse(SceUInt32 set_pattern, SceUInt64 user_data, bool is_set) {
+SceInt32 SimpleEvent::set_or_pulse(SceUInt32 set_pattern, SceUInt64 user_data, bool is_set, std::optional<SceInt32> notify_arg) {
     const auto guard = lock();
     if (!guard)
         return SCE_KERNEL_ERROR_UNKNOWN_EVENT_ID;
     if (set_pattern & ~SCE_KERNEL_EVENT_USER_DEFINED_MASK)
         return SCE_KERNEL_ERROR_ILLEGAL_PATTERN;
+    // A set or pulse of no bits notifies nobody either
+    if (set_pattern == 0)
+        return SCE_KERNEL_OK;
 
+    // The waiters get the bits before the callbacks are notified
     fire(set_pattern, user_data, is_set);
+    if (notify_arg)
+        notify_callbacks(*notify_arg);
     return SCE_KERNEL_OK;
 }
 
@@ -136,6 +181,8 @@ SceInt32 SimpleEvent::set_system_event(SceUInt32 event, SceUInt64 user_data) {
     if (!guard)
         return SCE_KERNEL_ERROR_UNKNOWN_EVENT_ID;
     fire(event, user_data, true);
+    // The callbacks get the event's bit as the argument
+    notify_callbacks(event);
     return SCE_KERNEL_OK;
 }
 
@@ -278,6 +325,7 @@ void Timer::catch_up() {
     if (next_event > now)
         return;
     fire(SCE_KERNEL_EVENT_TIMER, 0, !is_pulse);
+    notify_callbacks(0);
     // A one shot event leaves the queue but stays armed, so a start or a set time can queue it again
     if (!is_repeat) {
         next_event = std::numeric_limits<uint64_t>::max();

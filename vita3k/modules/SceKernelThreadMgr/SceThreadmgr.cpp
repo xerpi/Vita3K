@@ -1792,9 +1792,17 @@ EXPORT(SceInt32, sceKernelPulseEvent, SceUID event_id, SceUInt32 set_pattern, Sc
     return event->set_or_pulse(set_pattern, user_data, false);
 }
 
-EXPORT(int, sceKernelRegisterCallbackToEvent) {
-    TRACY_FUNC(sceKernelRegisterCallbackToEvent);
-    return UNIMPLEMENTED();
+EXPORT(SceInt32, sceKernelRegisterCallbackToEvent, SceUID event_id, SceUID callback_id) {
+    TRACY_FUNC(sceKernelRegisterCallbackToEvent, event_id, callback_id);
+    // Any object callbacks can be registered to, a message pipe too
+    const auto event = std::dynamic_pointer_cast<CallbackNotifier>(emuenv.kernel.objects.find(event_id));
+    if (!event)
+        return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_EVENT_ID);
+    const CallbackPtr callback = emuenv.kernel.objects.find<Callback>(callback_id);
+    if (!callback)
+        return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_CALLBACK_ID);
+    // The callback gets the event's UID as its notifier
+    return event->register_callback(callback, event_id);
 }
 
 EXPORT(int, sceKernelResumeThreadForVM, SceUID threadId) {
@@ -1960,14 +1968,20 @@ EXPORT(int, sceKernelUnlockWriteRWLock, SceUID lock_id) {
     return rwlock->release_write(emuenv.kernel.get_thread(thread_id));
 }
 
-EXPORT(int, sceKernelUnregisterCallbackFromEvent) {
-    TRACY_FUNC(sceKernelUnregisterCallbackFromEvent);
-    return UNIMPLEMENTED();
+EXPORT(SceInt32, sceKernelUnregisterCallbackFromEvent, SceUID event_id, SceUID callback_id) {
+    TRACY_FUNC(sceKernelUnregisterCallbackFromEvent, event_id, callback_id);
+    const auto event = std::dynamic_pointer_cast<CallbackNotifier>(emuenv.kernel.objects.find(event_id));
+    if (!event)
+        return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_EVENT_ID);
+    return event->unregister_callback(callback_id);
 }
 
-EXPORT(int, sceKernelUnregisterCallbackFromEventAll) {
-    TRACY_FUNC(sceKernelUnregisterCallbackFromEventAll);
-    return UNIMPLEMENTED();
+EXPORT(SceInt32, sceKernelUnregisterCallbackFromEventAll, SceUID event_id) {
+    TRACY_FUNC(sceKernelUnregisterCallbackFromEventAll, event_id);
+    const auto event = std::dynamic_pointer_cast<CallbackNotifier>(emuenv.kernel.objects.find(event_id));
+    if (!event)
+        return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_EVENT_ID);
+    return event->unregister_callbacks();
 }
 
 EXPORT(int, sceKernelUnregisterThreadEventHandler, SceUID uid) {

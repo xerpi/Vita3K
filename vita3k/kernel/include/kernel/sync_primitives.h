@@ -148,9 +148,40 @@ constexpr SceUInt64 system_event_user_data(SceUID thread_id) {
     return (static_cast<SceUInt64>(thread_id) << 32) | static_cast<SceUInt32>(PROCESS_ID);
 }
 
+// A sync object that callbacks can be registered to, which it notifies on its events: the simple
+// events, the timers and the message pipes.
+class CallbackNotifier : public SyncPrimitive {
+public:
+    // Adds callback to the ones the object notifies, which get notify_id as the notifier, or returns
+    // UNKNOWN_EVENT_ID if it was deleted. A callback can be registered more than once.
+    SceInt32 register_callback(const CallbackPtr &callback, SceUID notify_id);
+    // Removes the first registration of the callback, or returns CALLBACK_NOT_REGISTERED.
+    SceInt32 unregister_callback(SceUID callback);
+    // Removes every registered callback.
+    SceInt32 unregister_callbacks();
+
+protected:
+    using SyncPrimitive::SyncPrimitive;
+
+    // Notifies the registered callbacks with arg, and drops the ones that are gone. The lock must be
+    // held.
+    void notify_callbacks(SceInt32 arg);
+
+private:
+    struct Registration {
+        SceUID callback_uid;
+        std::weak_ptr<Callback> callback;
+        // What the callback gets as the notifier
+        SceUID notify_id;
+    };
+
+    // Guarded by the lock, in callback UID order
+    std::vector<Registration> registrations;
+};
+
 // The event part of simple events and timers: a bit pattern, the user data of the last set, and the
 // waits for bits of the pattern.
-class Event : public SyncPrimitive {
+class Event : public CallbackNotifier {
 public:
     const bool auto_reset;
 
@@ -206,7 +237,9 @@ public:
     static SceInt32 check_create(const char *name, SceUInt32 attr, SceUInt32 init_pattern);
 
     SceInt32 wait(const ThreadStatePtr &thread, SceUInt32 wait_pattern, SceUInt32 *result_pattern, SceUInt64 *user_data, SceUInt32 *timeout, bool callbacks);
-    SceInt32 set_or_pulse(SceUInt32 set_pattern, SceUInt64 user_data, bool is_set);
+    // Sets or pulses the bits, then notifies the registered callbacks with notify_arg if there is
+    // one.
+    SceInt32 set_or_pulse(SceUInt32 set_pattern, SceUInt64 user_data, bool is_set, std::optional<SceInt32> notify_arg = std::nullopt);
     // Sets one of the system events, like the open event, with user_data for its waiters, or returns
     // UNKNOWN_EVENT_ID if it was deleted.
     SceInt32 set_system_event(SceUInt32 event, SceUInt64 user_data);
@@ -562,7 +595,8 @@ struct MsgPipeVector {
     SceSize size;
 };
 
-class MsgPipe final : public WithUidClass<SyncPrimitive, UidClass::msg_pipe> {
+// Its registered callbacks are never notified, a pipe has no events of its own yet
+class MsgPipe final : public WithUidClass<CallbackNotifier, UidClass::msg_pipe> {
 public:
     MsgPipe(SceUInt32 attr, const char *name, std::size_t buf_size);
 

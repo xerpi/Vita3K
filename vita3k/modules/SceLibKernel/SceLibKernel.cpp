@@ -1664,9 +1664,12 @@ EXPORT(int, sceKernelPrintBacktrace) {
     return UNIMPLEMENTED();
 }
 
-EXPORT(int, sceKernelPulseEventWithNotifyCallback) {
-    TRACY_FUNC(sceKernelPulseEventWithNotifyCallback);
-    return UNIMPLEMENTED();
+EXPORT(SceInt32, sceKernelPulseEventWithNotifyCallback, SceUID event_id, SceUInt32 set_pattern, SceUInt64 user_data, SceInt32 notify_arg) {
+    TRACY_FUNC(sceKernelPulseEventWithNotifyCallback, event_id, set_pattern, user_data, notify_arg);
+    const SimpleEventPtr event = emuenv.kernel.objects.find<SimpleEvent>(event_id);
+    if (!event)
+        return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_EVENT_ID);
+    return event->set_or_pulse(set_pattern, user_data, false, notify_arg);
 }
 
 // Returns the error the pieces of a message pipe vector call get, or SCE_KERNEL_OK
@@ -1762,9 +1765,12 @@ EXPORT(SceInt32, sceKernelSendMsgPipeVectorCB, SceUID msgPipeId, const MsgPipeVe
     return send_msg_pipe_vector(emuenv, export_name, thread_id, msgPipeId, vectors, count, waitMode, pResult, pTimeout, true);
 }
 
-EXPORT(int, sceKernelSetEventWithNotifyCallback) {
-    TRACY_FUNC(sceKernelSetEventWithNotifyCallback);
-    return UNIMPLEMENTED();
+EXPORT(SceInt32, sceKernelSetEventWithNotifyCallback, SceUID event_id, SceUInt32 set_pattern, SceUInt64 user_data, SceInt32 notify_arg) {
+    TRACY_FUNC(sceKernelSetEventWithNotifyCallback, event_id, set_pattern, user_data, notify_arg);
+    const SimpleEventPtr event = emuenv.kernel.objects.find<SimpleEvent>(event_id);
+    if (!event)
+        return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_EVENT_ID);
+    return event->set_or_pulse(set_pattern, user_data, true, notify_arg);
 }
 
 EXPORT(int, sceKernelSetThreadContextForVM, SceUID threadId, Ptr<SceKernelThreadCpuRegisterInfo> pCpuRegisterInfo, Ptr<SceKernelThreadVfpRegisterInfo> pVfpRegisterInfo) {
