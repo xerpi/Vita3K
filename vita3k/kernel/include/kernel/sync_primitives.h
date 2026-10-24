@@ -519,6 +519,8 @@ public:
 
     SceInt32 wait(MemState &mem, const ThreadStatePtr &thread, SceUInt32 *timeout, bool callbacks);
     SceInt32 signal(SignalTarget target);
+    // Ends every wait with the delete error of the mutex, which was deleted.
+    void mutex_deleted();
     // Returns how many threads wait on the condition variable, 0 once it was deleted.
     SceUInt32 num_waiters() const;
     void requeue(const ThreadState &thread) override;

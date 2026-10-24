@@ -62,7 +62,7 @@ cond_callback_departure         pass
 cond_delete_relock              fail     # a condition or a mutex deleted after a signal, before the waiter relocks
 cond_errors                     fail     # closing unknown UIDs
 cond_mutex_delete               pass
-cond_mutex_delete_wakes         fail     # a mutex delete ends its conditions' waits only at their timeout
+cond_mutex_delete_wakes         pass
 cond_relock_requeue             pass
 cond_rwlock_edges               pass
 cond_semantics                  pass

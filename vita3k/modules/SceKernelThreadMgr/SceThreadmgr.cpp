@@ -350,6 +350,11 @@ EXPORT(int, _sceKernelDeleteLwMutex, Ptr<SceKernelLwMutexWork> workarea) {
 
     if (!emuenv.kernel.objects.remove<LwMutex>(lightweight_mutex_id, thread_id))
         return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_LW_MUTEX_ID);
+    // The waits on its conditions end too
+    emuenv.kernel.objects.for_each<LwCond>([=](LwCond &cond) {
+        if (cond.associated_mutex->uid == lightweight_mutex_id)
+            cond.mutex_deleted();
+    });
 
     return SCE_KERNEL_OK;
 }
@@ -1464,6 +1469,11 @@ EXPORT(int, sceKernelDeleteMutex, SceUID mutexid) {
     TRACY_FUNC(sceKernelDeleteMutex, mutexid);
     if (!emuenv.kernel.objects.remove<HeavyMutex>(mutexid, thread_id))
         return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_MUTEX_ID);
+    // The waits on its conditions end too
+    emuenv.kernel.objects.for_each<HeavyCond>([=](HeavyCond &cond) {
+        if (cond.associated_mutex->uid == mutexid)
+            cond.mutex_deleted();
+    });
 
     return SCE_KERNEL_OK;
 }

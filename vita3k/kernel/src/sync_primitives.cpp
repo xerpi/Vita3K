@@ -1141,6 +1141,12 @@ SceInt32 Condvar::wait(MemState &mem, const ThreadStatePtr &thread, SceUInt32 *t
     return result;
 }
 
+void Condvar::mutex_deleted() {
+    const auto guard = lock();
+    if (guard)
+        waiters.wake_all(lightweight() ? SCE_KERNEL_ERROR_WAIT_DELETE_LW_MUTEX : SCE_KERNEL_ERROR_WAIT_DELETE_MUTEX);
+}
+
 SceInt32 Condvar::signal(SignalTarget target) {
     const auto guard = lock();
     if (!guard)
