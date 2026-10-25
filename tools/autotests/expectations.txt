@@ -9,6 +9,8 @@ affinity_widen                  fail     # threads are never READY or STANDBY an
 app_free_sizes                  fail     # the app's code, data, stack and TLS aren't memory blocks, free sizes to the page
 app_memory_blocks               fail     # the app's code, data, stacks and TLS aren't memory blocks with their types
 app_memory_ranges               fail     # the app's own memory isn't in memory blocks, the find ignores its size
+appmgr_app_param_string         fail     # sceAppMgrAppParamGetString sizes, the NUL and the errors
+appmgr_system_event             crash    # sceAppMgrReceiveSystemEvent, then a host access past the guest's memory
 atomics                         pass
 audioout                        crash    # audio port size, rate and format checks, a NULL volume pointer
 cache_mount                     fail     # sceAppUtilCacheMount's init and mount checks, cache0: before a mount
@@ -75,6 +77,7 @@ create_attributes               fail     # the attributes condition variables, l
 create_attrs                    fail     # the attribute bits each create accepts
 cross_core_scheduling           fail     # threads ignore their core and priority
 delay                           pass
+delay_cb_early_return           fail     # a delay with callbacks sleeps to its deadline after a callback pass that no wake ended
 delay_negative                  pass
 delay_precision                 skip     # timing, how long short delays and timeouts take
 delay_variants                  pass
@@ -109,6 +112,9 @@ fiber_entry_returns             crash    # the fiber module doesn't load without
 fiber_vfp                       fail     # libfiber doesn't load without firmware
 fibers                          crash    # the fiber module doesn't load without firmware, fiber argument checks
 files                           fail     # closed file, EXCL, access mode and wrong type errors
+fios_overlay02                  fail     # FIOS overlays
+fios_overlay_resolve            fail     # FIOS overlays
+fios_overlay_table              fail     # FIOS overlays
 format                          fail     # sceClibSnprintf with %#x, %.0d and long arguments
 gxm_context_memory              timeout  # sceGxmDestroyContext hangs on Vulkan
 gxm_map_alias_close             crash    # an opened block is its original, the unmap of a freed block's range crashes
@@ -145,6 +151,7 @@ lw_info_by_id_uid               fail     # the uid the lightweight condition var
 lw_mutex                        pass
 lw_mutex_errors                 pass
 lw_mutex_semantics              pass
+lw_mutex_user_paths             fail     # the lightweight mutex user paths: try lock checks, an unlock after a delete, bad UID words, the info size check
 lw_work                         pass
 lw_work_layout                  fail     # UID values in the work area, locking a deleted lightweight mutex through it
 memblock                        crash    # memory block info, allocation sizes, a NULL pointer
@@ -197,6 +204,7 @@ msgpipe_receive_sender_stays    pass
 msgpipe_receiver_leaves         pass
 msgpipe_receiver_requeue        fail     # no requeue on a priority change
 msgpipe_sender_requeue          fail     # no requeue on a priority change
+msgpipe_sync_events             fail     # a message pipe isn't an event
 msgpipe_try_receive_senders     pass
 msgpipe_vectors                 pass
 msgpipe_waits                   pass
@@ -205,13 +213,21 @@ msgpipe_zero_bytes              pass
 mspace                          fail     # sceClib memory space info
 multi_events                    fail     # waiting on several events, callbacks registered to events
 multi_events_and_delete         fail     # sceKernelWaitMultipleEvents, deleted events and the wait type and UID
+multi_events_callback_copies    fail     # sceKernelWaitMultipleEvents
+multi_events_cancel_after_end   fail     # sceKernelWaitMultipleEvents
 multi_events_errors             fail     # waiting on several events with unknown UIDs
+multi_events_final_check        fail     # sceKernelWaitMultipleEvents
+multi_events_pipe               fail     # sceKernelWaitMultipleEvents
 multi_events_requeue            fail     # sceKernelWaitMultipleEvents
+multi_events_results_past       fail     # sceKernelWaitMultipleEvents
+multi_events_same_event         fail     # sceKernelWaitMultipleEvents
+multi_events_two_handles        fail     # sceKernelWaitMultipleEvents
 multi_events_unknown_uid        fail     # sceKernelWaitMultipleEvents with unusable entries and cancels
 multi_events_waits              fail     # multiple event wait results, wait type and auto reset
 mutex                           pass
 mutex_cancel_counts             pass
 mutex_ceiling                   fail     # mutex priority ceilings
+mutex_ceiling_options           fail     # mutex ceilings: no range check and no ceiling in the info
 mutex_errors                    crash    # closing unknown UIDs, a NULL name
 mutex_waits                     pass
 name_lookup                     fail     # opening gives the object's own UID, opening objects of another type or that aren't openable
@@ -245,6 +261,7 @@ readonly_in                     fail     # timer and simple event names, the mut
 readonly_out_info               fail     # no write check on output parameters
 readonly_out_values             fail     # no write check on output parameters
 readonly_timeouts               fail     # no write check on timeouts
+readonly_waits                  fail     # an opened block is its original, so the read only view is writable
 ready_changes                   fail     # threads ignore their core and priority
 ready_cpu_field                 fail     # the CPU fields of thread info, threads ignore their core
 ready_queue_order               fail     # threads ignore their core and priority
@@ -319,6 +336,7 @@ thread_end_restart              pass
 thread_end_waits                pass
 thread_errors                   pass
 thread_event_handler            fail     # unknown thread and handler errors
+thread_event_handler_context    fail     # create and start inside a thread event handler
 thread_event_handler_edges      fail     # one start and one end handler for every thread whatever was registered, and an end handler sees the exit status instead of NOT_DORMANT
 thread_event_handler_vfp        pass
 thread_exit_status              fail     # an end wait for an ended thread writes back part of its timeout
@@ -331,11 +349,13 @@ thread_limits                   fail     # no limit on the number of threads
 thread_names                    pass
 thread_nouse_vfp                fail     # a waiting thread keeps d16 across its wait
 thread_null_name                pass
+thread_opt_fields               fail     # the thread option struct's fields aren't checked
 thread_opt_param                fail     # thread option struct size and attribute checks
 thread_priority                 pass
 thread_ready_status             fail     # a thread that can run but doesn't reports RUNNING instead of READY
 thread_restart                  fail     # the stack free size of a thread started again
 thread_run_order                fail     # threads ignore their core and priority
+thread_run_status               fail     # sceKernelGetThreadRunStatus
 thread_signal                   pass
 thread_signal_timeout           pass
 thread_signal_wait_id           pass
@@ -370,18 +390,23 @@ timer_info_cancel               pass
 timer_modes                     pass
 timer_oneshot_refire            pass
 timer_period                    skip     # timing, how evenly a repeating timer fires
+timer_remaining_passed          pass
+timer_requeue                   fail     # no requeue on a priority change
 timer_wait_no_event             pass
 timer_wait_pattern              pass
+timer_waiter_handoff            pass
 timer_waiters                   pass
 timer_wake_cores                fail     # threads ignore their core and priority
 timer_wake_order                fail     # threads ignore their core and priority
 tls                             crash    # TLS key 256 and slots by thread UID
 tls_blocks                      fail     # TLS isn't a memory block
 tls_process_id                  fail     # thread info doesn't report the process ID
+tls_slot5                       fail     # TLS slot 5 doesn't stop the lightweight mutex locks
 tls_start_slots                 pass
 uid                             pass
 uid_class                       pass
 uid_class_kinds                 fail     # memory block UIDs have the thread class
+uid_raw_bits                    fail     # UIDs are small numbers
 uid_semantics                   fail     # opening gives a new UID
 unmapped_in                     crash    # no pointer checks, an unmapped option struct crashes
 unmapped_out                    crash    # no write check on output parameters, an unmapped pointer crashes
