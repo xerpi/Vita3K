@@ -261,19 +261,13 @@ bool Event::complete(WaitQueue<WaitEntry>::Waiter &waiter, SceInt32 result, SceU
     const WaitEntry &wait = waiter.entry;
     if (wait.multi)
         return wait.multi->end_entry(waiter.generation, { wait.index, result, bits, result == SCE_KERNEL_OK ? last_user_data : 0 });
-    // A registered wait gets the bits once it is ended
-    if (waiter.generation)
-        waiters.claim(waiter, result);
+    // A plain waiter gets the bits once its wait is ended
+    waiters.claim(waiter, result);
     if (result == SCE_KERNEL_OK) {
         if (wait.result_pattern)
             *wait.result_pattern = bits;
         if (wait.user_data)
             *wait.user_data = last_user_data;
-    }
-    // A timer's waits don't register yet
-    if (!waiter.generation) {
-        waiter.result = result;
-        waiter.thread->wake();
     }
     return true;
 }
@@ -331,9 +325,11 @@ Deadline Event::watch_until(const Token &token) {
 
 bool Event::update(Deadline until) {
     const auto guard = lock();
-    if (!guard || event_deadline() > until)
-        return false;
-    return catch_up();
+    return guard && fire_by(until);
+}
+
+bool Event::fire_by(Deadline until) {
+    return event_deadline() <= until && catch_up();
 }
 
 SceInt32 Event::try_take(SceUInt32 wait_pattern, SceUInt32 *result_pattern, SceUInt64 *user_data) {
@@ -584,64 +580,23 @@ SceInt32 Timer::wait(const ThreadStatePtr &thread, SceUInt32 wait_pattern, SceUI
     if (!guard)
         return SCE_KERNEL_ERROR_UNKNOWN_EVENT_ID;
 
-    // Like wait_loop(), but the first waiter also wakes when the next event is due. It fires the event
-    // then, which gives it to the waiters in queue order, this one included.
-    const WaitTarget target{ SCE_KERNEL_WAITTYPE_EVENT, uid, callbacks };
-    WaitQueue<WaitEntry>::Waiter waiter{ .thread = thread, .entry = { wait_pattern, result_pattern, user_data } };
-    const Deadline deadline = deadline_from(timeout);
-    // The result of the last sleep, then the final result
-    WaitResult result = SCE_KERNEL_OK;
-    while (true) {
-        if (const WaitResult r = run_pending_callbacks(guard, thread, callbacks); !r || *r != SCE_KERNEL_OK)
-            return wait_result(r, result_pattern);
+    const WaitResult r = registered_wait_loop(waiters, guard, thread, { SCE_KERNEL_WAITTYPE_EVENT, uid, callbacks }, { wait_pattern, result_pattern, user_data }, timeout, CallbacksCheck::after_wait, [&](WaitEntry &, SceInt32 last) -> std::optional<SceInt32> {
         // Events that are already due fire before the take, so the waiter can't get an old pulse
         catch_up();
         if (try_take(wait_pattern, result_pattern, user_data) == SCE_KERNEL_OK)
-            return wait_result(result, result_pattern);
-        if (std::chrono::steady_clock::now() >= deadline) {
-            if (timeout)
-                *timeout = 0;
-            result = SCE_KERNEL_ERROR_WAIT_TIMEOUT;
-            break;
-        }
-        if (callbacks && thread->has_pending_callbacks()) {
-            result = SCE_KERNEL_ERROR_NOTIFY_CALLBACK;
-            continue;
-        }
-        waiter.priority = thread->get_priority();
-        waiters.push(waiter);
-        while (true) {
-            const Deadline wake = waiters.front() == &waiter ? std::min(deadline, event_deadline()) : deadline;
-            guard.unlock();
-            result = thread->wait(target, wake);
-            guard.lock();
-            if (waiter.result || !result || *result == SCE_KERNEL_ERROR_NOTIFY_CALLBACK)
-                break;
-            // Woken because the next event is due, the schedule changed, or for no reason. The
-            // waiter stays queued.
-            catch_up();
-            if (waiter.result || std::chrono::steady_clock::now() >= deadline) {
-                result = SCE_KERNEL_ERROR_WAIT_TIMEOUT;
-                break;
-            }
-        }
-        if (timeout)
-            *timeout = time_left_until(deadline);
-        if (waiter.result) {
-            result = *waiter.result;
-            break;
-        }
-        waiters.remove(waiter);
-        serve();
-        if (!result || *result != SCE_KERNEL_ERROR_NOTIFY_CALLBACK)
-            break;
+            return last;
+        return std::nullopt;
+    });
+    return wait_result(r, result_pattern);
+}
+
+Deadline Timer::recheck(const ThreadState &thread, Deadline until) {
+    while (fire_by(until)) {
     }
-    // Run the callbacks notified during the wait. Only the thread exiting changes the result.
-    if (result) {
-        if (const WaitResult ran = run_pending_callbacks(guard, thread, callbacks); !ran)
-            result = ran;
-    }
-    return wait_result(result, result_pattern);
+    // A single wait, so the thread has one entry here. Only the first waiter watches the clock, and
+    // serve() wakes the one that becomes the first.
+    const auto *const first = waiters.front();
+    return first && first->thread.get() == &thread ? event_deadline() : Deadline::max();
 }
 
 void Timer::serve() {

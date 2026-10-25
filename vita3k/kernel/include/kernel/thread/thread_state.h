@@ -150,8 +150,8 @@ struct ThreadState {
     [[nodiscard]] WaitResult run_callbacks();
     // Wakes this thread from wait().
     void wake();
-    // The waits that register, the semaphore's for now. Exactly one party ends each registration, the
-    // first that claims it with end_wait(), and it does so under the waited object's lock.
+    // The waits that register. Exactly one party ends each registration, the first that claims it
+    // with end_wait(), and it does so under the waited object's lock.
     // Registers a wait on target, with the object's lock held. Returns its generation, or the result
     // that ends it without queuing: WAIT_TIMEOUT once the deadline passed, else NOTIFY_CALLBACK with
     // a callback pending.

@@ -57,6 +57,11 @@ protected:
     // thread's exit.
     virtual void departing(const ThreadState &thread, SceInt32 reason) {}
 
+    // Brings the object up to date for thread's queued wait, firing what was due by until, and
+    // returns when that wait has to look again by itself, the maximum if only the object's own
+    // operations end it. Only a timer has anything to do.
+    virtual Deadline recheck(const ThreadState &thread, Deadline until) { return Deadline::max(); }
+
     // When wait_loop() runs the callbacks notified during the wait, before it returns
     enum class CallbacksCheck {
         // Unless attempt succeeded
@@ -177,17 +182,31 @@ protected:
             waiter.priority = thread->get_priority();
             waiter.generation = *registered;
             queue.push(waiter);
-            lock.unlock();
-            // A recheck asked with wake() ends a park early, and only the deadline ends this one
-            WaitResult parked = thread->park(deadline);
-            while (parked && *parked == SCE_KERNEL_ERROR_WAIT_TIMEOUT && std::chrono::steady_clock::now() < deadline)
-                parked = thread->park(deadline);
-            lock.lock();
+            // Each look reads the registration under the object's lock before anything else, so the
+            // object is brought up to date only for a wait that still waits on a thread not exiting
+            WaitResult state;
+            while (true) {
+                state = thread->check_wait();
+                if (!state || *state == SCE_KERNEL_OK)
+                    break;
+                const Deadline now = std::chrono::steady_clock::now();
+                // What was due by the deadline comes first, in the same hold as the timeout's claim
+                if (now >= deadline) {
+                    recheck(*thread, deadline);
+                    break;
+                }
+                const Deadline look = recheck(*thread, now);
+                lock.unlock();
+                // A recheck asked with wake(), the wait's own look or the deadline ends a park early,
+                // and only the next look decides
+                std::ignore = thread->park(std::min(look, deadline));
+                lock.lock();
+            }
             // The thread's exit or the deadline ends the wait, unless a claim already did
-            if (!parked || *parked == SCE_KERNEL_ERROR_WAIT_TIMEOUT) {
-                if (thread->end_wait(waiter.generation, parked)) {
+            if (!state || *state == SCE_KERNEL_ERROR_WAIT_TIMEOUT) {
+                if (thread->end_wait(waiter.generation, state)) {
                     // Only a timeout that won the claim, while the waiter is still queued
-                    if (parked)
+                    if (state)
                         departing(*thread, SCE_KERNEL_ERROR_WAIT_TIMEOUT);
                     queue.remove(waiter);
                     serve();
@@ -301,6 +320,8 @@ protected:
     // Brings the event up to date before an event operation looks at it, and returns whether it
     // fired. Called with the lock held. Only a timer has anything to do.
     virtual bool catch_up() { return false; }
+    // Fires an event that was due by until, and returns whether it did. The lock must be held.
+    bool fire_by(Deadline until);
     // Takes the event if wait_pattern matches, or returns SCE_KERNEL_ERROR_EVENT_COND. The lock must be held.
     SceInt32 try_take(SceUInt32 wait_pattern, SceUInt32 *result_pattern, SceUInt64 *user_data);
     // Returns the guest's result of a wait, and gives a wait that a delete or a cancel ended the error
@@ -368,6 +389,9 @@ private:
     void queue_event(uint64_t deadline);
     // Gives the event's bits to the waits they match, and wakes the first waiter left.
     void serve() override;
+    // Fires the events due by until, and returns the event's time if thread's wait is the first
+    // waiter, which watches the clock.
+    Deadline recheck(const ThreadState &thread, Deadline until) override;
     // Returns when the next event is due, on the clock of wait deadlines. The lock must be held.
     Deadline event_deadline() const override;
     // Returns how much time the timer counted. The lock must be held.
