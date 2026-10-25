@@ -1650,9 +1650,17 @@ static bool is_msg_pipe_mode(SceUInt32 wait_mode) {
 }
 
 void MsgPipe::on_delete(SceUID) {
-    // Wake up every thread
-    senders.wake_all(SCE_KERNEL_ERROR_WAIT_DELETE);
-    receivers.wake_all(SCE_KERNEL_ERROR_WAIT_DELETE);
+    senders.end_all(SCE_KERNEL_ERROR_WAIT_DELETE);
+    receivers.end_all(SCE_KERNEL_ERROR_WAIT_DELETE);
+}
+
+void MsgPipe::end_for_callback(ThreadState &thread, uint64_t generation) {
+    const auto guard = lock();
+    if (!guard)
+        return;
+    // The wait is on one side, so at most one of them has it
+    if (depart_queued(senders, thread, generation) || depart_queued(receivers, thread, generation))
+        serve();
 }
 
 // The size of all the pieces together
@@ -1760,10 +1768,10 @@ bool MsgPipe::give(Sender &sender) {
         Receiver &to = receiver->entry;
         copy(sender, to, std::min(to.left, sender.left));
         to.report();
-        // A FULL receive that still wants bytes stays the first one
+        // A FULL receive that still wants bytes stays the first one, and keeps waiting
         if (to.full && to.left > 0)
             break;
-        receivers.wake(*receiver);
+        receivers.end(*receiver);
         if (sender.left == 0)
             break;
     }
@@ -1786,7 +1794,7 @@ bool MsgPipe::take(Receiver &receiver) {
         from.report();
         if (!from.done())
             break;
-        senders.wake(*sender);
+        senders.end(*sender);
     }
     receiver.report();
     return receiver.done();
@@ -1796,9 +1804,9 @@ void MsgPipe::serve() {
     // The first receiver goes first, so the pipe's bytes go out before those of waiting senders
     while (true) {
         if (auto *const receiver = receivers.front(); receiver && take(receiver->entry))
-            receivers.wake(*receiver);
+            receivers.end(*receiver);
         else if (auto *const sender = senders.front(); sender && give(sender->entry))
-            senders.wake(*sender);
+            senders.end(*sender);
         else
             break;
     }
@@ -1835,7 +1843,7 @@ SceInt32 MsgPipe::receive(const ThreadStatePtr &thread, MemState &mem, SceUInt32
         return SCE_KERNEL_OK;
     }
 
-    const WaitResult r = wait_loop(receivers, guard, thread, { SCE_KERNEL_WAITTYPE_MSG_PIPE, uid, callbacks }, receiver, timeout, CallbacksCheck::after_take_or_wait, [&](Receiver &transfer, SceInt32) -> std::optional<SceInt32> {
+    const WaitResult r = registered_wait_loop(receivers, guard, thread, { SCE_KERNEL_WAITTYPE_MSG_PIPE, uid, callbacks }, receiver, timeout, CallbacksCheck::after_take_or_wait, [&](Receiver &transfer, SceInt32) -> std::optional<SceInt32> {
         // Don't take anything while other receivers are ahead in the queue. The size is written
         // after every attempt.
         const bool done = goes_first(receivers, thread->get_priority()) && take(transfer);
@@ -1871,7 +1879,7 @@ SceInt32 MsgPipe::send(const ThreadStatePtr &thread, MemState &mem, SceUInt32 wa
         return SCE_KERNEL_OK;
     }
 
-    const WaitResult r = wait_loop(senders, guard, thread, { SCE_KERNEL_WAITTYPE_MSG_PIPE, uid, callbacks }, sender, timeout, CallbacksCheck::after_take_or_wait, [&](Sender &transfer, SceInt32) -> std::optional<SceInt32> {
+    const WaitResult r = registered_wait_loop(senders, guard, thread, { SCE_KERNEL_WAITTYPE_MSG_PIPE, uid, callbacks }, sender, timeout, CallbacksCheck::after_take_or_wait, [&](Sender &transfer, SceInt32) -> std::optional<SceInt32> {
         // Don't send anything while other senders are ahead in the queue. The size is written
         // after every attempt.
         const bool done = goes_first(senders, thread->get_priority()) && give(transfer);
@@ -1924,8 +1932,8 @@ SceInt32 MsgPipe::cancel(SceUInt32 *num_send_wait_threads, SceUInt32 *num_receiv
     if (!guard)
         return SCE_KERNEL_ERROR_UNKNOWN_MSG_PIPE_ID;
 
-    const auto nb_senders = static_cast<SceUInt32>(senders.wake_all(SCE_KERNEL_ERROR_WAIT_CANCEL));
-    const auto nb_receivers = static_cast<SceUInt32>(receivers.wake_all(SCE_KERNEL_ERROR_WAIT_CANCEL));
+    const auto nb_senders = static_cast<SceUInt32>(senders.end_all(SCE_KERNEL_ERROR_WAIT_CANCEL));
+    const auto nb_receivers = static_cast<SceUInt32>(receivers.end_all(SCE_KERNEL_ERROR_WAIT_CANCEL));
     data_buffer.Clear();
 
     if (num_send_wait_threads)

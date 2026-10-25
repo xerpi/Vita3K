@@ -229,22 +229,29 @@ protected:
     }
 
     // Ends thread's registered wait of generation in queue for a callback notify, takes it off the
-    // queue and serves the waiters behind it, if that wait is still waiting, with departing() giving
-    // it the outputs first. Takes the lock.
+    // queue and serves the waiters behind it, if the wait is still queued there, with departing()
+    // giving it the outputs first. Takes the lock.
     template <typename Entry>
     void depart_for_callback(WaitQueue<Entry> &queue, ThreadState &thread, uint64_t generation) {
         const auto guard = lock();
         // A delete already ended the wait
-        if (!guard)
-            return;
-        if (!thread.end_wait(generation, SCE_KERNEL_ERROR_NOTIFY_CALLBACK))
-            return;
-        // A queued registration is still waiting, so its entry is there
-        auto *waiter = queue.find_if([&](auto &w) { return w.thread.get() == &thread && w.generation == generation; });
-        assert(waiter);
+        if (guard && depart_queued(queue, thread, generation))
+            serve();
+    }
+
+    // Ends thread's registered wait of generation for a callback notify if it is queued in queue,
+    // with departing() giving it the outputs first, and takes it off the queue. Returns whether it
+    // did. The lock must be held.
+    template <typename Entry>
+    bool depart_queued(WaitQueue<Entry> &queue, ThreadState &thread, uint64_t generation) {
+        auto *const waiter = queue.find_if([&](auto &w) { return w.thread.get() == &thread && w.generation == generation; });
+        // A claim already took it off the queue, or the thread waits again with a new generation
+        if (!waiter)
+            return false;
+        queue.claim(*waiter, SCE_KERNEL_ERROR_NOTIFY_CALLBACK);
         departing(thread, SCE_KERNEL_ERROR_NOTIFY_CALLBACK);
         queue.remove(*waiter);
-        serve();
+        return true;
     }
 };
 
@@ -773,6 +780,7 @@ public:
     // Fills info with what the message pipe's info reports, or returns UNKNOWN_MSG_PIPE_ID if it was
     // deleted.
     SceInt32 info(SceKernelMppInfo &info) const;
+    void end_for_callback(ThreadState &thread, uint64_t generation) override;
 
 private:
     // How far a send or a receive got, kept in its waiter so that whoever moves bytes carries it on
