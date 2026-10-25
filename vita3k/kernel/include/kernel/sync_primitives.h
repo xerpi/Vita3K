@@ -532,6 +532,7 @@ public:
     SceInt32 cancel(const ThreadStatePtr &thread, SceInt32 new_count, SceUInt32 *num_wait_threads);
     // Gives the mutex to its next waiter if thread, which is ending, owns it.
     void release_ended_owner(const ThreadState &thread);
+    void end_for_callback(ThreadState &thread, uint64_t generation) override;
 
 protected:
     struct WaitEntry {

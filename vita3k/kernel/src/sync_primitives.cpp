@@ -765,8 +765,12 @@ SceInt32 Mutex::check_count(SceInt32 count) const {
 }
 
 void Mutex::on_delete(SceUID) {
-    waiters.wake_all(SCE_KERNEL_ERROR_WAIT_DELETE);
+    waiters.end_all(SCE_KERNEL_ERROR_WAIT_DELETE);
     owner = 0;
+}
+
+void Mutex::end_for_callback(ThreadState &thread, uint64_t generation) {
+    depart_for_callback(waiters, thread, generation);
 }
 
 SceInt32 Mutex::try_take(MemState &mem, const ThreadStatePtr &thread, SceInt32 count) {
@@ -830,7 +834,7 @@ SceInt32 Mutex::acquire(MemState &mem, const ThreadStatePtr &thread, SceInt32 co
     if (owner == thread->id)
         return try_take(mem, thread, count);
 
-    const WaitResult r = wait_loop(waiters, guard, thread, { lightweight() ? SCE_KERNEL_WAITTYPE_LW_MUTEX : SCE_KERNEL_WAITTYPE_MUTEX, uid, callbacks }, { count }, timeout, CallbacksCheck::after_wait, [&](WaitEntry &, SceInt32) {
+    const WaitResult r = registered_wait_loop(waiters, guard, thread, { lightweight() ? SCE_KERNEL_WAITTYPE_LW_MUTEX : SCE_KERNEL_WAITTYPE_MUTEX, uid, callbacks }, { count }, timeout, CallbacksCheck::after_wait, [&](WaitEntry &, SceInt32) {
         return take_if_free(mem, thread, count);
     });
     // A deleted mutex has no owner, and its work area may be freed already
@@ -847,7 +851,7 @@ SceInt32 Mutex::relock(MemState &mem, const ThreadStatePtr &thread, WaitTarget t
     if (owner == thread->id)
         return try_take(mem, thread, 1);
 
-    const WaitResult r = wait_loop(waiters, guard, thread, target, { 1 }, nullptr, CallbacksCheck::on_delete, [&](WaitEntry &, SceInt32) {
+    const WaitResult r = registered_wait_loop(waiters, guard, thread, target, { 1 }, nullptr, CallbacksCheck::on_delete, [&](WaitEntry &, SceInt32) {
         return take_if_free(mem, thread, 1);
     });
     if (owner == thread->id)
@@ -908,9 +912,12 @@ void Mutex::serve() {
     if (owner)
         return;
     if (auto *waiter = waiters.front()) {
-        lock_count = waiter->entry.lock_count;
-        owner = waiter->thread->id;
-        waiters.wake(*waiter);
+        const SceInt32 count = waiter->entry.lock_count;
+        const SceUID id = waiter->thread->id;
+        // The head gets the mutex once its wait is ended
+        waiters.end(*waiter);
+        lock_count = count;
+        owner = id;
     }
 }
 
@@ -925,7 +932,7 @@ SceInt32 Mutex::cancel(const ThreadStatePtr &thread, SceInt32 new_count, SceUInt
     if (new_count > 1 && !(attr & SCE_KERNEL_MUTEX_ATTR_RECURSIVE))
         return SCE_KERNEL_ERROR_ILLEGAL_COUNT;
 
-    const auto nb_threads = static_cast<SceUInt32>(waiters.wake_all(SCE_KERNEL_ERROR_WAIT_CANCEL));
+    const auto nb_threads = static_cast<SceUInt32>(waiters.end_all(SCE_KERNEL_ERROR_WAIT_CANCEL));
     lock_count = new_count;
     owner = new_count > 0 ? thread->id : 0;
     if (num_wait_threads)
