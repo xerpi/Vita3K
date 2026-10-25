@@ -154,8 +154,9 @@ struct ThreadState {
     // with end_wait(), and it does so under the waited object's lock.
     // Registers a wait on target, with the object's lock held. Returns its generation, or the result
     // that ends it without queuing: WAIT_TIMEOUT once the deadline passed, else NOTIFY_CALLBACK with
-    // a callback pending.
-    [[nodiscard]] std::expected<uint64_t, SceInt32> register_wait(WaitTarget target, Deadline deadline);
+    // a callback pending. The claim that ends the registration writes the time left until deadline
+    // to time_left, if it isn't null.
+    [[nodiscard]] std::expected<uint64_t, SceInt32> register_wait(WaitTarget target, Deadline deadline, SceUInt32 *time_left);
     // Registers a multiple event wait in its scan and returns its generation. MultiEventWait arms
     // and ends it with the thread's mutex held.
     uint64_t begin_scan();
@@ -364,6 +365,9 @@ private:
     WaitResult wait_result = SCE_KERNEL_OK;
     // When the registered wait was claimed, for the time left
     Deadline wait_ended_at;
+    // The registered wait's deadline, and where the claim that ends it writes the time left, or null
+    Deadline wait_deadline;
+    SceUInt32 *wait_time_left = nullptr;
     // A sceKernelSendSignal is pending for this thread.
     bool signal_pending = false;
     // The vblank the thread's last display wait ended on

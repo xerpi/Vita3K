@@ -596,7 +596,7 @@ void ThreadState::wake() {
     wait_cv.notify_all();
 }
 
-std::expected<uint64_t, SceInt32> ThreadState::register_wait(WaitTarget target, Deadline deadline) {
+std::expected<uint64_t, SceInt32> ThreadState::register_wait(WaitTarget target, Deadline deadline, SceUInt32 *time_left) {
     const std::lock_guard<std::mutex> lock(mutex);
     assert(wait_phase == WaitPhase::none);
     // A passed deadline wins over a pending callback
@@ -604,6 +604,9 @@ std::expected<uint64_t, SceInt32> ThreadState::register_wait(WaitTarget target, 
         return std::unexpected(SCE_KERNEL_ERROR_WAIT_TIMEOUT);
     if (target.callbacks && !is_processing_callbacks && callbacks_notified())
         return std::unexpected(SCE_KERNEL_ERROR_NOTIFY_CALLBACK);
+    // Only an armed registration gets a time left
+    wait_deadline = deadline;
+    wait_time_left = time_left;
     arm(target);
     return ++wait_generation;
 }
@@ -611,6 +614,8 @@ std::expected<uint64_t, SceInt32> ThreadState::register_wait(WaitTarget target, 
 uint64_t ThreadState::begin_scan() {
     const std::lock_guard<std::mutex> lock(mutex);
     assert(wait_phase == WaitPhase::none);
+    // A multiple event wait writes its own time left
+    wait_time_left = nullptr;
     wait_phase = WaitPhase::scanning;
     return ++wait_generation;
 }
@@ -625,6 +630,10 @@ void ThreadState::end_registration(WaitResult result) {
     wait_phase = WaitPhase::ended;
     wait_result = result;
     wait_ended_at = std::chrono::steady_clock::now();
+    // The claimant writes it before the thread wakes, with the waited object's lock held, since a
+    // message pipe's time left is the guest's own
+    if (wait_time_left)
+        *wait_time_left = time_left_until(wait_deadline, wait_ended_at);
     wait_cv.notify_all();
 }
 
@@ -668,6 +677,7 @@ ThreadState::WaitEnd ThreadState::unregister_wait(uint64_t generation) {
     assert(wait_phase == WaitPhase::ended && wait_generation == generation);
     wait_phase = WaitPhase::none;
     wait_target = {};
+    wait_time_left = nullptr;
     // A thread something holds goes on to its gate, which keeps it from its callbacks and its code
     update_status(ThreadStatus::running);
     // An exit wins over whatever ended the wait, which stays done

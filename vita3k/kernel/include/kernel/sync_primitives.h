@@ -149,7 +149,8 @@ protected:
 
     // Waits on queue like wait_loop(), with the same take and callbacks_check, but the thread
     // registers each pass of the wait, and exactly one party ends each registration, with a claim
-    // under the object's lock (ThreadState::register_wait). timeout is the export's kernel copy.
+    // under the object's lock (ThreadState::register_wait). The claim writes the time left to
+    // timeout, and a deadline gone before the wait is queued writes 0.
     template <typename Entry, typename Take>
     [[nodiscard]] WaitResult registered_wait_loop(WaitQueue<Entry> &queue, std::unique_lock<std::mutex> &lock, const ThreadStatePtr &thread, WaitTarget target, Entry entry, SceUInt32 *timeout, CallbacksCheck callbacks_check, Take take) {
         // One waiter for the whole call, so what its entry got while queued stays across passes
@@ -166,7 +167,7 @@ protected:
                 result = *taken;
                 break;
             }
-            const std::expected<uint64_t, SceInt32> registered = thread->register_wait(target, deadline);
+            const std::expected<uint64_t, SceInt32> registered = thread->register_wait(target, deadline, timeout);
             if (!registered) {
                 // A callback is already pending, so the next pass runs it without sleeping, and its
                 // take gets NOTIFY_CALLBACK as the last result
@@ -215,8 +216,6 @@ protected:
             const ThreadState::WaitEnd end = thread->unregister_wait(waiter.generation);
             if (!end.result)
                 return end.result;
-            if (timeout)
-                *timeout = time_left_until(deadline, end.at);
             result = end.result;
             if (*result != SCE_KERNEL_ERROR_NOTIFY_CALLBACK)
                 break;
