@@ -991,7 +991,11 @@ SceInt32 RWLock::check_create(const char *name, SceUInt32 attr) {
 }
 
 void RWLock::on_delete(SceUID) {
-    waiters.wake_all(SCE_KERNEL_ERROR_WAIT_DELETE);
+    waiters.end_all(SCE_KERNEL_ERROR_WAIT_DELETE);
+}
+
+void RWLock::end_for_callback(ThreadState &thread, uint64_t generation) {
+    depart_for_callback(waiters, thread, generation);
 }
 
 SceInt32 RWLock::try_take(const ThreadStatePtr &thread, bool is_write) {
@@ -1027,7 +1031,7 @@ SceInt32 RWLock::acquire(const ThreadStatePtr &thread, bool is_write, SceUInt32 
     if (write_owner == thread->id)
         return try_take(thread, is_write);
 
-    const WaitResult r = wait_loop(waiters, guard, thread, { SCE_KERNEL_WAITTYPE_RW_LOCK, uid, callbacks }, { is_write }, timeout, CallbacksCheck::after_wait, [&](WaitEntry &, SceInt32) -> std::optional<SceInt32> {
+    const WaitResult r = registered_wait_loop(waiters, guard, thread, { SCE_KERNEL_WAITTYPE_RW_LOCK, uid, callbacks }, { is_write }, timeout, CallbacksCheck::after_wait, [&](WaitEntry &, SceInt32) -> std::optional<SceInt32> {
         // A writer needs the lock to be free. A reader needs no writer and an empty queue. A lock
         // taken by this thread's callbacks counts like anyone else's.
         if (write_owner || (is_write ? lock_count > 0 : !waiters.empty()))
@@ -1129,11 +1133,13 @@ void RWLock::serve() {
     // A waiting writer goes first, even before readers that waited longer, once nobody holds it.
     auto *const writer = waiters.find_if([](auto &waiter) { return waiter.entry.is_write; });
     if (!writer) {
-        lock_count += static_cast<SceInt32>(waiters.wake_all());
+        lock_count += static_cast<SceInt32>(waiters.end_all(SCE_KERNEL_OK));
     } else if (lock_count == 0) {
-        write_owner = writer->thread->id;
+        const SceUID id = writer->thread->id;
+        // The writer gets the lock once its wait is ended
+        waiters.end(*writer);
+        write_owner = id;
         lock_count = 1;
-        waiters.wake(*writer);
     }
 }
 
@@ -1142,9 +1148,15 @@ SceInt32 RWLock::cancel(const ThreadStatePtr &thread, SceUInt32 *num_read_wait_t
     if (!guard)
         return SCE_KERNEL_ERROR_UNKNOWN_RW_LOCK_ID;
 
-    const auto is_writer = [](auto &waiter) { return waiter.entry.is_write; };
-    const auto nb_writers = static_cast<SceUInt32>(waiters.wake_if(is_writer, SCE_KERNEL_ERROR_WAIT_CANCEL));
-    const auto nb_readers = static_cast<SceUInt32>(waiters.wake_all(SCE_KERNEL_ERROR_WAIT_CANCEL));
+    SceUInt32 nb_writers = 0;
+    waiters.remove_if([&](auto &waiter) {
+        if (!waiter.entry.is_write)
+            return false;
+        waiters.claim(waiter, SCE_KERNEL_ERROR_WAIT_CANCEL);
+        ++nb_writers;
+        return true;
+    });
+    const auto nb_readers = static_cast<SceUInt32>(waiters.end_all(SCE_KERNEL_ERROR_WAIT_CANCEL));
 
     // The lock is reset, and only the calling thread may hold it afterwards
     const bool write_locked = flag & SCE_KERNEL_RW_LOCK_CANCEL_WITH_WRITE_LOCK;

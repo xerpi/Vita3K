@@ -600,6 +600,7 @@ public:
     void release_ended_writer(const ThreadState &thread);
     // Fills info with what the rwlock's info reports, or returns UNKNOWN_RW_LOCK_ID if it was deleted.
     SceInt32 info(SceKernelRWLockInfo &info) const;
+    void end_for_callback(ThreadState &thread, uint64_t generation) override;
 
 private:
     struct WaitEntry {
