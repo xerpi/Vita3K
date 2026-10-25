@@ -24,7 +24,10 @@
 #include <kernel/types.h>
 #include <packages/functions.h>
 
+#include <algorithm>
+#include <array>
 #include <chrono>
+#include <span>
 #include <thread>
 #include <utility>
 
@@ -224,6 +227,9 @@ EXPORT(SceUID, _sceKernelCreateCond, const char *pName, SceUInt32 attr, SceUID m
         return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_MUTEX_ID);
 
     const auto condvar = std::make_shared<HeavyCond>(attr, pName, mutex);
+    // The mutex may have been deleted since the lookup
+    if (const SceInt32 error = condvar->attach())
+        return RET_ERROR(error);
     return emuenv.kernel.objects.add(condvar, emuenv.kernel.get_next_uid());
 }
 
@@ -247,6 +253,9 @@ EXPORT(int, _sceKernelCreateLwCond, Ptr<SceKernelLwCondWork> workarea, const cha
         return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_LW_MUTEX_ID);
 
     const auto condvar = std::make_shared<LwCond>(attr, name, mutex, workarea);
+    // The mutex may have been deleted since the lookup
+    if (const SceInt32 error = condvar->attach())
+        return RET_ERROR(error);
     SceKernelLwCondWork *work = workarea.get(emuenv.mem);
     *work = {};
     work->uid = emuenv.kernel.objects.add(condvar, emuenv.kernel.get_next_uid());
@@ -1096,14 +1105,42 @@ EXPORT(SceInt32, _sceKernelWaitLwCondCB, Ptr<SceKernelLwCondWork> pWork, SceUInt
     return result;
 }
 
-EXPORT(int, _sceKernelWaitMultipleEvents) {
-    TRACY_FUNC(_sceKernelWaitMultipleEvents);
-    return UNIMPLEMENTED();
+// Waits for any or all of the events of a list, and writes how each of them that ended did. Returns
+// how many ended if there is a result list, else 0.
+static SceInt32 wait_multiple_events(EmuEnvState &emuenv, SceUID thread_id, const SceKernelWaitEvent *list, SceUInt32 count, SceUInt32 mode, SceKernelResultEvent *results, SceUInt32 *timeout, bool callbacks) {
+    if (!list)
+        return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
+    if (count > SCE_KERNEL_MULTIPLE_EVENTS_MAX)
+        return SCE_KERNEL_ERROR_ILLEGAL_SIZE;
+    if (mode & ~(SCE_KERNEL_EVENT_WAIT_MODE_OR | SCE_KERNEL_EVENT_WAIT_MODE_AND))
+        return SCE_KERNEL_ERROR_ILLEGAL_MODE;
+
+    // The call works on copies of the list and the timeout, which the callbacks it runs can't
+    // change. Only the OR bit counts, so a mode of 0 waits for all the events.
+    MultiEventWait wait(emuenv.kernel, emuenv.kernel.get_thread(thread_id), std::span{ list, count }, mode & SCE_KERNEL_EVENT_WAIT_MODE_OR);
+    SceUInt32 time_left = timeout ? *timeout : 0;
+    const WaitResult result = wait.run(timeout ? &time_left : nullptr, callbacks);
+
+    // The whole list is written, the entries past the ones that ended too
+    std::array<SceKernelResultEvent, SCE_KERNEL_MULTIPLE_EVENTS_MAX> kernel_results{};
+    const SceUInt32 ended = wait.copy_results(std::span{ kernel_results }.first(count));
+    if (results)
+        std::ranges::copy(std::span{ kernel_results }.first(count), results);
+    if (timeout)
+        *timeout = time_left;
+    if (!result || *result != SCE_KERNEL_OK)
+        return guest_result(result);
+    return results ? static_cast<SceInt32>(ended) : 0;
 }
 
-EXPORT(int, _sceKernelWaitMultipleEventsCB) {
-    TRACY_FUNC(_sceKernelWaitMultipleEventsCB);
-    return UNIMPLEMENTED();
+EXPORT(SceInt32, _sceKernelWaitMultipleEvents, SceKernelWaitEvent *events, SceUInt32 count, SceUInt32 mode, SceKernelWaitMultipleEventsOpt *opt) {
+    TRACY_FUNC(_sceKernelWaitMultipleEvents, events, count, mode, opt);
+    return wait_multiple_events(emuenv, thread_id, events, count, mode, opt->results.get(emuenv.mem), opt->timeout.get(emuenv.mem), false);
+}
+
+EXPORT(SceInt32, _sceKernelWaitMultipleEventsCB, SceKernelWaitEvent *events, SceUInt32 count, SceUInt32 mode, SceKernelWaitMultipleEventsOpt *opt) {
+    TRACY_FUNC(_sceKernelWaitMultipleEventsCB, events, count, mode, opt);
+    return wait_multiple_events(emuenv, thread_id, events, count, mode, opt->results.get(emuenv.mem), opt->timeout.get(emuenv.mem), true);
 }
 
 EXPORT(SceInt32, _sceKernelWaitSema, SceUID semaId, SceInt32 needCount, SceUInt32 *pTimeout) {
@@ -1130,23 +1167,39 @@ EXPORT(SceInt32, _sceKernelWaitSemaCB, SceUID semaId, SceInt32 needCount, SceUIn
     return result;
 }
 
+// Waits for a signal to thread, writing the time left back to timeout
+static int wait_signal(const ThreadStatePtr &thread, SceUInt32 *timeout, bool callbacks) {
+    // The wait writes to a local copy that goes to the guest when it returns, so callbacks that run
+    // during the wait still see the old value
+    SceUInt32 time_left = timeout ? *timeout : 0;
+    const WaitResult r = thread->wait_for_signal(timeout ? &time_left : nullptr, callbacks);
+    if (timeout)
+        *timeout = time_left;
+    return guest_result(r);
+}
+
 EXPORT(int, _sceKernelWaitSignal, uint32_t unknown, uint32_t delay, SceUInt32 *timeout) {
     TRACY_FUNC(_sceKernelWaitSignal, unknown, delay, timeout);
-    return guest_result(emuenv.kernel.get_thread(thread_id)->wait_for_signal(timeout, false));
+    return wait_signal(emuenv.kernel.get_thread(thread_id), timeout, false);
 }
 
 EXPORT(int, _sceKernelWaitSignalCB, uint32_t unknown, uint32_t delay, SceUInt32 *timeout) {
     TRACY_FUNC(_sceKernelWaitSignalCB, unknown, delay, timeout);
-    const ThreadStatePtr thread = emuenv.kernel.get_thread(thread_id);
-    thread->process_callbacks();
-    return guest_result(thread->wait_for_signal(timeout, true));
+    return wait_signal(emuenv.kernel.get_thread(thread_id), timeout, true);
 }
 
-// Waits for target to end, writing the time left back to timeout
+// Waits for target to end, writing its exit status to stat and the time left back to timeout
 static int wait_thread_end(const ThreadStatePtr &waiter, const ThreadStatePtr &target, int *stat, SceUInt *timeout, bool callbacks) {
-    const Deadline deadline = deadline_from(timeout);
-    const WaitResult r = target->wait_for_thread_end(waiter, stat, deadline, callbacks);
-    writeback_timeout(timeout, deadline);
+    // The wait writes to local copies that go to the guest when it returns, the status only if it
+    // succeeded, so callbacks that run during the wait and other threads still see the old values
+    SceInt32 status = 0;
+    SceUInt32 time_left = timeout ? *timeout : 0;
+    const WaitResult r = target->wait_for_thread_end(waiter, stat ? &status : nullptr, timeout ? &time_left : nullptr, callbacks);
+    // The status goes first, so a timeout at the same address ends up with the time left
+    if (stat && r && *r == SCE_KERNEL_OK)
+        *stat = status;
+    if (timeout)
+        *timeout = time_left;
     return guest_result(r);
 }
 
@@ -1169,7 +1222,6 @@ EXPORT(int, _sceKernelWaitThreadEndCB, SceUID thid, int *stat, SceUInt *timeout)
         return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_THREAD_ID);
     if (target == waiter)
         return RET_ERROR(SCE_KERNEL_ERROR_ILLEGAL_THREAD_ID);
-    waiter->process_callbacks();
     return wait_thread_end(waiter, target, stat, timeout, true);
 }
 

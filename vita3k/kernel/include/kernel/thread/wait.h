@@ -48,17 +48,15 @@ inline Deadline deadline_from(const SceUInt32 *timeout) {
     return std::chrono::steady_clock::now() + std::chrono::microseconds(*timeout);
 }
 
-// Returns the microseconds left before the deadline, 0 once it passed.
-inline SceUInt32 time_left_until(Deadline deadline) {
-    const auto left = std::chrono::duration_cast<std::chrono::microseconds>(deadline - std::chrono::steady_clock::now()).count();
+// Returns the microseconds left before the deadline at the time from, 0 if it passed by then.
+inline SceUInt32 time_left_until(Deadline deadline, Deadline from) {
+    const auto left = std::chrono::duration_cast<std::chrono::microseconds>(deadline - from).count();
     return left > 0 ? static_cast<SceUInt32>(left) : 0;
 }
 
-// Writes the time left before the deadline back to a guest timeout.
-inline void writeback_timeout(SceUInt32 *timeout, Deadline deadline) {
-    if (!timeout || deadline == Deadline::max())
-        return;
-    *timeout = time_left_until(deadline);
+// Returns the microseconds left before the deadline, 0 once it passed.
+inline SceUInt32 time_left_until(Deadline deadline) {
+    return time_left_until(deadline, std::chrono::steady_clock::now());
 }
 
 // Turns a wait result into the value returned to the guest.

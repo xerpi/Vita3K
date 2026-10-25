@@ -37,6 +37,7 @@ struct CPUContext;
 struct ThreadState;
 struct ThreadParams;
 struct KernelState;
+class MultiEventWait;
 
 using CPUStatePtr = std::unique_ptr<CPUState, std::function<void(CPUState *)>>;
 using CallImport = std::function<void(CPUState &, uint32_t, SceUID)>;
@@ -138,17 +139,46 @@ struct ThreadState {
     [[nodiscard]] WaitResult wait_for_signal(SceUInt32 *timeout, bool callbacks);
     // Sends a signal to this thread. Fails if the previous one was not consumed yet.
     SceInt32 send_signal();
-    // Blocks waiter until this thread becomes dormant, then writes its exit status to exit_status.
-    [[nodiscard]] WaitResult wait_for_thread_end(const ThreadStatePtr &waiter, SceInt32 *exit_status, Deadline deadline, bool callbacks);
-    // Waits on target until woken by wake(), the thread exits or is deleted, or the deadline passes.
-    // With target.callbacks, a notified callback ends it with NOTIFY_CALLBACK, and the caller runs
-    // it with run_callbacks(). A stale wake can end it early, so callers must recheck their condition.
-    [[nodiscard]] WaitResult wait(WaitTarget target, Deadline deadline);
+    // Blocks waiter until this thread ends or the timeout passes, writing the exit status to
+    // exit_status and the time left back to timeout.
+    [[nodiscard]] WaitResult wait_for_thread_end(const ThreadStatePtr &waiter, SceInt32 *exit_status, SceUInt32 *timeout, bool callbacks);
+    // Ends waiter's end wait of generation for a callback notify and takes it off the end queue, if
+    // it still waits. Takes end_waiters_mutex.
+    void depart_end_waiter(ThreadState &waiter, uint64_t generation);
     // Runs the notified callbacks for a wait that ended with NOTIFY_CALLBACK, with no lock held.
     // Returns ThreadExiting if the thread exits or is deleted meanwhile.
     [[nodiscard]] WaitResult run_callbacks();
-    // Wakes this thread from wait().
+    // Asks the thread's parked wait to look again, for a timer whose next event changed.
     void wake();
+    // The waits that register. Exactly one party ends each registration, the first that claims it
+    // with end_wait(), and it does so under the waited object's lock.
+    // Registers a wait on target, with the object's lock held. Returns its generation, or the result
+    // that ends it without queuing: WAIT_TIMEOUT once the deadline passed, else NOTIFY_CALLBACK with
+    // a callback pending. The claim that ends the registration writes the time left until deadline
+    // to time_left, if it isn't null.
+    [[nodiscard]] std::expected<uint64_t, SceInt32> register_wait(WaitTarget target, Deadline deadline, SceUInt32 *time_left);
+    // Registers a multiple event wait in its scan and returns its generation. MultiEventWait arms
+    // and ends it with the thread's mutex held.
+    uint64_t begin_scan();
+    // Ends the registered wait of generation with result if it is still waiting, and wakes the
+    // thread. Returns whether it did. With the object's lock held.
+    bool end_wait(uint64_t generation, WaitResult result);
+    // Blocks until the registered wait ended, until passed, a recheck was asked with wake(), or the
+    // thread is exiting. Returns ThreadExiting, then SCE_KERNEL_OK if the wait ended, else
+    // WAIT_TIMEOUT for the caller to look again. The thread stays waiting until unregister_wait().
+    [[nodiscard]] WaitResult park(Deadline until);
+    // Returns how the registered wait stands: ThreadExiting, then SCE_KERNEL_OK if it ended, else
+    // WAIT_TIMEOUT while it still waits. The waiter reads it after a park, before it looks at what it
+    // waits on, since the park's result may be old by then. Clears a recheck asked with wake().
+    [[nodiscard]] WaitResult check_wait();
+    // How a registered wait ended: its result, ThreadExiting if the thread is exiting whoever ended
+    // it, and when it was claimed
+    struct WaitEnd {
+        WaitResult result;
+        Deadline at;
+    };
+    // Drops the registered wait of generation, which has ended, and shows the thread running again.
+    WaitEnd unregister_wait(uint64_t generation);
     // Shows the thread WAITING while a host call blocks it, such as an audio output, and RUNNING after
     void begin_host_wait();
     void end_host_wait();
@@ -163,9 +193,21 @@ struct ThreadState {
     bool has_pending_callbacks();
     // Adds a callback this thread created. Called by the thread itself.
     void add_callback(const CallbackPtr &cb);
-    // Counts a callback of this thread that was notified and hasn't run for it yet, waking a wait
-    // with callbacks, and stops counting it. Called by the callback with its lock held.
-    void add_notified_callback();
+    // A registered wait that a callback notify ends
+    struct CallbackDeparture {
+        SceUInt32 type;
+        SceUID object;
+        uint64_t generation;
+    };
+    // Counts a notification of a callback of this thread. The first one since the callback last ran
+    // makes it pending. Returns the registered wait the notify ends, which the caller ends with
+    // end_wait_for_callback() once it let go of the callback's lock. Called by the callback with its
+    // lock held, on every notify.
+    std::optional<CallbackDeparture> notify_callback(bool first);
+    // Ends the registered wait a notify found, if it is still waiting. Called with no lock held.
+    void end_wait_for_callback(const CallbackDeparture &departure);
+    // Stops counting a callback whose notifications were taken or dropped. Called by the callback
+    // with its lock held.
     void remove_notified_callback();
 
     // Holds: the debugger, the emulator pause and the ForVM suspend
@@ -232,7 +274,28 @@ private:
         SceInt32 *exit_status;
     };
 
+    // Arms and ends the multiple event waits with mutex held
+    friend class MultiEventWait;
+
     // The private methods are called with mutex held, unless they say otherwise
+    // Whether the registration of generation still takes results
+    bool takes_results(uint64_t generation) const { return wait_generation == generation && (wait_phase == WaitPhase::scanning || wait_phase == WaitPhase::waiting); }
+    // Shows the registration waiting on target
+    void arm(WaitTarget target);
+    // Arms a registration on target and returns its generation. The claim that ends it writes the
+    // time left until deadline to time_left, if it isn't null.
+    uint64_t begin_registration(WaitTarget target, Deadline deadline, SceUInt32 *time_left);
+    // Takes a pending signal, else registers a signal wait like register_wait(), but also with a
+    // callback pending. Returns the generation, or the result that ends the wait without queuing:
+    // SCE_KERNEL_OK for the signal taken, or WAIT_TIMEOUT. Takes mutex.
+    std::expected<uint64_t, SceInt32> register_signal_wait(bool callbacks, Deadline deadline, SceUInt32 *time_left);
+    // Sleeps until the registered wait of generation, which no object queues, ended, claiming its
+    // timeout or the thread's end itself, then unregisters it. Takes mutex.
+    WaitEnd sleep_registered(uint64_t generation, Deadline deadline);
+    // Ends the registration with result and wakes the thread
+    void end_registration(WaitResult result);
+    // How the registration stands: ThreadExiting, then SCE_KERNEL_OK if it ended, else WAIT_TIMEOUT
+    WaitResult wait_state() const;
     void update_status(ThreadStatus status, std::optional<ThreadStatus> expected = std::nullopt);
     // Whether the thread is ending
     bool exiting() const { return ending != Ending::none; }
@@ -243,16 +306,20 @@ private:
     // Set the priority or the affinity mask and the TLS slot that shows it
     void set_priority(int new_priority);
     void set_affinity_mask(SceInt32 new_affinity_mask);
-    // Starts a dormant thread at entry, like start() does at its entry point. Takes mutex.
+    // Starts a dormant thread at entry, like start() does at its entry point. Takes
+    // end_waiters_mutex, then mutex.
     int start_at(Address entry, SceSize arglen, Ptr<void> argp, bool run_entry_callback);
+    // Shows the thread ended, DORMANT after an exit and else DELETED, and ends its end waiters with
+    // its exit status. With mutex held through lock, which it lets go of to take end_waiters_mutex
+    // first.
+    void end_for_waiters(std::unique_lock<std::mutex> &lock);
+    // The exit status of the thread once it ended, for its end waits. Takes mutex.
+    std::optional<SceInt32> ended_status();
     // Whether a callback of this thread was notified and hasn't run yet
     bool callbacks_notified() const { return notified_callbacks > 0; }
     // Whether a notified callback ends the current wait. Callbacks don't nest, so a wait inside a
     // callback runs none. With mutex held.
     bool callback_ends_wait() const { return wait_target.callbacks && !is_processing_callbacks && callbacks_notified(); }
-    // Whether the thread's current wait is over, by a wake, its end or a callback it runs, though
-    // the thread hasn't gone on yet. With mutex held.
-    bool wait_over() const { return exiting() || wake_pending || callback_ends_wait(); }
     // Keeps the thread from going on into guest code while anything holds it, unless it's ending.
     // With mutex held through lock.
     void wait_while_held(std::unique_lock<std::mutex> &lock, StopPoint where);
@@ -294,8 +361,28 @@ private:
     // Waits
     // What the thread waits on while waiting, empty otherwise
     WaitTarget wait_target;
-    // Set by wake() and consumed by the next wait().
+    // Set by wake() and cleared by the next park() or check_wait()
     bool wake_pending = false;
+    // Where the registered wait is
+    enum class WaitPhase : uint8_t {
+        // No wait is registered
+        none,
+        // A multiple event wait looks at its events and queues its tokens, not armed yet
+        scanning,
+        // Queued and parked, and nobody ended it yet
+        waiting,
+        // A claim ended it with wait_result
+        ended,
+    };
+    WaitPhase wait_phase = WaitPhase::none;
+    // Bumped by each registration. Queue entries carry it, so a late claim never ends a newer wait.
+    uint64_t wait_generation = 0;
+    WaitResult wait_result = SCE_KERNEL_OK;
+    // When the registered wait was claimed, for the time left
+    Deadline wait_ended_at;
+    // The registered wait's deadline, and where the claim that ends it writes the time left, or null
+    Deadline wait_deadline;
+    SceUInt32 *wait_time_left = nullptr;
     // A sceKernelSendSignal is pending for this thread.
     bool signal_pending = false;
     // The vblank the thread's last display wait ended on
@@ -319,7 +406,9 @@ private:
     // Where the thread stopped the last time something held it
     StopPoint stop_point = StopPoint::guest_code;
 
-    // Threads blocked in sceKernelWaitThreadEnd on this one, with their own lock, taken after mutex
+    // Threads blocked in sceKernelWaitThreadEnd on this one, with their own lock. It comes before
+    // mutex and before each waiter's, and the start and the end of the thread hold it too, so
+    // whether the thread ended doesn't change while a waiter holds it.
     std::mutex end_waiters_mutex;
     WaitQueue<EndWaitEntry> end_waiters;
 };
