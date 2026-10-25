@@ -623,22 +623,50 @@ WaitResult ThreadState::wait_for_thread_end(const ThreadStatePtr &waiter, SceInt
             end_lock.lock();
             state = waiter->check_wait();
         }
+        // Prototype only: a wait past its deadline looks again only once another party ended it,
+        // without the end queue's lock
+        if (state && *state == SCE_KERNEL_ERROR_WAIT_TIMEOUT) {
+            end_lock.unlock();
+            waiter->proto_hold("end_after_deadline", queued.generation);
+            end_lock.lock();
+            state = waiter->check_wait();
+        }
         if ((!state || *state == SCE_KERNEL_ERROR_WAIT_TIMEOUT) && waiter->end_wait(queued.generation, state))
             end_waiters.remove(queued);
         const WaitEnd end = waiter->unregister_wait(queued.generation);
-        if (!end.result || *end.result != SCE_KERNEL_ERROR_NOTIFY_CALLBACK)
+        if (!end.result || *end.result != SCE_KERNEL_ERROR_NOTIFY_CALLBACK) {
+            // Prototype only: a wait with callbacks the target's end claimed goes on only once a
+            // callback of the waiter is pending, without the end queue's lock
+            if (callbacks && end.result && *end.result == SCE_KERNEL_OK) {
+                end_lock.unlock();
+                waiter->proto_hold("end_after_completion", queued.generation);
+            }
             return end.result;
+        }
     }
 }
 
 void ThreadState::depart_end_waiter(ThreadState &waiter, uint64_t generation) {
     const std::lock_guard<std::mutex> end_lock(end_waiters_mutex);
+    // Prototype only: the waiter's registration before the claim. With this lock held only the claim
+    // below can end an end wait.
+    const std::pair<uint64_t, bool> before = waiter.proto_registration();
     end_waiters.remove_if([&](auto &queued) {
         if (queued.thread.get() != &waiter || queued.generation != generation)
             return false;
         end_waiters.claim(queued, SCE_KERNEL_ERROR_NOTIFY_CALLBACK);
         return true;
     });
+    // Prototype only: a late notify leaves a newer registration as it was
+    static const char *const chosen = std::getenv("VITA3K_PROTO_SCENARIO");
+    if (chosen && std::string_view(chosen) == "n2_after_rejoin" && before.first != generation) {
+        const std::pair<uint64_t, bool> after = waiter.proto_registration();
+        if (after != before) {
+            LOG_ERROR("proto n2_after_rejoin: the late notify of end wait generation {} found generation {} waiting {}, and left generation {} waiting {}", generation, before.first, before.second, after.first, after.second);
+            std::abort();
+        }
+        LOG_INFO("proto n2_after_rejoin: the late notify of end wait generation {} left generation {} waiting {}", generation, before.first, before.second);
+    }
 }
 
 WaitResult ThreadState::run_callbacks() {
@@ -686,6 +714,8 @@ uint64_t ThreadState::begin_registration(WaitTarget target, Deadline deadline, S
     wait_deadline = deadline;
     wait_time_left = time_left;
     arm(target);
+    // For proto_hold()
+    wait_cv.notify_all();
     return ++wait_generation;
 }
 
@@ -750,6 +780,44 @@ WaitResult ThreadState::wait_state() const {
     return SCE_KERNEL_ERROR_WAIT_TIMEOUT;
 }
 
+void ThreadState::proto_hold(std::string_view scenario, uint64_t generation) {
+    static const char *const chosen = std::getenv("VITA3K_PROTO_SCENARIO");
+    if (!chosen || scenario != chosen)
+        return;
+    std::unique_lock<std::mutex> lock(mutex);
+    const auto reached = [&] {
+        if (scenario == "n2_after_end")
+            return wait_generation != generation || wait_phase != WaitPhase::waiting;
+        if (scenario == "n2_after_rejoin")
+            return wait_generation != generation && wait_phase == WaitPhase::waiting;
+        if (scenario == "notify_after_completion" || scenario == "end_after_completion" || scenario == "vblank_after_completion")
+            return callbacks_notified();
+        if (scenario == "notify_after_deadline" || scenario == "signal_notify_before_park" || scenario == "end_after_deadline")
+            return wait_generation != generation || wait_phase != WaitPhase::waiting;
+        return exiting();
+    };
+    if (!wait_cv.wait_for(lock, std::chrono::seconds(5), reached)) {
+        LOG_ERROR("proto {}: generation {} never got there, now generation {} phase {} exiting {}", scenario, generation, wait_generation, std::to_underlying(wait_phase), exiting());
+        std::abort();
+    }
+    LOG_INFO("proto {}: held generation {} until it happened, now generation {} phase {} exiting {}", scenario, generation, wait_generation, std::to_underlying(wait_phase), exiting());
+}
+
+bool ThreadState::proto_ended_with(uint64_t generation, SceInt32 result) {
+    const std::lock_guard<std::mutex> lock(mutex);
+    return wait_phase == WaitPhase::ended && wait_generation == generation && wait_result && *wait_result == result;
+}
+
+std::pair<uint64_t, bool> ThreadState::proto_registration() {
+    const std::lock_guard<std::mutex> lock(mutex);
+    return { wait_generation, wait_phase == WaitPhase::waiting };
+}
+
+bool ThreadState::proto_ended_for_exit(uint64_t generation) {
+    const std::lock_guard<std::mutex> lock(mutex);
+    return wait_phase == WaitPhase::ended && wait_generation == generation && !wait_result;
+}
+
 ThreadState::WaitEnd ThreadState::unregister_wait(uint64_t generation) {
     const std::lock_guard<std::mutex> lock(mutex);
     assert(wait_phase == WaitPhase::ended && wait_generation == generation);
@@ -765,12 +833,31 @@ ThreadState::WaitEnd ThreadState::unregister_wait(uint64_t generation) {
 }
 
 ThreadState::WaitEnd ThreadState::sleep_registered(uint64_t generation, Deadline deadline) {
+    // Prototype only: what the barriers look at, from the armed registration
+    const WaitTarget target = [this] {
+        const std::lock_guard<std::mutex> lock(mutex);
+        return wait_target;
+    }();
+    // Prototype only: a signal wait looks at its registration only once another party ended it
+    if (target.type == SCE_KERNEL_WAITTYPE_SIGNAL)
+        proto_hold("signal_notify_before_park", generation);
     WaitResult state = check_wait();
     while (state && *state != SCE_KERNEL_OK && std::chrono::steady_clock::now() < deadline)
         state = park(deadline);
+    // Prototype only: a wait with callbacks looks past its deadline only once another party ended
+    // it
+    if (target.callbacks && state && *state == SCE_KERNEL_ERROR_WAIT_TIMEOUT) {
+        proto_hold("notify_after_deadline", generation);
+        state = check_wait();
+    }
     // The waiter claims its own timeout, and its end
-    if (!state || *state == SCE_KERNEL_ERROR_WAIT_TIMEOUT)
+    if (!state || *state == SCE_KERNEL_ERROR_WAIT_TIMEOUT) {
         end_wait(generation, state);
+        // Prototype only: a wait with callbacks that claimed its own timeout waits until a callback
+        // is notified
+        if (target.callbacks && state)
+            proto_hold("notify_after_completion", generation);
+    }
     return unregister_wait(generation);
 }
 
@@ -823,6 +910,8 @@ std::optional<ThreadState::CallbackDeparture> ThreadState::notify_callback(bool 
     const std::lock_guard<std::mutex> lock(mutex);
     if (first)
         ++notified_callbacks;
+    // For proto_hold()
+    wait_cv.notify_all();
     if (wait_phase != WaitPhase::waiting || !callback_ends_wait())
         return std::nullopt;
     // A multiple event wait isn't queued on one object, and a signal wait or a wait on no object, like
@@ -836,6 +925,8 @@ std::optional<ThreadState::CallbackDeparture> ThreadState::notify_callback(bool 
 }
 
 void ThreadState::end_wait_for_callback(const CallbackDeparture &departure) {
+    proto_hold("n2_after_end", departure.generation);
+    proto_hold("n2_after_rejoin", departure.generation);
     // Looked up again, since the wait may have ended and the object gone since the notify found it.
     // An end wait waits on a thread, which isn't a kernel object.
     if (departure.type == SCE_KERNEL_WAITTYPE_WAITTHEND) {

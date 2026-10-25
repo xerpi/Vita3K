@@ -23,6 +23,7 @@
 #include <kernel/types.h>
 #include <util/byte_ring_buffer.h>
 #include <util/intrusive_list.h>
+#include <util/log.h>
 
 #include <array>
 #include <bitset>
@@ -128,6 +129,10 @@ protected:
             // Each look reads the registration under the object's lock before anything else, so the
             // object is brought up to date only for a wait that still waits on a thread not exiting
             WaitResult state;
+            // Prototype only: whether a barrier held a look of this pass, and whether until the exit
+            const char *const scenario = std::getenv("VITA3K_PROTO_SCENARIO");
+            bool proto_held_look = false;
+            bool proto_held_for_exit = false;
             while (true) {
                 state = thread->check_wait();
                 if (!state || *state == SCE_KERNEL_OK)
@@ -142,7 +147,44 @@ protected:
                 lock.unlock();
                 // A recheck asked with wake(), the wait's own look or the deadline ends a park early,
                 // and only the next look decides
-                std::ignore = thread->park(std::min(look, deadline));
+                const WaitResult parked = thread->park(std::min(look, deadline));
+                const bool looks = parked && *parked == SCE_KERNEL_ERROR_WAIT_TIMEOUT;
+                if (parked && *parked == SCE_KERNEL_OK) {
+                    thread->proto_hold("exit_after_completion", waiter.generation);
+                    thread->proto_hold("notify_after_completion", waiter.generation);
+                }
+                if (looks && std::chrono::steady_clock::now() >= deadline)
+                    thread->proto_hold("notify_after_deadline", waiter.generation);
+                // Prototype only: the first look of the pass comes 50 ms after the deadline, as from a
+                // late host
+                if (scenario && std::string_view(scenario) == "late_timer_wake" && looks && !proto_held_look) {
+                    proto_held_look = true;
+                    std::this_thread::sleep_until(deadline + std::chrono::milliseconds(50));
+                    LOG_INFO("proto late_timer_wake: generation {} looks 50 ms after the deadline", waiter.generation);
+                }
+                // Prototype only: the first look of the pass waits until the thread is exiting
+                if (scenario && std::string_view(scenario) == "exit_before_look" && looks && !proto_held_look) {
+                    proto_held_look = true;
+                    thread->proto_hold("exit_before_look", waiter.generation);
+                    proto_held_for_exit = true;
+                }
+                // Prototype only: a waiter a callback notify took out waits before any cleanup of its
+                // own, until the object says what it left went on (proto_departure_reached())
+                if (scenario && std::string_view(scenario) == "departure_before_cleanup" && parked && *parked == SCE_KERNEL_OK && thread->proto_ended_with(waiter.generation, SCE_KERNEL_ERROR_NOTIFY_CALLBACK)) {
+                    bool reached = false;
+                    for (int i = 0; i < 5000 && !reached; i++) {
+                        lock.lock();
+                        reached = proto_departure_reached();
+                        lock.unlock();
+                        if (!reached)
+                            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                    }
+                    if (!reached) {
+                        LOG_ERROR("proto departure_before_cleanup: generation {} never saw what it left go on", waiter.generation);
+                        std::abort();
+                    }
+                    LOG_INFO("proto departure_before_cleanup: held generation {} before its cleanup until what it left went on", waiter.generation);
+                }
                 lock.lock();
             }
             // The thread's exit or the deadline ends the wait, unless a claim already did
@@ -155,7 +197,18 @@ protected:
                     serve();
                 }
             }
+            // Prototype only: a wait held until its thread was exiting ends for the exit, not with
+            // anything it took or a timeout
+            if (proto_held_for_exit) {
+                if (!thread->proto_ended_for_exit(waiter.generation)) {
+                    LOG_ERROR("proto exit_before_look: generation {} ended with something else than the exit", waiter.generation);
+                    std::abort();
+                }
+                LOG_INFO("proto exit_before_look: generation {} ended for the exit and took nothing", waiter.generation);
+            }
             const ThreadState::WaitEnd end = thread->unregister_wait(waiter.generation);
+            if (std::getenv("VITA3K_PROTO_SCENARIO"))
+                LOG_INFO("proto: D of generation {}: {}", waiter.generation, end.result ? fmt::format("result {:#x}", static_cast<uint32_t>(*end.result)) : "the thread is exiting");
             if (!end.result)
                 return end.result;
             result = end.result;
@@ -170,6 +223,10 @@ protected:
         return result;
     }
 
+    // Prototype only: whether what a waiter a callback notify took out left behind went on, for the
+    // departure_before_cleanup scenario
+    virtual bool proto_departure_reached() { return true; }
+
     // Ends thread's registered wait of generation in queue for a callback notify, takes it off the
     // queue and serves the waiters behind it, if the wait is still queued there, with departing()
     // giving it the outputs first. Takes the lock.
@@ -177,7 +234,12 @@ protected:
     void depart_for_callback(WaitQueue<Entry> &queue, ThreadState &thread, uint64_t generation) {
         const auto guard = lock();
         // A delete already ended the wait
-        if (guard && depart_queued(queue, thread, generation))
+        if (!guard)
+            return;
+        const bool departed = depart_queued(queue, thread, generation);
+        if (std::getenv("VITA3K_PROTO_SCENARIO"))
+            LOG_INFO("proto: N2 for generation {} {}", generation, departed ? "ended the wait" : "found it over and left it");
+        if (departed)
             serve();
     }
 
@@ -423,6 +485,12 @@ private:
     Entries finished;
     std::array<Ended, SCE_KERNEL_MULTIPLE_EVENTS_MAX> results{};
     SceUInt32 num_results = 0;
+
+    // Prototype only: whether a barrier already held this call once
+    bool proto_held_scan = false;
+    bool proto_held_wake = false;
+    // Prototype only: whether a barrier held a look until the thread was exiting
+    bool proto_held_for_exit = false;
 };
 
 class Semaphore final : public WithUidClass<SyncPrimitive, UidClass::semaphore> {
@@ -439,6 +507,7 @@ public:
     SceInt32 poll(const ThreadStatePtr &thread, SceInt32 need_count);
     SceInt32 signal(SceInt32 count);
     void end_for_callback(ThreadState &thread, uint64_t generation) override;
+    bool proto_departure_reached() override;
     SceInt32 cancel(SceInt32 set_count, SceUInt32 *num_wait_threads);
     // Fills info with what the semaphore's info reports, or returns UNKNOWN_SEMA_ID if it was deleted.
     SceInt32 info(SceKernelSemaInfo &info) const;
@@ -611,6 +680,7 @@ public:
     // Fills info with what the rwlock's info reports, or returns UNKNOWN_RW_LOCK_ID if it was deleted.
     SceInt32 info(SceKernelRWLockInfo &info) const;
     void end_for_callback(ThreadState &thread, uint64_t generation) override;
+    bool proto_departure_reached() override;
 
 private:
     struct WaitEntry {
@@ -660,6 +730,7 @@ public:
     // Drops the holds of thread, which is ending.
     void release_ended_holder(const ThreadState &thread);
     void end_for_callback(ThreadState &thread, uint64_t generation) override;
+    bool proto_departure_reached() override;
 
 private:
     struct WaitEntry {
@@ -697,6 +768,10 @@ private:
     // the thread ends or the flag is deleted.
     SceUID holder = 0;
     int holds = 0;
+
+    // Prototype only: the out bits of the wait a callback notify took out last, and the flags then
+    SceUInt32 *proto_out_bits = nullptr;
+    SceUInt32 proto_departed_flags = 0;
 };
 
 using EventFlagPtr = std::shared_ptr<EventFlag>;

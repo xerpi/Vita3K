@@ -24,6 +24,7 @@
 #include <util/log.h>
 
 #include <algorithm>
+#include <thread>
 
 SyncPrimitive::SyncPrimitive(SceUInt32 attr, const char *name)
     : attr(attr)
@@ -40,6 +41,26 @@ SceInt32 SyncPrimitive::check_name(const char *name, SceUInt32 attr) {
 // ************************
 // * Multiple event waits *
 // ************************
+
+// Prototype only, never to be merged: whether VITA3K_PROTO_SCENARIO names scenario
+static bool proto_scenario_is(std::string_view scenario) {
+    static const char *const chosen = std::getenv("VITA3K_PROTO_SCENARIO");
+    return chosen && scenario == chosen;
+}
+
+// Prototype only: holds the caller until reached() holds, polling, and aborts after 5 s so the
+// scenario fails
+static void proto_hold_until(std::string_view scenario, auto reached) {
+    for (int i = 0; i < 5000; i++) {
+        if (reached()) {
+            LOG_INFO("proto {}: held until it happened", scenario);
+            return;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    LOG_ERROR("proto {}: it never happened", scenario);
+    std::abort();
+}
 
 // Returns the simple event or timer with this UID, or null
 static EventPtr find_event(const KernelObjects &objects, SceUID uid) {
@@ -81,9 +102,37 @@ WaitResult MultiEventWait::run(SceUInt32 *time_left, bool callbacks) {
         }
         const uint64_t generation = thread->begin_scan();
         const Entries queued = scan(generation);
+        // Prototype only: the first arm waits until a callback is pending
+        if (proto_scenario_is("notify_during_scan") && !proto_held_scan) {
+            proto_held_scan = true;
+            proto_hold_until("notify_during_scan", [&] {
+                const std::lock_guard<std::mutex> lock(thread->mutex);
+                return thread->callbacks_notified();
+            });
+        }
         const bool sleeps = arm(generation, queued, callbacks, deadline);
         if (sleeps)
             sleep(generation, queued, deadline);
+        // Prototype only: a wait a notify ended does no cleanup until its events have no waiter left
+        if (proto_scenario_is("notify_then_set") && thread->proto_ended_with(generation, SCE_KERNEL_ERROR_NOTIFY_CALLBACK)) {
+            proto_hold_until("notify_then_set", [&] {
+                for (SceUInt32 i = 0; i < count; i++) {
+                    SceKernelEventInfo info{};
+                    if (queued.test(i) && events[i]->info(info) == SCE_KERNEL_OK && info.numWaitThreads != 0)
+                        return false;
+                }
+                return true;
+            });
+        }
+        // Prototype only: a wait held until its thread was exiting ends for the exit, not with an
+        // event it took or a timeout
+        if (proto_held_for_exit) {
+            if (!thread->proto_ended_for_exit(generation)) {
+                LOG_ERROR("proto exit_before_look: multiple wait generation {} ended with something else than the exit", generation);
+                std::abort();
+            }
+            LOG_INFO("proto exit_before_look: multiple wait generation {} ended for the exit and took nothing", generation);
+        }
         const ThreadState::WaitEnd end = thread->unregister_wait(generation);
         dequeue(queued);
         if (!end.result)
@@ -143,6 +192,13 @@ MultiEventWait::Entries MultiEventWait::scan(uint64_t generation) {
             queueing = queueing && !any;
         else if (queueing)
             queued.set(i);
+        // Prototype only: the scan waits after the first entry's token until another party ended it
+        if (proto_scenario_is("set_during_scan") && i == 0 && queued.test(0)) {
+            proto_hold_until("set_during_scan", [&] {
+                const std::lock_guard<std::mutex> lock(thread->mutex);
+                return finished.test(0);
+            });
+        }
     }
     return queued;
 }
@@ -176,7 +232,20 @@ void MultiEventWait::sleep(uint64_t generation, const Entries &queued, Deadline 
             if (queued.test(i))
                 wake = std::min(wake, events[i]->watch_until(tokens[i]));
         }
-        std::ignore = thread->park(wake);
+        const WaitResult parked = thread->park(wake);
+        const bool looks = parked && *parked == SCE_KERNEL_ERROR_WAIT_TIMEOUT;
+        // Prototype only: the first look comes 50 ms after the deadline, as from a late host
+        if (proto_scenario_is("late_timer_wake") && looks && !proto_held_wake) {
+            proto_held_wake = true;
+            std::this_thread::sleep_until(deadline + std::chrono::milliseconds(50));
+            LOG_INFO("proto late_timer_wake: woke 50 ms after the deadline");
+        }
+        // Prototype only: the first look waits until the thread is exiting
+        if (proto_scenario_is("exit_before_look") && looks && !proto_held_wake) {
+            proto_held_wake = true;
+            thread->proto_hold("exit_before_look", generation);
+            proto_held_for_exit = true;
+        }
         // The park's result may be old by now, so the registration decides before the wait fires
         // anything: a wait that ended, or whose thread is exiting, never takes a timer's event
         const WaitResult state = thread->check_wait();
@@ -1012,6 +1081,11 @@ void RWLock::end_for_callback(ThreadState &thread, uint64_t generation) {
     depart_for_callback(waiters, thread, generation);
 }
 
+bool RWLock::proto_departure_reached() {
+    // The reader behind the writer that left got in next to the read lock already held
+    return waiters.empty() && lock_count == 2 && !write_owner;
+}
+
 SceInt32 RWLock::try_take(const ThreadStatePtr &thread, bool is_write) {
     // The writer may take the write lock again only if the lock is recursive
     if (is_write && write_owner == thread->id) {
@@ -1229,6 +1303,10 @@ void Semaphore::end_for_callback(ThreadState &thread, uint64_t generation) {
     depart_for_callback(waiters, thread, generation);
 }
 
+bool Semaphore::proto_departure_reached() {
+    return val >= 1 && waiters.empty();
+}
+
 SceInt32 Semaphore::poll(const ThreadStatePtr &thread, SceInt32 need_count) {
     const auto guard = lock();
     if (!guard)
@@ -1376,6 +1454,25 @@ SceInt32 Condvar::wait(MemState &mem, const ThreadStatePtr &thread, SceUInt32 *t
     const bool timed_out = r && *r == SCE_KERNEL_ERROR_WAIT_TIMEOUT;
     if (!r || (*r != SCE_KERNEL_OK && !timed_out))
         return guest_result(r);
+    // Prototype only: the waiter lets go of the condition's lock after the claim ended its wait,
+    // until another thread deleted the condition
+    if (proto_scenario_is("cond_delete_after_claim")) {
+        bool deleted = false;
+        guard.unlock();
+        for (int i = 0; i < 5000 && !deleted; i++) {
+            guard.lock();
+            deleted = was_deleted();
+            guard.unlock();
+            if (!deleted)
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        if (!deleted) {
+            LOG_ERROR("proto cond_delete_after_claim: the condition was never deleted");
+            std::abort();
+        }
+        guard.lock();
+        LOG_INFO("proto cond_delete_after_claim: held after the claim until the condition was deleted, result {:#x}", static_cast<uint32_t>(*r));
+    }
     // A condition deleted since the claim that ended the wait leaves the mutex alone, and the wait
     // keeps what the claim gave it
     if (was_deleted())
@@ -1504,6 +1601,19 @@ void EventFlag::departing(const ThreadState &thread, SceInt32 reason) {
         *waiter->entry.out_bits = flags;
     if (reason == SCE_KERNEL_ERROR_WAIT_TIMEOUT)
         drop_hold();
+    // Prototype only: what departure_before_cleanup checks while the waiter is held
+    if (reason == SCE_KERNEL_ERROR_NOTIFY_CALLBACK) {
+        if (auto *const waiter = waiters.find_if([&](auto &w) { return w.thread.get() == &thread; })) {
+            proto_out_bits = waiter->entry.out_bits;
+            proto_departed_flags = flags;
+        }
+    }
+}
+
+bool EventFlag::proto_departure_reached() {
+    // The waiter left the queue with its hold and the flags of its departure in its local out bits,
+    // and a set came after
+    return waiters.empty() && holds > 0 && proto_out_bits && *proto_out_bits == proto_departed_flags && flags != proto_departed_flags;
 }
 
 void EventFlag::end_for_callback(ThreadState &thread, uint64_t generation) {

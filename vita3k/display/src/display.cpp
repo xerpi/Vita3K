@@ -137,6 +137,13 @@ void wait_vblank(DisplayState &display, const ThreadStatePtr &wait_thread, const
             }
             if (!state)
                 wait_thread->end_wait(waiter.generation, state);
+            // Prototype only: a wait with callbacks that ended goes on only once a callback of the
+            // waiter is pending, without the display lock
+            if (is_cb && state) {
+                lock.unlock();
+                wait_thread->proto_hold("vblank_after_completion", waiter.generation);
+                lock.lock();
+            }
             // A notify ends the wait without the queue's lock, so the waiter may still be queued
             display.vblank_waiters.remove(waiter);
             const ThreadState::WaitEnd end = wait_thread->unregister_wait(waiter.generation);
