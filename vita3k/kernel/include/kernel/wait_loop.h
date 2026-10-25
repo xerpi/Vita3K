@@ -22,11 +22,15 @@
 
 #include <kernel/thread/thread_state.h>
 #include <kernel/waitable.h>
+#include <util/log.h>
 
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <expected>
 #include <optional>
+#include <string_view>
+#include <thread>
 #include <tuple>
 
 // Runs thread's pending callbacks if callbacks is set, releasing the lock while they run. Returns
@@ -90,6 +94,13 @@ template <typename Object, typename Entry, typename Take, typename Finish>
         // Each look reads the registration under the lock before anything else, so the waitable is
         // brought up to date only for a wait that still waits on a thread not exiting
         WaitResult state;
+        // Prototype only: whether a barrier held a look of this pass, and whether until the exit, and
+        // which waits have holds of their own
+        const char *const scenario = std::getenv("VITA3K_PROTO_SCENARIO");
+        bool proto_held_look = false;
+        bool proto_held_for_exit = false;
+        const bool proto_end = target.type == SCE_KERNEL_WAITTYPE_WAITTHEND;
+        const bool proto_vblank = target.type == SCE_KERNEL_WAITTYPE_EVENT && target.id == SCE_UID_INVALID_UID;
         while (true) {
             state = thread->check_wait();
             if (!state || *state == SCE_KERNEL_OK)
@@ -104,7 +115,52 @@ template <typename Object, typename Entry, typename Take, typename Finish>
             lock.unlock();
             // A recheck asked with wake(), the wait's own look or the deadline ends a park early,
             // and only the next look decides
-            std::ignore = thread->park(std::min(look, deadline));
+            const WaitResult parked = thread->park(std::min(look, deadline));
+            const bool looks = parked && *parked == SCE_KERNEL_ERROR_WAIT_TIMEOUT;
+            if (parked && *parked == SCE_KERNEL_OK) {
+                // Prototype only: a wait with callbacks on a thread's end or a vblank that ended goes
+                // on only once a callback of the waiter is pending
+                if (proto_end && target.callbacks)
+                    thread->proto_hold("end_after_completion", waiter.generation);
+                else if (proto_vblank && target.callbacks)
+                    thread->proto_hold("vblank_after_completion", waiter.generation);
+                else if (!proto_end && !proto_vblank) {
+                    thread->proto_hold("exit_after_completion", waiter.generation);
+                    thread->proto_hold("notify_after_completion", waiter.generation);
+                }
+            }
+            if (looks && std::chrono::steady_clock::now() >= deadline)
+                thread->proto_hold(proto_end ? "end_after_deadline" : "notify_after_deadline", waiter.generation);
+            // Prototype only: the first look of the pass comes 50 ms after the deadline, as from a
+            // late host
+            if (scenario && std::string_view(scenario) == "late_timer_wake" && looks && !proto_held_look) {
+                proto_held_look = true;
+                std::this_thread::sleep_until(deadline + std::chrono::milliseconds(50));
+                LOG_INFO("proto late_timer_wake: generation {} looks 50 ms after the deadline", waiter.generation);
+            }
+            // Prototype only: the first look of the pass waits until the thread is exiting
+            if (scenario && std::string_view(scenario) == "exit_before_look" && looks && !proto_held_look) {
+                proto_held_look = true;
+                thread->proto_hold("exit_before_look", waiter.generation);
+                proto_held_for_exit = true;
+            }
+            // Prototype only: a waiter a callback notify took out waits before any cleanup of its
+            // own, until the waitable says what it left went on (proto_departure_reached())
+            if (scenario && std::string_view(scenario) == "departure_before_cleanup" && parked && *parked == SCE_KERNEL_OK && thread->proto_ended_with(waiter.generation, SCE_KERNEL_ERROR_NOTIFY_CALLBACK)) {
+                bool reached = false;
+                for (int i = 0; i < 5000 && !reached; i++) {
+                    lock.lock();
+                    reached = waitable.proto_departure_reached();
+                    lock.unlock();
+                    if (!reached)
+                        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                }
+                if (!reached) {
+                    LOG_ERROR("proto departure_before_cleanup: generation {} never saw what it left go on", waiter.generation);
+                    std::abort();
+                }
+                LOG_INFO("proto departure_before_cleanup: held generation {} before its cleanup until what it left went on", waiter.generation);
+            }
             lock.lock();
         }
         // The thread's exit or the deadline ends the wait, unless a claim already did
@@ -112,7 +168,18 @@ template <typename Object, typename Entry, typename Take, typename Finish>
             waitable.serve_locked();
         // A notify ends a wait with no endpoint without the lock, so it may still be queued
         queue.remove(waiter);
+        // Prototype only: a wait held until its thread was exiting ends for the exit, not with
+        // anything it took or a timeout
+        if (proto_held_for_exit) {
+            if (!thread->proto_ended_for_exit(waiter.generation)) {
+                LOG_ERROR("proto exit_before_look: generation {} ended with something else than the exit", waiter.generation);
+                std::abort();
+            }
+            LOG_INFO("proto exit_before_look: generation {} ended for the exit and took nothing", waiter.generation);
+        }
         const ThreadState::WaitEnd end = thread->unregister_wait(waiter.generation);
+        if (scenario)
+            LOG_INFO("proto: D of generation {}: {}", waiter.generation, end.result ? fmt::format("result {:#x}", static_cast<uint32_t>(*end.result)) : "the thread is exiting");
         if (!end.result)
             return end.result;
         result = end.result;

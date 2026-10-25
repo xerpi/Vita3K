@@ -275,6 +275,16 @@ struct ThreadState : std::enable_shared_from_this<ThreadState> {
     };
     // Drops the registered wait of generation, which has ended, and shows the thread running again.
     WaitEnd unregister_wait(uint64_t generation);
+    // Prototype only, never to be merged. With VITA3K_PROTO_SCENARIO set to scenario, holds the
+    // caller until the registration of generation got where the scenario needs it, and aborts after
+    // 5 s so the scenario fails.
+    void proto_hold(std::string_view scenario, uint64_t generation);
+    // Prototype only: whether the registration of generation ended with result
+    bool proto_ended_with(uint64_t generation, SceInt32 result);
+    // Prototype only: whether the registration of generation ended for the thread's exit
+    bool proto_ended_for_exit(uint64_t generation);
+    // Prototype only: the generation of the last registration, and whether it waits
+    std::pair<uint64_t, bool> proto_registration();
     // Shows the thread WAITING while a host call blocks it, such as an audio output, and RUNNING after
     void begin_host_wait();
     void end_host_wait();

@@ -25,6 +25,7 @@
 #include <kernel/waitable.h>
 #include <util/byte_ring_buffer.h>
 #include <util/intrusive_list.h>
+#include <util/log.h>
 
 #include <array>
 #include <bitset>
@@ -308,6 +309,12 @@ private:
     Entries finished;
     std::array<Ended, SCE_KERNEL_MULTIPLE_EVENTS_MAX> results{};
     SceUInt32 num_results = 0;
+
+    // Prototype only: whether a barrier already held this call once
+    bool proto_held_scan = false;
+    bool proto_held_wake = false;
+    // Prototype only: whether a barrier held a look until the thread was exiting
+    bool proto_held_for_exit = false;
 };
 
 class Semaphore final : public WithUidClass<SyncPrimitive, UidClass::semaphore> {
@@ -323,6 +330,7 @@ public:
     SceInt32 wait(const ThreadStatePtr &thread, SceInt32 need_count, SceUInt32 *timeout, bool callbacks);
     SceInt32 poll(const ThreadStatePtr &thread, SceInt32 need_count);
     SceInt32 signal(SceInt32 count);
+    bool proto_departure_reached() override;
     SceInt32 cancel(SceInt32 set_count, SceUInt32 *num_wait_threads);
     // Fills info with what the semaphore's info reports, or returns UNKNOWN_SEMA_ID if it was deleted.
     SceInt32 info(SceKernelSemaInfo &info) const;
@@ -495,6 +503,7 @@ public:
     void release_ended_writer(const ThreadState &thread);
     // Fills info with what the rwlock's info reports, or returns UNKNOWN_RW_LOCK_ID if it was deleted.
     SceInt32 info(SceKernelRWLockInfo &info) const;
+    bool proto_departure_reached() override;
 
 private:
     struct WaitEntry {
@@ -544,6 +553,7 @@ public:
     SceInt32 info(SceKernelEventFlagInfo &info) const;
     // Drops the holds of thread, which is ending.
     void release_ended_holder(const ThreadState &thread);
+    bool proto_departure_reached() override;
 
 private:
     struct WaitEntry {
@@ -581,6 +591,10 @@ private:
     // the thread ends or the flag is deleted.
     SceUID holder = 0;
     int holds = 0;
+
+    // Prototype only: the out bits of the wait a callback notify took out last, and the flags then
+    SceUInt32 *proto_out_bits = nullptr;
+    SceUInt32 proto_departed_flags = 0;
 };
 
 using EventFlagPtr = std::shared_ptr<EventFlag>;

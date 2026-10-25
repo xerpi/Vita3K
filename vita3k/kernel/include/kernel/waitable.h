@@ -47,11 +47,11 @@ public:
     // serves the waiters behind it, if that wait is still queued here. A later wait of the thread,
     // and a wait that a delete or another claim already ended, are left alone. The one way into a
     // waitable from outside its own calls, through the endpoint of a registration. Takes the lock.
-    void depart_waiter(ThreadState &thread, uint64_t generation) {
-        const std::lock_guard<std::mutex> guard(lock_domain);
-        if (depart_locked(thread, generation, Departure::callback))
-            serve_locked();
-    }
+    void depart_waiter(ThreadState &thread, uint64_t generation);
+
+    // Prototype only: whether what a waiter a callback notify took out left behind went on, for the
+    // departure_before_cleanup scenario. With the lock held.
+    virtual bool proto_departure_reached() { return true; }
 
 protected:
     // lock is the waitable's lock domain, its own or one it shares, for as long as it lives
