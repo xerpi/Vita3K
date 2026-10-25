@@ -261,15 +261,25 @@ bool Event::complete(WaitQueue<WaitEntry>::Waiter &waiter, SceInt32 result, SceU
     const WaitEntry &wait = waiter.entry;
     if (wait.multi)
         return wait.multi->end_entry(waiter.generation, { wait.index, result, bits, result == SCE_KERNEL_OK ? last_user_data : 0 });
+    // A registered wait gets the bits once it is ended
+    if (waiter.generation)
+        waiters.claim(waiter, result);
     if (result == SCE_KERNEL_OK) {
         if (wait.result_pattern)
             *wait.result_pattern = bits;
         if (wait.user_data)
             *wait.user_data = last_user_data;
     }
-    waiter.result = result;
-    waiter.thread->wake();
+    // A timer's waits don't register yet
+    if (!waiter.generation) {
+        waiter.result = result;
+        waiter.thread->wake();
+    }
     return true;
+}
+
+void Event::end_for_callback(ThreadState &thread, uint64_t generation) {
+    depart_for_callback(waiters, thread, generation);
 }
 
 std::size_t Event::end_waits(SceInt32 result) {
@@ -350,7 +360,7 @@ SceInt32 SimpleEvent::wait(const ThreadStatePtr &thread, SceUInt32 wait_pattern,
 
     // A wait for pattern 0 matches nothing, so it lasts until its timeout, a cancel or a delete. If
     // the bits are taken right after a callback notify, the wait returns NOTIFY_CALLBACK.
-    const WaitResult r = wait_loop(waiters, guard, thread, { SCE_KERNEL_WAITTYPE_EVENT, uid, callbacks }, { wait_pattern, result_pattern, user_data }, timeout, CallbacksCheck::after_wait, [&](WaitEntry &, SceInt32 last) -> std::optional<SceInt32> {
+    const WaitResult r = registered_wait_loop(waiters, guard, thread, { SCE_KERNEL_WAITTYPE_EVENT, uid, callbacks }, { wait_pattern, result_pattern, user_data }, timeout, CallbacksCheck::after_wait, [&](WaitEntry &, SceInt32 last) -> std::optional<SceInt32> {
         if (try_take(wait_pattern, result_pattern, user_data) == SCE_KERNEL_OK)
             return last;
         return std::nullopt;

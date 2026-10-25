@@ -159,13 +159,19 @@ public:
         std::erase_if(waiters, [&](Waiter *w) { return pick(*w); });
     }
 
-    // Ends the registered wait of waiter with result and takes it off the queue.
-    void end(Waiter &waiter, SceInt32 result = SCE_KERNEL_OK) {
-        remove(waiter);
+    // Ends the registered wait of waiter with result, for a pick of remove_if() that takes it off the
+    // queue.
+    void claim(Waiter &waiter, SceInt32 result) {
         // Every claim takes its waiter off the queue before it lets go of the object's lock, so a
         // queued registration is still waiting
         [[maybe_unused]] const bool ended = waiter.thread->end_wait(waiter.generation, result);
         assert(ended);
+    }
+
+    // Ends the registered wait of waiter with result and takes it off the queue.
+    void end(Waiter &waiter, SceInt32 result = SCE_KERNEL_OK) {
+        remove(waiter);
+        claim(waiter, result);
     }
 
     // Ends the registered wait of every waiter with result, in queue order. Returns how many there were.

@@ -279,13 +279,14 @@ public:
     Deadline watch_until(const Token &token);
     // Fires an event that was due by until, and returns whether it did.
     bool update(Deadline until);
+    void end_for_callback(ThreadState &thread, uint64_t generation) override;
 
 protected:
     Event(SceUInt32 attr, const char *name, SceUInt32 init_pattern, SceUInt64 init_user_data);
 
     // Ends waiter's wait with result and the bits it got: a plain waiter gets them and wakes, a token
-    // gives them to its multiple event wait. Returns false for a token whose wait takes no more
-    // results, which takes nothing. The caller takes the waiter off the queue. The lock must be held.
+    // gives them to its multiple event wait. Returns false for a wait that takes no more results,
+    // which takes nothing. The caller takes the waiter off the queue. The lock must be held.
     bool complete(WaitQueue<WaitEntry>::Waiter &waiter, SceInt32 result, SceUInt32 bits);
     // Ends every wait queued here with result, as a delete or a cancel does, and returns how many
     // took it. The lock must be held.
