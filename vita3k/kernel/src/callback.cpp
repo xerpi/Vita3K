@@ -28,16 +28,25 @@ Callback::Callback(const ThreadStatePtr &owner, const std::string &name, Ptr<Sce
     , owner(owner) {}
 
 void Callback::notify(SceUID notifier_id, SceInt32 notify_arg) {
-    const auto guard = lock();
-    if (!guard)
-        return;
-    this->notifier_id = notifier_id;
-    this->notification_arg = notify_arg;
-    // The owner already counts a callback with notifications, and only the first one wakes it
-    if (this->num_notifications++ == 0) {
-        if (const ThreadStatePtr thread = owner.lock())
-            thread->add_notified_callback();
+    ThreadStatePtr thread;
+    std::optional<ThreadState::CallbackDeparture> departure;
+    {
+        const auto guard = lock();
+        if (!guard)
+            return;
+        this->notifier_id = notifier_id;
+        this->notification_arg = notify_arg;
+        const bool first = this->num_notifications++ == 0;
+        thread = owner.lock();
+        if (!thread)
+            return;
+        // Every notify reaches the owner, since it ends a wait with callbacks even when the callback
+        // is already pending
+        departure = thread->notify_callback(first);
     }
+    // Ending the wait takes the waited object's lock, which no callback's lock may be held for
+    if (departure)
+        thread->end_wait_for_callback(*departure);
 }
 
 void Callback::event_notify(SceUID notifier_id) {

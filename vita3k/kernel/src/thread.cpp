@@ -596,6 +596,61 @@ void ThreadState::wake() {
     wait_cv.notify_all();
 }
 
+std::expected<uint64_t, SceInt32> ThreadState::register_wait(WaitTarget target, Deadline deadline) {
+    const std::lock_guard<std::mutex> lock(mutex);
+    assert(wait_phase == WaitPhase::none);
+    // A passed deadline wins over a pending callback
+    if (std::chrono::steady_clock::now() >= deadline)
+        return std::unexpected(SCE_KERNEL_ERROR_WAIT_TIMEOUT);
+    if (target.callbacks && !is_processing_callbacks && callbacks_notified())
+        return std::unexpected(SCE_KERNEL_ERROR_NOTIFY_CALLBACK);
+    wait_target = target;
+    wait_phase = WaitPhase::waiting;
+    update_status(ThreadStatus::waiting);
+    return ++wait_generation;
+}
+
+bool ThreadState::end_wait(uint64_t generation, WaitResult result) {
+    const std::lock_guard<std::mutex> lock(mutex);
+    if (wait_phase != WaitPhase::waiting || wait_generation != generation)
+        return false;
+    wait_phase = WaitPhase::ended;
+    wait_result = result;
+    wait_ended_at = std::chrono::steady_clock::now();
+    wait_cv.notify_all();
+    return true;
+}
+
+WaitResult ThreadState::park(Deadline until) {
+    std::unique_lock<std::mutex> lock(mutex);
+    const auto over = [&] { return exiting() || wait_phase != WaitPhase::waiting || wake_pending; };
+    if (until == Deadline::max())
+        wait_cv.wait(lock, over);
+    else
+        wait_cv.wait_until(lock, until, over);
+    wake_pending = false;
+    // The thread stays waiting on its target until D, since a wait that timed out is still queued
+    // until the waiter claims it
+    if (exiting())
+        return std::unexpected{ ThreadExiting{} };
+    if (wait_phase != WaitPhase::waiting)
+        return SCE_KERNEL_OK;
+    return SCE_KERNEL_ERROR_WAIT_TIMEOUT;
+}
+
+ThreadState::WaitEnd ThreadState::unregister_wait(uint64_t generation) {
+    const std::lock_guard<std::mutex> lock(mutex);
+    assert(wait_phase == WaitPhase::ended && wait_generation == generation);
+    wait_phase = WaitPhase::none;
+    wait_target = {};
+    // A thread something holds goes on to its gate, which keeps it from its callbacks and its code
+    update_status(ThreadStatus::running);
+    // An exit wins over whatever ended the wait, which stays done
+    if (exiting())
+        return { std::unexpected{ ThreadExiting{} }, wait_ended_at };
+    return { wait_result, wait_ended_at };
+}
+
 bool ThreadState::has_pending_callbacks() {
     const std::lock_guard<std::mutex> lock(mutex);
     return !is_processing_callbacks && callbacks_notified();
@@ -641,10 +696,22 @@ SceUInt32 ThreadState::process_callbacks() {
     return processed;
 }
 
-void ThreadState::add_notified_callback() {
+std::optional<ThreadState::CallbackDeparture> ThreadState::notify_callback(bool first) {
     const std::lock_guard<std::mutex> lock(mutex);
-    ++notified_callbacks;
+    if (first)
+        ++notified_callbacks;
+    // The waits that don't register see the callback through callback_ends_wait()
     wait_cv.notify_all();
+    // A registered wait ends only by a claim, which takes the waited object's lock first
+    if (wait_phase != WaitPhase::waiting || !callback_ends_wait())
+        return std::nullopt;
+    return CallbackDeparture{ wait_target.id, wait_generation };
+}
+
+void ThreadState::end_wait_for_callback(const CallbackDeparture &departure) {
+    // Looked up again, since the wait may have ended and the object gone since the notify found it
+    if (const auto object = std::dynamic_pointer_cast<SyncPrimitive>(kernel.objects.find(departure.object)))
+        object->end_for_callback(*this, departure.generation);
 }
 
 void ThreadState::remove_notified_callback() {
@@ -672,7 +739,8 @@ SceKernelThreadInfo ThreadState::info() {
     // A thread whose kernel wait is over is READY until it goes on, and waits on nothing, like on a
     // Vita, where the waker ends the wait. A host wait, like an audio output, has no target and
     // stays WAITING.
-    const bool ready = status == ThreadStatus::waiting && wait_target.type != 0 && wait_over();
+    const bool over = wait_phase == WaitPhase::none ? wait_over() : wait_phase == WaitPhase::ended || exiting();
+    const bool ready = status == ThreadStatus::waiting && wait_target.type != 0 && over;
     const WaitTarget reported = ready ? WaitTarget{} : wait_target;
     info.status = ready ? SCE_KERNEL_THREAD_STATUS_READY : std::to_underlying(status);
     info.waitType = reported.callbacks ? reported.type | WAITTYPE_CB_BIT : reported.type;

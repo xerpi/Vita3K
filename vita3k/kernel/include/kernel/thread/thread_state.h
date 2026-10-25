@@ -149,6 +149,27 @@ struct ThreadState {
     [[nodiscard]] WaitResult run_callbacks();
     // Wakes this thread from wait().
     void wake();
+    // The waits that register, the semaphore's for now. Exactly one party ends each registration, the
+    // first that claims it with end_wait(), and it does so under the waited object's lock.
+    // Registers a wait on target, with the object's lock held. Returns its generation, or the result
+    // that ends it without queuing: WAIT_TIMEOUT once the deadline passed, else NOTIFY_CALLBACK with
+    // a callback pending.
+    [[nodiscard]] std::expected<uint64_t, SceInt32> register_wait(WaitTarget target, Deadline deadline);
+    // Ends the registered wait of generation with result if it is still waiting, and wakes the
+    // thread. Returns whether it did. With the object's lock held.
+    bool end_wait(uint64_t generation, WaitResult result);
+    // Blocks until the registered wait ended, until passed, a recheck was asked with wake(), or the
+    // thread is exiting. Returns ThreadExiting, then SCE_KERNEL_OK if the wait ended, else
+    // WAIT_TIMEOUT for the caller to look again. The thread stays waiting until unregister_wait().
+    [[nodiscard]] WaitResult park(Deadline until);
+    // How a registered wait ended: its result, ThreadExiting if the thread is exiting whoever ended
+    // it, and when it was claimed
+    struct WaitEnd {
+        WaitResult result;
+        Deadline at;
+    };
+    // Drops the registered wait of generation, which has ended, and shows the thread running again.
+    WaitEnd unregister_wait(uint64_t generation);
     // Shows the thread WAITING while a host call blocks it, such as an audio output, and RUNNING after
     void begin_host_wait();
     void end_host_wait();
@@ -163,9 +184,20 @@ struct ThreadState {
     bool has_pending_callbacks();
     // Adds a callback this thread created. Called by the thread itself.
     void add_callback(const CallbackPtr &cb);
-    // Counts a callback of this thread that was notified and hasn't run for it yet, waking a wait
-    // with callbacks, and stops counting it. Called by the callback with its lock held.
-    void add_notified_callback();
+    // A registered wait that a callback notify ends
+    struct CallbackDeparture {
+        SceUID object;
+        uint64_t generation;
+    };
+    // Counts a notification of a callback of this thread. The first one since the callback last ran
+    // makes it pending. Returns the registered wait the notify ends, which the caller ends with
+    // end_wait_for_callback() once it let go of the callback's lock. Called by the callback with its
+    // lock held, on every notify.
+    std::optional<CallbackDeparture> notify_callback(bool first);
+    // Ends the registered wait a notify found, if it is still waiting. Called with no lock held.
+    void end_wait_for_callback(const CallbackDeparture &departure);
+    // Stops counting a callback whose notifications were taken or dropped. Called by the callback
+    // with its lock held.
     void remove_notified_callback();
 
     // Holds: the debugger, the emulator pause and the ForVM suspend
@@ -296,6 +328,21 @@ private:
     WaitTarget wait_target;
     // Set by wake() and consumed by the next wait().
     bool wake_pending = false;
+    // Where the registered wait is
+    enum class WaitPhase : uint8_t {
+        // No wait is registered
+        none,
+        // Queued and parked, and nobody ended it yet
+        waiting,
+        // A claim ended it with wait_result
+        ended,
+    };
+    WaitPhase wait_phase = WaitPhase::none;
+    // Bumped by each registration. Queue entries carry it, so a late claim never ends a newer wait.
+    uint64_t wait_generation = 0;
+    WaitResult wait_result = SCE_KERNEL_OK;
+    // When the registered wait was claimed, for the time left
+    Deadline wait_ended_at;
     // A sceKernelSendSignal is pending for this thread.
     bool signal_pending = false;
     // The vblank the thread's last display wait ended on

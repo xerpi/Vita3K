@@ -955,7 +955,7 @@ SceInt32 Semaphore::check_create(const char *name, SceUInt32 attr, SceInt32 init
 }
 
 void Semaphore::on_delete(SceUID) {
-    waiters.wake_all(SCE_KERNEL_ERROR_WAIT_DELETE);
+    waiters.end_all(SCE_KERNEL_ERROR_WAIT_DELETE);
 }
 
 SceInt32 Semaphore::wait(const ThreadStatePtr &thread, SceInt32 need_count, SceUInt32 *timeout, bool callbacks) {
@@ -965,12 +965,16 @@ SceInt32 Semaphore::wait(const ThreadStatePtr &thread, SceInt32 need_count, SceU
     if (need_count <= 0 || need_count > max)
         return SCE_KERNEL_ERROR_ILLEGAL_COUNT;
 
-    const WaitResult r = wait_loop(waiters, guard, thread, { SCE_KERNEL_WAITTYPE_SEMAPHORE, uid, callbacks }, { need_count }, timeout, CallbacksCheck::after_wait, [&](WaitEntry &, SceInt32) -> std::optional<SceInt32> {
+    const WaitResult r = registered_wait_loop(waiters, guard, thread, { SCE_KERNEL_WAITTYPE_SEMAPHORE, uid, callbacks }, { need_count }, timeout, CallbacksCheck::after_wait, [&](WaitEntry &, SceInt32) -> std::optional<SceInt32> {
         if (try_take(thread, need_count))
             return SCE_KERNEL_OK;
         return std::nullopt;
     });
     return guest_result(r);
+}
+
+void Semaphore::end_for_callback(ThreadState &thread, uint64_t generation) {
+    depart_for_callback(waiters, thread, generation);
 }
 
 SceInt32 Semaphore::poll(const ThreadStatePtr &thread, SceInt32 need_count) {
@@ -1012,7 +1016,7 @@ void Semaphore::serve() {
         if (val < waiter->entry.need_count)
             break;
         val -= waiter->entry.need_count;
-        waiters.wake(*waiter);
+        waiters.end(*waiter);
     }
 }
 
@@ -1024,7 +1028,7 @@ SceInt32 Semaphore::cancel(SceInt32 set_count, SceUInt32 *num_wait_threads) {
     if (set_count > max)
         return SCE_KERNEL_ERROR_ILLEGAL_COUNT;
 
-    const auto nb_threads = static_cast<SceUInt32>(waiters.wake_all(SCE_KERNEL_ERROR_WAIT_CANCEL));
+    const auto nb_threads = static_cast<SceUInt32>(waiters.end_all(SCE_KERNEL_ERROR_WAIT_CANCEL));
     if (set_count < 0) {
         val = init_val;
     } else {

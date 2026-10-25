@@ -37,6 +37,10 @@ public:
     const SceUInt32 attr;
     const std::string name;
 
+    // Ends thread's registered wait of generation for a callback notify, takes it off the queue and
+    // serves the waiters behind it, if that wait is still waiting. Called with no lock held.
+    virtual void end_for_callback(ThreadState &thread, uint64_t generation) {}
+
 protected:
     SyncPrimitive(SceUInt32 attr, const char *name);
 
@@ -132,6 +136,92 @@ protected:
         if (const WaitResult ran = run_pending_callbacks(lock, thread, target.callbacks); !ran)
             return ran;
         return result;
+    }
+
+    // Waits on queue like wait_loop(), with the same take and callbacks_check, but the thread
+    // registers each pass of the wait, and exactly one party ends each registration, with a claim
+    // under the object's lock (ThreadState::register_wait). timeout is the export's kernel copy.
+    template <typename Entry, typename Take>
+    [[nodiscard]] WaitResult registered_wait_loop(WaitQueue<Entry> &queue, std::unique_lock<std::mutex> &lock, const ThreadStatePtr &thread, WaitTarget target, Entry entry, SceUInt32 *timeout, CallbacksCheck callbacks_check, Take take) {
+        // One waiter for the whole call, so what its entry got while queued stays across passes
+        typename WaitQueue<Entry>::Waiter waiter{ .thread = thread, .entry = std::move(entry) };
+        const Deadline deadline = deadline_from(timeout);
+        // The result of the last pass, then the final result
+        WaitResult result = SCE_KERNEL_OK;
+        while (true) {
+            if (const WaitResult r = run_pending_callbacks(lock, thread, target.callbacks); !r || *r != SCE_KERNEL_OK)
+                return r;
+            if (const std::optional<SceInt32> taken = take(waiter.entry, *result)) {
+                if (callbacks_check != CallbacksCheck::after_take_or_wait)
+                    return *taken;
+                result = *taken;
+                break;
+            }
+            const std::expected<uint64_t, SceInt32> registered = thread->register_wait(target, deadline);
+            if (!registered) {
+                // A callback is already pending, so the next pass runs it without sleeping, and its
+                // take gets NOTIFY_CALLBACK as the last result
+                if (registered.error() == SCE_KERNEL_ERROR_NOTIFY_CALLBACK) {
+                    result = SCE_KERNEL_ERROR_NOTIFY_CALLBACK;
+                    continue;
+                }
+                if (timeout)
+                    *timeout = 0;
+                result = registered.error();
+                break;
+            }
+            waiter.priority = thread->get_priority();
+            waiter.generation = *registered;
+            queue.push(waiter);
+            lock.unlock();
+            // A recheck asked with wake() ends a park early, and only the deadline ends this one
+            WaitResult parked = thread->park(deadline);
+            while (parked && *parked == SCE_KERNEL_ERROR_WAIT_TIMEOUT && std::chrono::steady_clock::now() < deadline)
+                parked = thread->park(deadline);
+            lock.lock();
+            // The thread's exit or the deadline ends the wait, unless a claim already did
+            if (!parked || *parked == SCE_KERNEL_ERROR_WAIT_TIMEOUT) {
+                if (thread->end_wait(waiter.generation, parked)) {
+                    // Only a timeout that won the claim, while the waiter is still queued
+                    if (parked)
+                        timed_out(thread);
+                    queue.remove(waiter);
+                    serve();
+                }
+            }
+            const ThreadState::WaitEnd end = thread->unregister_wait(waiter.generation);
+            if (!end.result)
+                return end.result;
+            if (timeout)
+                *timeout = time_left_until(deadline, end.at);
+            result = end.result;
+            if (*result != SCE_KERNEL_ERROR_NOTIFY_CALLBACK)
+                break;
+        }
+        if (callbacks_check == CallbacksCheck::on_delete && *result != SCE_KERNEL_ERROR_WAIT_DELETE)
+            return result;
+        // Run the callbacks notified during the wait. Only the thread exiting changes the result.
+        if (const WaitResult ran = run_pending_callbacks(lock, thread, target.callbacks); !ran)
+            return ran;
+        return result;
+    }
+
+    // Ends thread's registered wait of generation in queue for a callback notify, takes it off the
+    // queue and serves the waiters behind it, if that wait is still waiting. An object that counts
+    // its waiters or writes outputs on such an end needs more than this. Takes the lock.
+    template <typename Entry>
+    void depart_for_callback(WaitQueue<Entry> &queue, ThreadState &thread, uint64_t generation) {
+        const auto guard = lock();
+        // A delete already ended the wait
+        if (!guard)
+            return;
+        if (!thread.end_wait(generation, SCE_KERNEL_ERROR_NOTIFY_CALLBACK))
+            return;
+        // A queued registration is still waiting, so its entry is there
+        auto *waiter = queue.find_if([&](auto &w) { return w.thread.get() == &thread && w.generation == generation; });
+        assert(waiter);
+        queue.remove(*waiter);
+        serve();
     }
 };
 
@@ -277,6 +367,7 @@ public:
     SceInt32 wait(const ThreadStatePtr &thread, SceInt32 need_count, SceUInt32 *timeout, bool callbacks);
     SceInt32 poll(const ThreadStatePtr &thread, SceInt32 need_count);
     SceInt32 signal(SceInt32 count);
+    void end_for_callback(ThreadState &thread, uint64_t generation) override;
     SceInt32 cancel(SceInt32 set_count, SceUInt32 *num_wait_threads);
     // Fills info with what the semaphore's info reports, or returns UNKNOWN_SEMA_ID if it was deleted.
     SceInt32 info(SceKernelSemaInfo &info) const;

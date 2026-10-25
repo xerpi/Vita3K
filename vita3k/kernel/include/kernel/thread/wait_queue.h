@@ -21,6 +21,7 @@
 #include <kernel/types.h>
 
 #include <algorithm>
+#include <cassert>
 #include <concepts>
 #include <list>
 #include <memory>
@@ -44,6 +45,8 @@ public:
         Entry entry;
         // Set by a waker that decided the outcome of the wait
         std::optional<SceInt32> result;
+        // The thread's registration of the wait, for the waits that register (ThreadState::register_wait)
+        uint64_t generation = 0;
     };
 
     // How the queue orders its waiters
@@ -148,6 +151,25 @@ public:
     // Ends the wait of every waiter with result. Returns how many were woken.
     std::size_t wake_all(SceInt32 result = SCE_KERNEL_OK) {
         return wake_if([](Waiter &) { return true; }, result);
+    }
+
+    // Ends the registered wait of waiter with result and takes it off the queue.
+    void end(Waiter &waiter, SceInt32 result = SCE_KERNEL_OK) {
+        remove(waiter);
+        // Every claim takes its waiter off the queue before it lets go of the object's lock, so a
+        // queued registration is still waiting
+        [[maybe_unused]] const bool ended = waiter.thread->end_wait(waiter.generation, result);
+        assert(ended);
+    }
+
+    // Ends the registered wait of every waiter with result, in queue order. Returns how many there were.
+    std::size_t end_all(SceInt32 result) {
+        std::size_t ended = 0;
+        while (Waiter *waiter = front()) {
+            end(*waiter, result);
+            ++ended;
+        }
+        return ended;
     }
 
     // Queues a waiter that the caller will block itself. Used by waits that need their own loop.
