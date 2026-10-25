@@ -1460,15 +1460,21 @@ SceInt32 EventFlag::check_wait(SceUInt32 pattern, SceUInt32 wait_mode) {
 }
 
 void EventFlag::on_delete(SceUID) {
-    waiters.wake_all(SCE_KERNEL_ERROR_WAIT_DELETE);
+    waiters.end_all(SCE_KERNEL_ERROR_WAIT_DELETE);
     holder = 0;
     holds = 0;
 }
 
-void EventFlag::timed_out(const ThreadStatePtr &thread) {
-    if (auto *const waiter = waiters.find_if([&](auto &w) { return w.thread == thread; }); waiter && waiter->entry.out_bits)
+void EventFlag::departing(const ThreadState &thread, SceInt32 reason) {
+    // A single wait, so the thread has one entry here
+    if (auto *const waiter = waiters.find_if([&](auto &w) { return w.thread.get() == &thread; }); waiter && waiter->entry.out_bits)
         *waiter->entry.out_bits = flags;
-    drop_hold();
+    if (reason == SCE_KERNEL_ERROR_WAIT_TIMEOUT)
+        drop_hold();
+}
+
+void EventFlag::end_for_callback(ThreadState &thread, uint64_t generation) {
+    depart_for_callback(waiters, thread, generation);
 }
 
 void EventFlag::drop_hold() {
@@ -1523,9 +1529,11 @@ SceInt32 EventFlag::wait(const ThreadStatePtr &thread, SceUInt32 pattern, SceUIn
         holder = thread->id;
         ++holds;
     }
-    const WaitResult r = wait_loop(waiters, guard, thread, { SCE_KERNEL_WAITTYPE_EVENTFLAG, uid, callbacks }, { wait_mode, pattern, out_bits }, timeout, CallbacksCheck::after_wait, [&](WaitEntry &entry, SceInt32) -> std::optional<SceInt32> {
-        if (take(entry))
+    const WaitResult r = registered_wait_loop(waiters, guard, thread, { SCE_KERNEL_WAITTYPE_EVENTFLAG, uid, callbacks }, { wait_mode, pattern, out_bits }, timeout, CallbacksCheck::after_wait, [&](WaitEntry &entry, SceInt32) -> std::optional<SceInt32> {
+        if (matches(entry)) {
+            take(entry);
             return SCE_KERNEL_OK;
+        }
         // A wait whose deadline is already gone returns these bits
         if (entry.out_bits)
             *entry.out_bits = flags;
@@ -1567,11 +1575,11 @@ SceInt32 EventFlag::set(SceUInt32 pattern) {
     return SCE_KERNEL_OK;
 }
 
-bool EventFlag::take(const WaitEntry &wait) {
-    const bool condition = (wait.wait_mode & SCE_EVENT_WAITOR) ? (flags & wait.pattern) != 0 : (flags & wait.pattern) == wait.pattern;
-    if (!condition)
-        return false;
+bool EventFlag::matches(const WaitEntry &wait) const {
+    return (wait.wait_mode & SCE_EVENT_WAITOR) ? (flags & wait.pattern) != 0 : (flags & wait.pattern) == wait.pattern;
+}
 
+void EventFlag::take(const WaitEntry &wait) {
     if (wait.out_bits)
         *wait.out_bits = flags;
     if (wait.wait_mode & SCE_EVENT_WAITCLEAR)
@@ -1579,11 +1587,16 @@ bool EventFlag::take(const WaitEntry &wait) {
     if (wait.wait_mode & SCE_EVENT_WAITCLEAR_PAT)
         flags &= ~wait.pattern;
     drop_hold();
-    return true;
 }
 
 void EventFlag::serve() {
-    waiters.wake_if([&](auto &waiter) { return take(waiter.entry); });
+    waiters.remove_if([&](auto &waiter) {
+        if (!matches(waiter.entry))
+            return false;
+        waiters.claim(waiter, SCE_KERNEL_OK);
+        take(waiter.entry);
+        return true;
+    });
 }
 
 SceInt32 EventFlag::clear(SceUInt32 pattern) {
@@ -1601,13 +1614,15 @@ SceInt32 EventFlag::cancel(SceUInt32 pattern, SceUInt32 *num_wait_threads) {
     if (!guard)
         return SCE_KERNEL_ERROR_UNKNOWN_EVF_ID;
 
-    const auto set_out_bits = [&](auto &waiter) {
+    SceUInt32 nb_threads = 0;
+    waiters.remove_if([&](auto &waiter) {
+        waiters.claim(waiter, SCE_KERNEL_ERROR_WAIT_CANCEL);
         if (waiter.entry.out_bits)
             *waiter.entry.out_bits = pattern;
         drop_hold();
+        ++nb_threads;
         return true;
-    };
-    const auto nb_threads = static_cast<SceUInt32>(waiters.wake_if(set_out_bits, SCE_KERNEL_ERROR_WAIT_CANCEL));
+    });
 
     flags = pattern;
 

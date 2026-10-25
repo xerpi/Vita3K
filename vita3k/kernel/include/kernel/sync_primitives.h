@@ -52,9 +52,10 @@ protected:
     // queue without being woken.
     virtual void serve() {}
 
-    // Ends a queued wait of thread that its deadline ended, while it is still queued and before the
-    // waiters behind it are served. Not called if the deadline passed before the wait was queued.
-    virtual void timed_out(const ThreadStatePtr &) {}
+    // Gives thread's wait the outputs of its end by reason, a timeout or a callback notify, while it
+    // is still queued. Not called for a deadline that passed before the wait was queued, nor for the
+    // thread's exit.
+    virtual void departing(const ThreadState &thread, SceInt32 reason) {}
 
     // When wait_loop() runs the callbacks notified during the wait, before it returns
     enum class CallbacksCheck {
@@ -99,7 +100,7 @@ protected:
                 result = *taken;
                 break;
             }
-            // Timed out before being queued, so timed_out() isn't called
+            // Timed out before being queued, so departing() isn't called
             if (std::chrono::steady_clock::now() >= deadline) {
                 if (timeout)
                     *timeout = 0;
@@ -127,7 +128,7 @@ protected:
                 break;
             }
             if (result && *result == SCE_KERNEL_ERROR_WAIT_TIMEOUT)
-                timed_out(thread);
+                departing(*thread, SCE_KERNEL_ERROR_WAIT_TIMEOUT);
             queue.remove(waiter);
             serve();
             if (!result || *result != SCE_KERNEL_ERROR_NOTIFY_CALLBACK)
@@ -187,7 +188,7 @@ protected:
                 if (thread->end_wait(waiter.generation, parked)) {
                     // Only a timeout that won the claim, while the waiter is still queued
                     if (parked)
-                        timed_out(thread);
+                        departing(*thread, SCE_KERNEL_ERROR_WAIT_TIMEOUT);
                     queue.remove(waiter);
                     serve();
                 }
@@ -210,8 +211,8 @@ protected:
     }
 
     // Ends thread's registered wait of generation in queue for a callback notify, takes it off the
-    // queue and serves the waiters behind it, if that wait is still waiting. An object that counts
-    // its waiters or writes outputs on such an end needs more than this. Takes the lock.
+    // queue and serves the waiters behind it, if that wait is still waiting, with departing() giving
+    // it the outputs first. Takes the lock.
     template <typename Entry>
     void depart_for_callback(WaitQueue<Entry> &queue, ThreadState &thread, uint64_t generation) {
         const auto guard = lock();
@@ -223,6 +224,7 @@ protected:
         // A queued registration is still waiting, so its entry is there
         auto *waiter = queue.find_if([&](auto &w) { return w.thread.get() == &thread && w.generation == generation; });
         assert(waiter);
+        departing(thread, SCE_KERNEL_ERROR_NOTIFY_CALLBACK);
         queue.remove(*waiter);
         serve();
     }
@@ -621,6 +623,7 @@ public:
     SceInt32 info(SceKernelEventFlagInfo &info) const;
     // Drops the holds of thread, which is ending.
     void release_ended_holder(const ThreadState &thread);
+    void end_for_callback(ThreadState &thread, uint64_t generation) override;
 
 private:
     struct WaitEntry {
@@ -635,13 +638,16 @@ private:
     // Takes the flags for the thread if pattern matches them, or returns why it can't. The lock must
     // be held.
     SceInt32 try_take(SceUID thread_id, SceUInt32 pattern, SceUInt32 wait_mode, SceUInt32 *out_bits);
-    // Completes wait if the flags match its pattern: writes its out bits, clears the flags its mode
-    // asks for and releases its hold. Returns false if they don't match. The lock must be held.
-    bool take(const WaitEntry &wait);
+    // Whether the flags match the pattern of wait. The lock must be held.
+    bool matches(const WaitEntry &wait) const;
+    // Completes wait, whose pattern the flags match: writes its out bits, clears the flags its mode
+    // asks for and releases its hold. The lock must be held.
+    void take(const WaitEntry &wait);
     // Gives the flags to the waits they match, in queue order.
     void serve() override;
-    // Gives the wait that timed out the flag's bits and gives back its hold.
-    void timed_out(const ThreadStatePtr &thread) override;
+    // Gives a wait that timed out or left for its callback the flag's bits. A timeout gives back its
+    // hold, a callback notify keeps it.
+    void departing(const ThreadState &thread, SceInt32 reason) override;
     // Gives back one hold of the holder, the wait that took it ended. The lock must be held.
     void drop_hold();
 
