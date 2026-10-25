@@ -604,20 +604,35 @@ std::expected<uint64_t, SceInt32> ThreadState::register_wait(WaitTarget target, 
         return std::unexpected(SCE_KERNEL_ERROR_WAIT_TIMEOUT);
     if (target.callbacks && !is_processing_callbacks && callbacks_notified())
         return std::unexpected(SCE_KERNEL_ERROR_NOTIFY_CALLBACK);
+    arm(target);
+    return ++wait_generation;
+}
+
+uint64_t ThreadState::begin_scan() {
+    const std::lock_guard<std::mutex> lock(mutex);
+    assert(wait_phase == WaitPhase::none);
+    wait_phase = WaitPhase::scanning;
+    return ++wait_generation;
+}
+
+void ThreadState::arm(WaitTarget target) {
     wait_target = target;
     wait_phase = WaitPhase::waiting;
     update_status(ThreadStatus::waiting);
-    return ++wait_generation;
+}
+
+void ThreadState::end_registration(WaitResult result) {
+    wait_phase = WaitPhase::ended;
+    wait_result = result;
+    wait_ended_at = std::chrono::steady_clock::now();
+    wait_cv.notify_all();
 }
 
 bool ThreadState::end_wait(uint64_t generation, WaitResult result) {
     const std::lock_guard<std::mutex> lock(mutex);
     if (wait_phase != WaitPhase::waiting || wait_generation != generation)
         return false;
-    wait_phase = WaitPhase::ended;
-    wait_result = result;
-    wait_ended_at = std::chrono::steady_clock::now();
-    wait_cv.notify_all();
+    end_registration(result);
     return true;
 }
 
@@ -631,6 +646,16 @@ WaitResult ThreadState::park(Deadline until) {
     wake_pending = false;
     // The thread stays waiting on its target until D, since a wait that timed out is still queued
     // until the waiter claims it
+    return wait_state();
+}
+
+WaitResult ThreadState::check_wait() {
+    const std::lock_guard<std::mutex> lock(mutex);
+    wake_pending = false;
+    return wait_state();
+}
+
+WaitResult ThreadState::wait_state() const {
     if (exiting())
         return std::unexpected{ ThreadExiting{} };
     if (wait_phase != WaitPhase::waiting)
@@ -702,9 +727,14 @@ std::optional<ThreadState::CallbackDeparture> ThreadState::notify_callback(bool 
         ++notified_callbacks;
     // The waits that don't register see the callback through callback_ends_wait()
     wait_cv.notify_all();
-    // A registered wait ends only by a claim, which takes the waited object's lock first
     if (wait_phase != WaitPhase::waiting || !callback_ends_wait())
         return std::nullopt;
+    // A multiple event wait isn't queued on one object, so the notify ends it here
+    if (wait_target.type == SCE_KERNEL_WAITTYPE_MP_EVENTS) {
+        end_registration(SCE_KERNEL_ERROR_NOTIFY_CALLBACK);
+        return std::nullopt;
+    }
+    // A registered single wait ends only by a claim, which takes the waited object's lock first
     return CallbackDeparture{ wait_target.id, wait_generation };
 }
 

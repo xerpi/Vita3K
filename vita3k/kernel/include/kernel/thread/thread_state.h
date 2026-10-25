@@ -37,6 +37,7 @@ struct CPUContext;
 struct ThreadState;
 struct ThreadParams;
 struct KernelState;
+class MultiEventWait;
 
 using CPUStatePtr = std::unique_ptr<CPUState, std::function<void(CPUState *)>>;
 using CallImport = std::function<void(CPUState &, uint32_t, SceUID)>;
@@ -155,6 +156,9 @@ struct ThreadState {
     // that ends it without queuing: WAIT_TIMEOUT once the deadline passed, else NOTIFY_CALLBACK with
     // a callback pending.
     [[nodiscard]] std::expected<uint64_t, SceInt32> register_wait(WaitTarget target, Deadline deadline);
+    // Registers a multiple event wait in its scan and returns its generation. MultiEventWait arms
+    // and ends it with the thread's mutex held.
+    uint64_t begin_scan();
     // Ends the registered wait of generation with result if it is still waiting, and wakes the
     // thread. Returns whether it did. With the object's lock held.
     bool end_wait(uint64_t generation, WaitResult result);
@@ -162,6 +166,10 @@ struct ThreadState {
     // thread is exiting. Returns ThreadExiting, then SCE_KERNEL_OK if the wait ended, else
     // WAIT_TIMEOUT for the caller to look again. The thread stays waiting until unregister_wait().
     [[nodiscard]] WaitResult park(Deadline until);
+    // Returns how the registered wait stands: ThreadExiting, then SCE_KERNEL_OK if it ended, else
+    // WAIT_TIMEOUT while it still waits. The waiter reads it after a park, before it looks at what it
+    // waits on, since the park's result may be old by then. Clears a recheck asked with wake().
+    [[nodiscard]] WaitResult check_wait();
     // How a registered wait ended: its result, ThreadExiting if the thread is exiting whoever ended
     // it, and when it was claimed
     struct WaitEnd {
@@ -264,7 +272,18 @@ private:
         SceInt32 *exit_status;
     };
 
+    // Arms and ends the multiple event waits with mutex held
+    friend class MultiEventWait;
+
     // The private methods are called with mutex held, unless they say otherwise
+    // Whether the registration of generation still takes results
+    bool takes_results(uint64_t generation) const { return wait_generation == generation && (wait_phase == WaitPhase::scanning || wait_phase == WaitPhase::waiting); }
+    // Shows the registration waiting on target
+    void arm(WaitTarget target);
+    // Ends the registration with result and wakes the thread
+    void end_registration(WaitResult result);
+    // How the registration stands: ThreadExiting, then SCE_KERNEL_OK if it ended, else WAIT_TIMEOUT
+    WaitResult wait_state() const;
     void update_status(ThreadStatus status, std::optional<ThreadStatus> expected = std::nullopt);
     // Whether the thread is ending
     bool exiting() const { return ending != Ending::none; }
@@ -332,6 +351,8 @@ private:
     enum class WaitPhase : uint8_t {
         // No wait is registered
         none,
+        // A multiple event wait looks at its events and queues its tokens, not armed yet
+        scanning,
         // Queued and parked, and nobody ended it yet
         waiting,
         // A claim ended it with wait_result

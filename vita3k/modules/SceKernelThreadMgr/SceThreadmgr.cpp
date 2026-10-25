@@ -24,7 +24,10 @@
 #include <kernel/types.h>
 #include <packages/functions.h>
 
+#include <algorithm>
+#include <array>
 #include <chrono>
+#include <span>
 #include <thread>
 #include <utility>
 
@@ -1096,14 +1099,42 @@ EXPORT(SceInt32, _sceKernelWaitLwCondCB, Ptr<SceKernelLwCondWork> pWork, SceUInt
     return result;
 }
 
-EXPORT(int, _sceKernelWaitMultipleEvents) {
-    TRACY_FUNC(_sceKernelWaitMultipleEvents);
-    return UNIMPLEMENTED();
+// Waits for any or all of the events of a list, and writes how each of them that ended did. Returns
+// how many ended if there is a result list, else 0.
+static SceInt32 wait_multiple_events(EmuEnvState &emuenv, SceUID thread_id, const SceKernelWaitEvent *list, SceUInt32 count, SceUInt32 mode, SceKernelResultEvent *results, SceUInt32 *timeout, bool callbacks) {
+    if (!list)
+        return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
+    if (count > SCE_KERNEL_MULTIPLE_EVENTS_MAX)
+        return SCE_KERNEL_ERROR_ILLEGAL_SIZE;
+    if (mode & ~(SCE_KERNEL_EVENT_WAIT_MODE_OR | SCE_KERNEL_EVENT_WAIT_MODE_AND))
+        return SCE_KERNEL_ERROR_ILLEGAL_MODE;
+
+    // The call works on copies of the list and the timeout, which the callbacks it runs can't
+    // change. Only the OR bit counts, so a mode of 0 waits for all the events.
+    MultiEventWait wait(emuenv.kernel, emuenv.kernel.get_thread(thread_id), std::span{ list, count }, mode & SCE_KERNEL_EVENT_WAIT_MODE_OR);
+    SceUInt32 time_left = timeout ? *timeout : 0;
+    const WaitResult result = wait.run(timeout ? &time_left : nullptr, callbacks);
+
+    // The whole list is written, the entries past the ones that ended too
+    std::array<SceKernelResultEvent, SCE_KERNEL_MULTIPLE_EVENTS_MAX> kernel_results{};
+    const SceUInt32 ended = wait.copy_results(std::span{ kernel_results }.first(count));
+    if (results)
+        std::ranges::copy(std::span{ kernel_results }.first(count), results);
+    if (timeout)
+        *timeout = time_left;
+    if (!result || *result != SCE_KERNEL_OK)
+        return guest_result(result);
+    return results ? static_cast<SceInt32>(ended) : 0;
 }
 
-EXPORT(int, _sceKernelWaitMultipleEventsCB) {
-    TRACY_FUNC(_sceKernelWaitMultipleEventsCB);
-    return UNIMPLEMENTED();
+EXPORT(SceInt32, _sceKernelWaitMultipleEvents, SceKernelWaitEvent *events, SceUInt32 count, SceUInt32 mode, SceKernelWaitMultipleEventsOpt *opt) {
+    TRACY_FUNC(_sceKernelWaitMultipleEvents, events, count, mode, opt);
+    return wait_multiple_events(emuenv, thread_id, events, count, mode, opt->results.get(emuenv.mem), opt->timeout.get(emuenv.mem), false);
+}
+
+EXPORT(SceInt32, _sceKernelWaitMultipleEventsCB, SceKernelWaitEvent *events, SceUInt32 count, SceUInt32 mode, SceKernelWaitMultipleEventsOpt *opt) {
+    TRACY_FUNC(_sceKernelWaitMultipleEventsCB, events, count, mode, opt);
+    return wait_multiple_events(emuenv, thread_id, events, count, mode, opt->results.get(emuenv.mem), opt->timeout.get(emuenv.mem), true);
 }
 
 EXPORT(SceInt32, _sceKernelWaitSema, SceUID semaId, SceInt32 needCount, SceUInt32 *pTimeout) {

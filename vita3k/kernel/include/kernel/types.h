@@ -889,6 +889,29 @@ struct SceKernelEventInfo {
 };
 static_assert(sizeof(SceKernelEventInfo) == 0x40, "Incorrect size");
 
+// The modes of sceKernelWaitMultipleEvents: wait for any of the events, or for all of them
+#define SCE_KERNEL_EVENT_WAIT_MODE_OR 0x00000001U
+#define SCE_KERNEL_EVENT_WAIT_MODE_AND 0x00000002U
+// The most events one sceKernelWaitMultipleEvents call waits on
+#define SCE_KERNEL_MULTIPLE_EVENTS_MAX 64
+
+// An event a sceKernelWaitMultipleEvents call waits on, and the bits it waits for
+struct SceKernelWaitEvent {
+    SceUID eventId;
+    SceUInt32 eventPattern;
+};
+static_assert(sizeof(SceKernelWaitEvent) == 0x8, "Incorrect size");
+
+// How one event of a sceKernelWaitMultipleEvents call ended
+struct SceKernelResultEvent {
+    SceUID eventId;
+    SceInt32 result;
+    SceUInt32 resultPattern;
+    SceInt32 reserved;
+    SceUInt64 userData;
+};
+static_assert(sizeof(SceKernelResultEvent) == 0x18, "Incorrect size");
+
 // What sceKernelGetTimerInfo reports
 struct SceKernelTimerInfo {
     SceSize size;

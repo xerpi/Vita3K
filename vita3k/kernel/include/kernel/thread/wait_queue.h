@@ -153,6 +153,12 @@ public:
         return wake_if([](Waiter &) { return true; }, result);
     }
 
+    // Takes every waiter that pick accepts off the queue, in queue order. pick may end the waiter's
+    // wait first.
+    void remove_if(std::predicate<Waiter &> auto pick) {
+        std::erase_if(waiters, [&](Waiter *w) { return pick(*w); });
+    }
+
     // Ends the registered wait of waiter with result and takes it off the queue.
     void end(Waiter &waiter, SceInt32 result = SCE_KERNEL_OK) {
         remove(waiter);
