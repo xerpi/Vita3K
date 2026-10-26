@@ -36,16 +36,27 @@ static constexpr int64_t TARGET_MICRO_PER_FRAME = 1000000LL / TARGET_FPS;
 static constexpr int predict_threshold = 3;
 static constexpr int max_expected_swapchain_size = 6;
 
-// Notifies every vblank callback, each taken under the display lock and notified without it, since
-// a notify may end a wait under the waited object's lock
+// Notifies the vblank callbacks in ascending UID order, each taken under the display lock and
+// notified without it, since a notify may end a wait under the waited object's lock. The pass stops
+// at the highest UID registered when it starts. A callback registered during the pass ahead of the
+// walk and within that bound joins it, one unregistered before the walk takes it is skipped, and one
+// unregistered after still gets the notify the walk took.
 static void notify_vblank_callbacks(DisplayState &display) {
+    // The last callback the pass notifies, and the last one it took
+    std::optional<SceUID> end;
     std::optional<SceUID> last;
     while (true) {
         CallbackPtr cb;
         {
             const std::lock_guard<std::mutex> guard(display.mutex);
-            const auto it = last ? display.vblank_callbacks.upper_bound(*last) : display.vblank_callbacks.begin();
-            if (it == display.vblank_callbacks.end())
+            const auto &callbacks = display.vblank_callbacks;
+            if (!end) {
+                if (callbacks.empty())
+                    return;
+                end = callbacks.rbegin()->first;
+            }
+            const auto it = last ? callbacks.upper_bound(*last) : callbacks.begin();
+            if (it == callbacks.end() || it->first > *end)
                 return;
             last = it->first;
             cb = it->second;
