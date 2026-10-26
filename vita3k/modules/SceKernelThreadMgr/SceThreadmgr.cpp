@@ -1218,7 +1218,6 @@ EXPORT(int, _sceKernelWaitThreadEndCB, SceUID thid, int *stat, SceUInt *timeout)
         return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_THREAD_ID);
     if (target == waiter)
         return RET_ERROR(SCE_KERNEL_ERROR_ILLEGAL_THREAD_ID);
-    waiter->process_callbacks();
     return wait_thread_end(waiter, target, stat, timeout, true);
 }
 

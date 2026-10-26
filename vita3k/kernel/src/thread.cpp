@@ -592,6 +592,12 @@ WaitResult ThreadState::wait_for_thread_end(const ThreadStatePtr &waiter, SceInt
     const WaitTarget target{ SCE_KERNEL_WAITTYPE_WAITTHEND, id, callbacks };
     const Deadline deadline = deadline_from(timeout);
     while (true) {
+        // The callbacks pending at the loop top run with no lock held before the wait looks at the
+        // thread, those pending at the call within the timeout
+        if (callbacks && waiter->has_pending_callbacks()) {
+            if (const WaitResult ran = waiter->run_callbacks(); !ran)
+                return ran;
+        }
         std::unique_lock<std::mutex> end_lock(end_waiters_mutex);
         if (const std::optional<SceInt32> status = ended_status()) {
             if (exit_status)
@@ -599,32 +605,29 @@ WaitResult ThreadState::wait_for_thread_end(const ThreadStatePtr &waiter, SceInt
             return SCE_KERNEL_OK;
         }
         const std::expected<uint64_t, SceInt32> registered = waiter->register_wait(target, deadline, timeout);
-        if (registered) {
-            queued.generation = *registered;
-            end_waiters.push(queued);
-            // Each look reads the registration under the queue's lock, so the waiter's own claim of
-            // its timeout or its end takes it off the queue in the same step
-            WaitResult state = waiter->check_wait();
-            while (state && *state != SCE_KERNEL_OK && std::chrono::steady_clock::now() < deadline) {
-                end_lock.unlock();
-                (void)waiter->park(deadline);
-                end_lock.lock();
-                state = waiter->check_wait();
-            }
-            if ((!state || *state == SCE_KERNEL_ERROR_WAIT_TIMEOUT) && waiter->end_wait(queued.generation, state))
-                end_waiters.remove(queued);
-            const WaitEnd end = waiter->unregister_wait(queued.generation);
-            if (!end.result || *end.result != SCE_KERNEL_ERROR_NOTIFY_CALLBACK)
-                return end.result;
-        } else if (registered.error() != SCE_KERNEL_ERROR_NOTIFY_CALLBACK) {
+        if (!registered) {
+            if (registered.error() == SCE_KERNEL_ERROR_NOTIFY_CALLBACK)
+                continue;
             if (timeout)
                 *timeout = 0;
             return registered.error();
         }
-        // The callbacks run with no lock held, before the wait looks at the thread again
-        end_lock.unlock();
-        if (const WaitResult ran = waiter->run_callbacks(); !ran)
-            return ran;
+        queued.generation = *registered;
+        end_waiters.push(queued);
+        // Each look reads the registration under the queue's lock, so the waiter's own claim of
+        // its timeout or its end takes it off the queue in the same step
+        WaitResult state = waiter->check_wait();
+        while (state && *state != SCE_KERNEL_OK && std::chrono::steady_clock::now() < deadline) {
+            end_lock.unlock();
+            (void)waiter->park(deadline);
+            end_lock.lock();
+            state = waiter->check_wait();
+        }
+        if ((!state || *state == SCE_KERNEL_ERROR_WAIT_TIMEOUT) && waiter->end_wait(queued.generation, state))
+            end_waiters.remove(queued);
+        const WaitEnd end = waiter->unregister_wait(queued.generation);
+        if (!end.result || *end.result != SCE_KERNEL_ERROR_NOTIFY_CALLBACK)
+            return end.result;
     }
 }
 

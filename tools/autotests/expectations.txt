@@ -71,14 +71,14 @@ cancel_calls                    pass
 cancel_calls_more               pass
 cancel_unknown_counts           fail     # failed event flag, simple event, message pipe and timer cancels leave their counts as they were
 cb_wait_callback_writes_timeout pass
-cb_wait_callback_writes_timeout_more fail     # the thread end wait with callbacks reads the timeout a callback wrote
+cb_wait_callback_writes_timeout_more pass
 cb_wait_check_order             pass
 cb_wait_check_order_more        fail     # a message pipe call refused for its size doesn't run pending callbacks
 cb_wait_deadline_during_callback pass
 cb_wait_early_notify_timeout    pass
 cb_wait_early_notify_timeout_more pass
 cb_wait_initial_callback_deadline pass
-cb_wait_initial_callback_deadline_more fail     # the thread end wait with callbacks counts its timeout from after the callbacks pending at the call
+cb_wait_initial_callback_deadline_more pass
 cb_wait_self_notify_during_sleep pass
 cb_wait_take_final_check        pass
 cb_wait_take_final_check_more   pass
