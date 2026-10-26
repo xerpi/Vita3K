@@ -102,7 +102,7 @@ clocks                          fail     # a NULL process time pointer
 cond                            pass
 cond_callback_after_wake        skip     # threads ignore their core and priority, so whether the waiter ran before the notify is a race
 cond_callback_departure         pass
-cond_callback_departure_deletes fail     # a condition waiter out for its callback when its mutex is deleted gets WAIT_DELETE_MUTEX, not the unknown mutex error
+cond_callback_departure_deletes pass
 cond_callback_rejoin            pass
 cond_callback_takes_mutex       pass
 cond_delete_relock              fail     # a condition or a mutex deleted after a signal, before the waiter relocks
