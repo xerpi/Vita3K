@@ -641,28 +641,6 @@ void ThreadState::depart_end_waiter(ThreadState &waiter, uint64_t generation) {
     });
 }
 
-WaitResult ThreadState::wait(WaitTarget target, Deadline deadline) {
-    std::unique_lock<std::mutex> lock(mutex);
-    const auto woken = [&] { return wait_over(); };
-    wait_target = target;
-    update_status(ThreadStatus::waiting);
-    bool satisfied = true;
-    if (deadline == Deadline::max())
-        wait_cv.wait(lock, woken);
-    else
-        satisfied = wait_cv.wait_until(lock, deadline, woken);
-    // A thread something holds goes on to its gate, which keeps it from its callbacks and its code
-    update_status(ThreadStatus::running);
-    const bool callbacks_due = callback_ends_wait();
-    wait_target = {};
-    if (exiting())
-        return std::unexpected{ ThreadExiting{} };
-    wake_pending = false;
-    if (callbacks_due)
-        return SCE_KERNEL_ERROR_NOTIFY_CALLBACK;
-    return satisfied ? SCE_KERNEL_OK : SCE_KERNEL_ERROR_WAIT_TIMEOUT;
-}
-
 WaitResult ThreadState::run_callbacks() {
     process_callbacks();
     const std::lock_guard<std::mutex> lock(mutex);
@@ -803,7 +781,7 @@ bool ThreadState::has_pending_callbacks() {
 
 SceUInt32 ThreadState::process_callbacks() {
     {
-        // Thread info reads the flag too, through wait_over()
+        // A notify reads the flag too
         const std::lock_guard<std::mutex> lock(mutex);
         if (is_processing_callbacks)
             return 0;
@@ -845,8 +823,6 @@ std::optional<ThreadState::CallbackDeparture> ThreadState::notify_callback(bool 
     const std::lock_guard<std::mutex> lock(mutex);
     if (first)
         ++notified_callbacks;
-    // The waits that don't register see the callback through callback_ends_wait()
-    wait_cv.notify_all();
     if (wait_phase != WaitPhase::waiting || !callback_ends_wait())
         return std::nullopt;
     // A multiple event wait isn't queued on one object, and a signal wait or a wait on no object, like
@@ -896,7 +872,7 @@ SceKernelThreadInfo ThreadState::info() {
     // A thread whose kernel wait is over is READY until it goes on, and waits on nothing, like on a
     // Vita, where the waker ends the wait. A host wait, like an audio output, has no target and
     // stays WAITING.
-    const bool over = wait_phase == WaitPhase::none ? wait_over() : wait_phase == WaitPhase::ended || exiting();
+    const bool over = wait_phase == WaitPhase::ended || exiting();
     const bool ready = status == ThreadStatus::waiting && wait_target.type != 0 && over;
     const WaitTarget reported = ready ? WaitTarget{} : wait_target;
     info.status = ready ? SCE_KERNEL_THREAD_STATUS_READY : std::to_underlying(status);

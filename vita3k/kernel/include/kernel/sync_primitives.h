@@ -49,8 +49,8 @@ protected:
     SyncPrimitive(SceUInt32 attr, const char *name);
 
     // Wakes the waiters that can now get what they wait for, in queue order. Called with the lock
-    // held when the object gets something new to give, and by wait_loop() when a waiter leaves the
-    // queue without being woken.
+    // held when the object gets something new to give, and by registered_wait_loop() when a waiter
+    // leaves the queue without being woken.
     virtual void serve() {}
 
     // Gives thread's wait the outputs of its end by reason, a timeout or a callback notify, while it
@@ -63,11 +63,11 @@ protected:
     // operations end it. Only a timer has anything to do.
     virtual Deadline recheck(const ThreadState &thread, Deadline until) { return Deadline::max(); }
 
-    // When wait_loop() runs the callbacks notified during the wait, before it returns
+    // When registered_wait_loop() runs the callbacks notified during the wait, before it returns
     enum class CallbacksCheck {
-        // Unless attempt succeeded
+        // Unless take succeeded
         after_wait,
-        // Also when attempt succeeded
+        // Also when take succeeded
         after_take_or_wait,
         // Only when a delete ended the sleep
         on_delete,
@@ -86,72 +86,13 @@ protected:
         return r;
     }
 
-    // Waits on queue. Each round runs the pending callbacks, calls attempt, then sleeps until woken,
-    // and a callback notify starts a new round. attempt returns the result once the thread got what
-    // it waits for, or nullopt to keep waiting. It is passed the result of the last sleep
-    // (SCE_KERNEL_OK the first time). timeout is updated after every sleep. callbacks_check decides
-    // whether callbacks notified during the wait run before it returns.
-    template <typename Entry, typename Attempt>
-    [[nodiscard]] WaitResult wait_loop(WaitQueue<Entry> &queue, std::unique_lock<std::mutex> &lock, const ThreadStatePtr &thread, WaitTarget target, Entry entry, SceUInt32 *timeout, CallbacksCheck callbacks_check, Attempt attempt) {
-        typename WaitQueue<Entry>::Waiter waiter{ .thread = thread, .entry = std::move(entry) };
-        const Deadline deadline = deadline_from(timeout);
-        // The result of the last sleep, then the final result
-        WaitResult result = SCE_KERNEL_OK;
-        while (true) {
-            if (const WaitResult r = run_pending_callbacks(lock, thread, target.callbacks); !r || *r != SCE_KERNEL_OK)
-                return r;
-            if (const std::optional<SceInt32> taken = attempt(waiter.entry, *result)) {
-                if (callbacks_check != CallbacksCheck::after_take_or_wait)
-                    return *taken;
-                result = *taken;
-                break;
-            }
-            // Timed out before being queued, so departing() isn't called
-            if (std::chrono::steady_clock::now() >= deadline) {
-                if (timeout)
-                    *timeout = 0;
-                result = SCE_KERNEL_ERROR_WAIT_TIMEOUT;
-                break;
-            }
-            // A callback is already pending, so start a new round without sleeping
-            if (target.callbacks && thread->has_pending_callbacks()) {
-                result = SCE_KERNEL_ERROR_NOTIFY_CALLBACK;
-                continue;
-            }
-            waiter.priority = thread->get_priority();
-            queue.push(waiter);
-            // Ignore stray wakeups, like one left over from an earlier wait
-            do {
-                lock.unlock();
-                result = thread->wait(target, deadline);
-                lock.lock();
-            } while (!waiter.result && result && *result == SCE_KERNEL_OK);
-            if (timeout)
-                *timeout = time_left_until(deadline);
-            // A waker's result wins, it already handed over what the waiter waits for
-            if (waiter.result) {
-                result = *waiter.result;
-                break;
-            }
-            if (result && *result == SCE_KERNEL_ERROR_WAIT_TIMEOUT)
-                departing(*thread, SCE_KERNEL_ERROR_WAIT_TIMEOUT);
-            queue.remove(waiter);
-            serve();
-            if (!result || *result != SCE_KERNEL_ERROR_NOTIFY_CALLBACK)
-                break;
-        }
-        if (!result || (callbacks_check == CallbacksCheck::on_delete && *result != SCE_KERNEL_ERROR_WAIT_DELETE))
-            return result;
-        // Run the callbacks notified during the wait. Only the thread exiting changes the result.
-        if (const WaitResult ran = run_pending_callbacks(lock, thread, target.callbacks); !ran)
-            return ran;
-        return result;
-    }
-
-    // Waits on queue like wait_loop(), with the same take and callbacks_check, but the thread
-    // registers each pass of the wait, and exactly one party ends each registration, with a claim
-    // under the object's lock (ThreadState::register_wait). The claim writes the time left to
-    // timeout, and a deadline gone before the wait is queued writes 0.
+    // Waits on queue. Each pass runs the pending callbacks, calls take, then registers the wait and
+    // sleeps, and a callback notify starts a new pass. take returns the result once the thread got
+    // what it waits for, or nullopt to keep waiting, and is passed the result of the last pass
+    // (SCE_KERNEL_OK the first time). Exactly one party ends each registration, with a claim under
+    // the object's lock (ThreadState::register_wait). The claim writes the time left to timeout,
+    // and a deadline gone before the wait is queued writes 0. callbacks_check decides whether
+    // callbacks notified during the wait run before it returns.
     template <typename Entry, typename Take>
     [[nodiscard]] WaitResult registered_wait_loop(WaitQueue<Entry> &queue, std::unique_lock<std::mutex> &lock, const ThreadStatePtr &thread, WaitTarget target, Entry entry, SceUInt32 *timeout, CallbacksCheck callbacks_check, Take take) {
         // One waiter for the whole call, so what its entry got while queued stays across passes

@@ -145,14 +145,10 @@ struct ThreadState {
     // Ends waiter's end wait of generation for a callback notify and takes it off the end queue, if
     // it still waits. Takes end_waiters_mutex.
     void depart_end_waiter(ThreadState &waiter, uint64_t generation);
-    // Waits on target until woken by wake(), the thread exits or is deleted, or the deadline passes.
-    // With target.callbacks, a notified callback ends it with NOTIFY_CALLBACK, and the caller runs
-    // it with run_callbacks(). A stale wake can end it early, so callers must recheck their condition.
-    [[nodiscard]] WaitResult wait(WaitTarget target, Deadline deadline);
     // Runs the notified callbacks for a wait that ended with NOTIFY_CALLBACK, with no lock held.
     // Returns ThreadExiting if the thread exits or is deleted meanwhile.
     [[nodiscard]] WaitResult run_callbacks();
-    // Wakes this thread from wait().
+    // Asks the thread's parked wait to look again, for a timer whose next event changed.
     void wake();
     // The waits that register. Exactly one party ends each registration, the first that claims it
     // with end_wait(), and it does so under the waited object's lock.
@@ -324,9 +320,6 @@ private:
     // Whether a notified callback ends the current wait. Callbacks don't nest, so a wait inside a
     // callback runs none. With mutex held.
     bool callback_ends_wait() const { return wait_target.callbacks && !is_processing_callbacks && callbacks_notified(); }
-    // Whether the thread's current wait is over, by a wake, its end or a callback it runs, though
-    // the thread hasn't gone on yet. With mutex held.
-    bool wait_over() const { return exiting() || wake_pending || callback_ends_wait(); }
     // Keeps the thread from going on into guest code while anything holds it, unless it's ending.
     // With mutex held through lock.
     void wait_while_held(std::unique_lock<std::mutex> &lock, StopPoint where);
@@ -368,7 +361,7 @@ private:
     // Waits
     // What the thread waits on while waiting, empty otherwise
     WaitTarget wait_target;
-    // Set by wake() and consumed by the next wait().
+    // Set by wake() and cleared by the next park() or check_wait()
     bool wake_pending = false;
     // Where the registered wait is
     enum class WaitPhase : uint8_t {

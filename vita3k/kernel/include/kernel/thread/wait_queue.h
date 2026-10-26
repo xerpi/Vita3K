@@ -25,8 +25,6 @@
 #include <concepts>
 #include <cstddef>
 #include <memory>
-#include <mutex>
-#include <optional>
 
 // Only declared here so ThreadState can hold a WaitQueue. The template bodies need the full type.
 struct ThreadState;
@@ -44,9 +42,7 @@ public:
         // Taken when the wait starts, the queue is not reordered if it changes
         int priority = 0;
         Entry entry;
-        // Set by a waker that decided the outcome of the wait
-        std::optional<SceInt32> result;
-        // The thread's registration of the wait, for the waits that register (ThreadState::register_wait)
+        // The thread's registration of the wait (ThreadState::register_wait)
         uint64_t generation = 0;
         // Its place in the queue, which keeps a queued waiter where it is
         IntrusiveLink<Waiter> link;
@@ -63,29 +59,6 @@ public:
         : by_priority(attr & SCE_KERNEL_ATTR_TH_PRIO) {}
     explicit WaitQueue(Order order)
         : by_priority(order == Order::priority) {}
-
-    // Blocks thread on target until a waker gives it a result, it is being deleted, or the deadline passes.
-    // thread must be the guest thread making this HLE call.
-    // With target.callbacks, the thread runs its notified callbacks while it waits.
-    [[nodiscard]] WaitResult wait(std::unique_lock<std::mutex> &lock, const ThreadStatePtr &thread, WaitTarget target, Entry entry, Deadline deadline) {
-        Waiter waiter{ .thread = thread, .entry = std::move(entry) };
-        waiter.priority = waiter.thread->get_priority();
-        push(waiter);
-        while (true) {
-            lock.unlock();
-            WaitResult r = waiter.thread->wait(target, deadline);
-            if (r && *r == SCE_KERNEL_ERROR_NOTIFY_CALLBACK)
-                r = waiter.thread->run_callbacks();
-            lock.lock();
-            // A waker's result wins, it already handed over what the waiter asked for
-            if (waiter.result)
-                return *waiter.result;
-            if (!r || *r == SCE_KERNEL_ERROR_WAIT_TIMEOUT) {
-                remove(waiter);
-                return r;
-            }
-        }
-    }
 
     // The waiters in queue order
     auto begin() const {
@@ -131,35 +104,6 @@ public:
             if (pick(w))
                 ++accepted;
         return accepted;
-    }
-
-    // Ends a wait with result and takes the waiter off the queue.
-    void wake(Waiter &waiter, SceInt32 result = SCE_KERNEL_OK) {
-        waiter.result = result;
-        remove(waiter);
-        waiter.thread->wake();
-    }
-
-    // Ends the wait of every waiter accepted by pick, in queue order. Returns how many were woken.
-    std::size_t wake_if(std::predicate<Waiter &> auto pick, SceInt32 result = SCE_KERNEL_OK) {
-        std::size_t woken = 0;
-        for (auto it = waiters.begin(); it != waiters.end();) {
-            Waiter &waiter = *it;
-            if (!pick(waiter)) {
-                ++it;
-                continue;
-            }
-            it = waiters.erase(it);
-            waiter.result = result;
-            waiter.thread->wake();
-            ++woken;
-        }
-        return woken;
-    }
-
-    // Ends the wait of every waiter with result. Returns how many were woken.
-    std::size_t wake_all(SceInt32 result = SCE_KERNEL_OK) {
-        return wake_if([](Waiter &) { return true; }, result);
     }
 
     // Takes every waiter that pick accepts off the queue, in queue order. pick may end the waiter's
