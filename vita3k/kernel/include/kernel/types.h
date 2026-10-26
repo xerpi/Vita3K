@@ -67,6 +67,10 @@
 #define SCE_KERNEL_EVENT_CLOSE 0x00000200U
 // The bits of a simple event a game may set and clear, the others are system events
 #define SCE_KERNEL_EVENT_USER_DEFINED_MASK 0xFF000000U
+// Events of a message pipe: a send and a receive that moved bytes, and bytes left in the pipe
+#define SCE_KERNEL_EVENT_IN 0x00000001U
+#define SCE_KERNEL_EVENT_OUT 0x00000002U
+#define SCE_KERNEL_EVENT_DATA_EXIST 0x00010000U
 
 #define SCE_KERNEL_ATTR_NOTIFY_CB_ALL 0x00000000U
 #define SCE_KERNEL_ATTR_NOTIFY_CB_WAKEUP_ONLY 0x00000800U

@@ -21,6 +21,8 @@
 #include <kernel/thread/thread_state.h>
 #include <kernel/thread/wait_queue.h>
 #include <kernel/types.h>
+#include <kernel/wait_loop.h>
+#include <kernel/waitable.h>
 #include <util/byte_ring_buffer.h>
 #include <util/intrusive_list.h>
 
@@ -28,12 +30,14 @@
 #include <bitset>
 #include <expected>
 #include <limits>
+#include <memory>
 #include <span>
 #include <string>
 #include <tuple>
 #include <variant>
 
-class SyncPrimitive : public KernelObject {
+// A kernel object threads wait on: a waitable with the identity of a sync object
+class SyncPrimitive : public KernelObject, public Waitable, public std::enable_shared_from_this<SyncPrimitive> {
 public:
     // Returns the error for a name the guest can't use, or 0.
     static SceInt32 check_name(const char *name, SceUInt32 attr);
@@ -41,160 +45,12 @@ public:
     const SceUInt32 attr;
     const std::string name;
 
-    // Ends thread's registered wait of generation for a callback notify, takes it off the queue and
-    // serves the waiters behind it, if that wait is still waiting. Called with no lock held.
-    virtual void end_for_callback(ThreadState &thread, uint64_t generation) {}
+    // The endpoint of a wait on the object, which keeps it alive while a registration holds it
+    std::shared_ptr<Waitable> endpoint() { return shared_from_this(); }
 
 protected:
-    SyncPrimitive(SceUInt32 attr, const char *name);
-
-    // Wakes the waiters that can now get what they wait for, in queue order. Called with the lock
-    // held when the object gets something new to give, and by registered_wait_loop() when a waiter
-    // leaves the queue without being woken.
-    virtual void serve() {}
-
-    // Gives thread's wait the outputs of its end by reason, a timeout or a callback notify, while it
-    // is still queued. Not called for a deadline that passed before the wait was queued, nor for the
-    // thread's exit.
-    virtual void departing(const ThreadState &thread, SceInt32 reason) {}
-
-    // Brings the object up to date for thread's queued wait, firing what was due by until, and
-    // returns when that wait has to look again by itself, the maximum if only the object's own
-    // operations end it. Only a timer has anything to do.
-    virtual Deadline recheck(const ThreadState &thread, Deadline until) { return Deadline::max(); }
-
-    // When registered_wait_loop() runs the callbacks notified during the wait, before it returns
-    enum class CallbacksCheck {
-        // Unless take succeeded
-        after_wait,
-        // Also when take succeeded
-        after_take_or_wait,
-        // Only when a delete ended the sleep
-        on_delete,
-    };
-
-    // Runs the thread's pending callbacks if callbacks is set, releasing the lock while they run.
-    // Returns WAIT_DELETE if the object was deleted meanwhile.
-    [[nodiscard]] WaitResult run_pending_callbacks(std::unique_lock<std::mutex> &lock, const ThreadStatePtr &thread, bool callbacks) {
-        if (!callbacks || !thread->has_pending_callbacks())
-            return SCE_KERNEL_OK;
-        lock.unlock();
-        WaitResult r = thread->run_callbacks();
-        lock.lock();
-        if (r && was_deleted())
-            r = SCE_KERNEL_ERROR_WAIT_DELETE;
-        return r;
-    }
-
-    // Waits on queue. Each pass runs the pending callbacks, calls take, then registers the wait and
-    // sleeps, and a callback notify starts a new pass. take returns the result once the thread got
-    // what it waits for, or nullopt to keep waiting, and is passed the result of the last pass
-    // (SCE_KERNEL_OK the first time). Exactly one party ends each registration, with a claim under
-    // the object's lock (ThreadState::register_wait). The claim writes the time left to timeout,
-    // and a deadline gone before the wait is queued writes 0. callbacks_check decides whether
-    // callbacks notified during the wait run before it returns.
-    template <typename Entry, typename Take>
-    [[nodiscard]] WaitResult registered_wait_loop(WaitQueue<Entry> &queue, std::unique_lock<std::mutex> &lock, const ThreadStatePtr &thread, WaitTarget target, Entry entry, SceUInt32 *timeout, CallbacksCheck callbacks_check, Take take) {
-        // One waiter for the whole call, so what its entry got while queued stays across passes
-        typename WaitQueue<Entry>::Waiter waiter{ .thread = thread, .entry = std::move(entry) };
-        const Deadline deadline = deadline_from(timeout);
-        // The result of the last pass, then the final result
-        WaitResult result = SCE_KERNEL_OK;
-        while (true) {
-            if (const WaitResult r = run_pending_callbacks(lock, thread, target.callbacks); !r || *r != SCE_KERNEL_OK)
-                return r;
-            if (const std::optional<SceInt32> taken = take(waiter.entry, *result)) {
-                if (callbacks_check != CallbacksCheck::after_take_or_wait)
-                    return *taken;
-                result = *taken;
-                break;
-            }
-            const std::expected<uint64_t, SceInt32> registered = thread->register_wait(target, deadline, timeout);
-            if (!registered) {
-                // A callback is already pending, so the next pass runs it without sleeping, and its
-                // take gets NOTIFY_CALLBACK as the last result
-                if (registered.error() == SCE_KERNEL_ERROR_NOTIFY_CALLBACK) {
-                    result = SCE_KERNEL_ERROR_NOTIFY_CALLBACK;
-                    continue;
-                }
-                if (timeout)
-                    *timeout = 0;
-                result = registered.error();
-                break;
-            }
-            waiter.priority = thread->get_priority();
-            waiter.generation = *registered;
-            queue.push(waiter);
-            // Each look reads the registration under the object's lock before anything else, so the
-            // object is brought up to date only for a wait that still waits on a thread not exiting
-            WaitResult state;
-            while (true) {
-                state = thread->check_wait();
-                if (!state || *state == SCE_KERNEL_OK)
-                    break;
-                const Deadline now = std::chrono::steady_clock::now();
-                // What was due by the deadline comes first, in the same hold as the timeout's claim
-                if (now >= deadline) {
-                    recheck(*thread, deadline);
-                    break;
-                }
-                const Deadline look = recheck(*thread, now);
-                lock.unlock();
-                // A recheck asked with wake(), the wait's own look or the deadline ends a park early,
-                // and only the next look decides
-                std::ignore = thread->park(std::min(look, deadline));
-                lock.lock();
-            }
-            // The thread's exit or the deadline ends the wait, unless a claim already did
-            if (!state || *state == SCE_KERNEL_ERROR_WAIT_TIMEOUT) {
-                if (thread->end_wait(waiter.generation, state)) {
-                    // Only a timeout that won the claim, while the waiter is still queued
-                    if (state)
-                        departing(*thread, SCE_KERNEL_ERROR_WAIT_TIMEOUT);
-                    queue.remove(waiter);
-                    serve();
-                }
-            }
-            const ThreadState::WaitEnd end = thread->unregister_wait(waiter.generation);
-            if (!end.result)
-                return end.result;
-            result = end.result;
-            if (*result != SCE_KERNEL_ERROR_NOTIFY_CALLBACK)
-                break;
-        }
-        if (callbacks_check == CallbacksCheck::on_delete && *result != SCE_KERNEL_ERROR_WAIT_DELETE)
-            return result;
-        // Run the callbacks notified during the wait. Only the thread exiting changes the result.
-        if (const WaitResult ran = run_pending_callbacks(lock, thread, target.callbacks); !ran)
-            return ran;
-        return result;
-    }
-
-    // Ends thread's registered wait of generation in queue for a callback notify, takes it off the
-    // queue and serves the waiters behind it, if the wait is still queued there, with departing()
-    // giving it the outputs first. Takes the lock.
-    template <typename Entry>
-    void depart_for_callback(WaitQueue<Entry> &queue, ThreadState &thread, uint64_t generation) {
-        const auto guard = lock();
-        // A delete already ended the wait
-        if (guard && depart_queued(queue, thread, generation))
-            serve();
-    }
-
-    // Ends thread's registered wait of generation for a callback notify if it is queued in queue,
-    // with departing() giving it the outputs first, and takes it off the queue. Returns whether it
-    // did. The lock must be held.
-    template <typename Entry>
-    bool depart_queued(WaitQueue<Entry> &queue, ThreadState &thread, uint64_t generation) {
-        auto *const waiter = queue.find_if([&](auto &w) { return w.thread.get() == &thread && w.generation == generation; });
-        // A claim already took it off the queue, or the thread waits again with a new generation
-        if (!waiter)
-            return false;
-        queue.claim(*waiter, SCE_KERNEL_ERROR_NOTIFY_CALLBACK);
-        departing(thread, SCE_KERNEL_ERROR_NOTIFY_CALLBACK);
-        queue.remove(*waiter);
-        return true;
-    }
+    // share_lock_with is the object whose lock this one shares, or null for its own
+    SyncPrimitive(SceUInt32 attr, const char *name, const KernelObject *share_lock_with = nullptr);
 };
 
 // The ID of the one process Vita3K runs
@@ -206,25 +62,42 @@ constexpr SceUInt64 system_event_user_data(SceUID thread_id) {
     return (static_cast<SceUInt64>(thread_id) << 32) | static_cast<SceUInt32>(PROCESS_ID);
 }
 
-// The event part of simple events and timers: a bit pattern, the user data of the last set, and the
-// waits for bits of the pattern.
-class MultiEventWait;
+// What an event gives a wait it ends
+struct EventResult {
+    SceInt32 result;
+    SceUInt32 bits;
+    // The event's user data, 0 unless the result is SCE_KERNEL_OK
+    SceUInt64 user_data;
+};
 
+// Who takes an event's result for a queued wait: a plain event wait into its call's outputs, or an
+// entry of a multiple event wait into that wait's results
+class EventRecipient {
+public:
+    // Takes result for the registration of generation, or returns false if that registration takes
+    // no more results, so the event keeps its bits. Called by the event with its lock held.
+    virtual bool accept(uint64_t generation, const EventResult &result) = 0;
+
+protected:
+    ~EventRecipient() = default;
+};
+
+// The event part of simple events, timers and message pipes: a bit pattern, the user data of the last
+// set, and the waits for bits of the pattern.
 class Event : public SyncPrimitive {
 public:
     struct WaitEntry {
         SceUInt32 pattern;
-        SceUInt32 *result_pattern;
-        SceUInt64 *user_data;
-        // For an entry of a multiple event wait, the wait it belongs to and its index in it
-        MultiEventWait *multi = nullptr;
-        SceUInt32 index = 0;
+        EventRecipient *recipient;
     };
     // An entry of a multiple event wait, queued on its event
     using Token = WaitQueue<WaitEntry>::Waiter;
 
     const bool auto_reset;
 
+    // Waits for any of the bits of wait_pattern, writing the bits it got to result_pattern, the user
+    // data to user_data and the time left back to timeout
+    SceInt32 wait(const ThreadStatePtr &thread, SceUInt32 wait_pattern, SceUInt32 *result_pattern, SceUInt64 *user_data, SceUInt32 *timeout, bool callbacks);
     SceInt32 poll(SceUInt32 wait_pattern, SceUInt32 *result_pattern, SceUInt64 *user_data);
     SceInt32 clear(SceUInt32 clear_pattern);
     virtual SceInt32 cancel(SceUInt32 *num_wait_threads);
@@ -234,6 +107,9 @@ public:
     SceInt32 get_pattern(SceUInt32 &result);
     // Fills info with what the event's info reports, or returns UNKNOWN_EVENT_ID if it was deleted.
     SceInt32 info(SceKernelEventInfo &info);
+    // Sets one of the system events, like the open event, with user_data for its waiters, or returns
+    // UNKNOWN_EVENT_ID if it was deleted.
+    SceInt32 set_system_event(SceUInt32 event, SceUInt64 user_data);
     // For a multiple event wait's scan: ends token with the event's bits if it has them, else queues
     // it if queue is set. Returns SCE_KERNEL_OK if the entry ended, EVENT_COND if not, or
     // UNKNOWN_EVENT_ID if the event was deleted.
@@ -248,20 +124,20 @@ public:
     Deadline watch_until(const Token &token);
     // Fires an event that was due by until, and returns whether it did.
     bool update(Deadline until);
-    void end_for_callback(ThreadState &thread, uint64_t generation) override;
 
 protected:
     Event(SceUInt32 attr, const char *name, SceUInt32 init_pattern, SceUInt64 init_user_data);
 
-    // Ends waiter's wait with result and the bits it got: a plain waiter gets them and wakes, a token
-    // gives them to its multiple event wait. Returns false for a wait that takes no more results,
-    // which takes nothing. The caller takes the waiter off the queue. The lock must be held.
+    // Offers waiter's recipient result and the bits it gets. Returns false for a wait that takes no
+    // more results, which leaves the bits to the event. The caller takes the waiter off the queue.
+    // The lock must be held.
     bool complete(WaitQueue<WaitEntry>::Waiter &waiter, SceInt32 result, SceUInt32 bits);
     // Ends every wait queued here with result, as a delete or a cancel does, and returns how many
     // took it. The lock must be held.
     std::size_t end_waits(SceInt32 result);
 
     void on_delete(SceUID deleter) override;
+    bool depart_locked(ThreadState &thread, uint64_t generation, Departure reason) override;
     // Returns when the event fires by itself next, also if that already passed, or the maximum if it
     // never does. The lock must be held.
     virtual Deadline event_deadline() const { return Deadline::max(); }
@@ -272,6 +148,9 @@ protected:
     bool fire_by(Deadline until);
     // Takes the event if wait_pattern matches, or returns SCE_KERNEL_ERROR_EVENT_COND. The lock must be held.
     SceInt32 try_take(SceUInt32 wait_pattern, SceUInt32 *result_pattern, SceUInt64 *user_data);
+    // Clears the bits of wait_pattern once a wait took them, if the event resets itself. The lock
+    // must be held.
+    void reset_taken(SceUInt32 wait_pattern);
     // Returns the guest's result of a wait, and gives a wait that a delete or a cancel ended the error
     // event.
     SceInt32 wait_result(const WaitResult &r, SceUInt32 *result_pattern);
@@ -279,7 +158,7 @@ protected:
     // held.
     void fire(SceUInt32 set_pattern, SceUInt64 user_data, bool is_set);
     // Gives the event's bits to the waits they match.
-    void serve() override;
+    void serve_locked() override;
 
     // Guarded by the lock
     WaitQueue<WaitEntry> waiters;
@@ -294,11 +173,7 @@ public:
     // Returns the error a create with these arguments gets, or SCE_KERNEL_OK
     static SceInt32 check_create(const char *name, SceUInt32 attr, SceUInt32 init_pattern);
 
-    SceInt32 wait(const ThreadStatePtr &thread, SceUInt32 wait_pattern, SceUInt32 *result_pattern, SceUInt64 *user_data, SceUInt32 *timeout, bool callbacks);
     SceInt32 set_or_pulse(SceUInt32 set_pattern, SceUInt64 user_data, bool is_set);
-    // Sets one of the system events, like the open event, with user_data for its waiters, or returns
-    // UNKNOWN_EVENT_ID if it was deleted.
-    SceInt32 set_system_event(SceUInt32 event, SceUInt64 user_data);
 };
 
 using SimpleEventPtr = std::shared_ptr<SimpleEvent>;
@@ -310,7 +185,6 @@ public:
     Timer(SceUInt32 attr, const char *name, SceUID creator);
 
     SceInt32 set_event(SceUID type, SceKernelSysClock interval, SceInt32 repeats);
-    SceInt32 wait(const ThreadStatePtr &thread, SceUInt32 wait_pattern, SceUInt32 *result_pattern, SceUInt64 *user_data, SceUInt32 *timeout, bool callbacks);
     SceInt32 start();
     SceInt32 stop();
     SceInt32 cancel(SceUInt32 *num_wait_threads) override;
@@ -336,10 +210,10 @@ private:
     // the new time. The lock must be held.
     void queue_event(uint64_t deadline);
     // Gives the event's bits to the waits they match, and wakes the first waiter left.
-    void serve() override;
+    void serve_locked() override;
     // Fires the events due by until, and returns the event's time if thread's wait is the first
     // waiter, which watches the clock.
-    Deadline recheck(const ThreadState &thread, Deadline until) override;
+    Deadline recheck_locked(const ThreadState &thread, Deadline until) override;
     // Returns when the next event is due, on the clock of wait deadlines. The lock must be held.
     Deadline event_deadline() const override;
     // Returns how much time the timer counted. The lock must be held.
@@ -382,16 +256,26 @@ public:
 
     // Waits for any or all of the events. time_left is the call's copy of the timeout, or null.
     WaitResult run(SceUInt32 *time_left, bool callbacks);
-    // Records how an entry of the registration of generation ended, and ends the wait when that entry
-    // decides it. Returns false if the entry ended before or the registration takes no more results,
-    // so the event keeps its bits. Called by the event with its lock held.
-    bool end_entry(uint64_t generation, const Ended &ended);
     // Writes the results, with the UIDs the call listed, and returns how many entries ended. Called
     // after run().
     SceUInt32 copy_results(std::span<SceKernelResultEvent> out);
 
 private:
     using Entries = std::bitset<SCE_KERNEL_MULTIPLE_EVENTS_MAX>;
+
+    // Takes an event's result for one entry of the wait
+    class EntryRecipient final : public EventRecipient {
+    public:
+        MultiEventWait *wait = nullptr;
+        SceUInt32 index = 0;
+
+        bool accept(uint64_t generation, const EventResult &result) override;
+    };
+
+    // Records how an entry of the registration of generation ended, and ends the wait when that entry
+    // decides it. Returns false if the entry ended before or the registration takes no more results,
+    // so the event keeps its bits. Called by the event with its lock held, and by the scan.
+    bool end_entry(uint64_t generation, const Ended &ended);
 
     // Ends the entries whose event is set or gone, and queues a token for the others. Returns the
     // entries it queued.
@@ -416,6 +300,7 @@ private:
     // names the same one
     std::array<SceUID, SCE_KERNEL_MULTIPLE_EVENTS_MAX> objects;
     std::array<EventPtr, SCE_KERNEL_MULTIPLE_EVENTS_MAX> events;
+    std::array<EntryRecipient, SCE_KERNEL_MULTIPLE_EVENTS_MAX> recipients;
     std::array<Event::Token, SCE_KERNEL_MULTIPLE_EVENTS_MAX> tokens;
 
     // Guarded by the waiting thread's mutex
@@ -438,7 +323,6 @@ public:
     SceInt32 wait(const ThreadStatePtr &thread, SceInt32 need_count, SceUInt32 *timeout, bool callbacks);
     SceInt32 poll(const ThreadStatePtr &thread, SceInt32 need_count);
     SceInt32 signal(SceInt32 count);
-    void end_for_callback(ThreadState &thread, uint64_t generation) override;
     SceInt32 cancel(SceInt32 set_count, SceUInt32 *num_wait_threads);
     // Fills info with what the semaphore's info reports, or returns UNKNOWN_SEMA_ID if it was deleted.
     SceInt32 info(SceKernelSemaInfo &info) const;
@@ -449,11 +333,12 @@ private:
     };
 
     void on_delete(SceUID deleter) override;
+    bool depart_locked(ThreadState &thread, uint64_t generation, Departure reason) override;
     // Takes need_count if the count covers it and no waiter is queued ahead of thread. The lock
     // must be held.
     bool try_take(const ThreadStatePtr &thread, SceInt32 need_count);
     // Gives the count to the waits it covers, in queue order up to the first it doesn't.
-    void serve() override;
+    void serve_locked() override;
 
     // Guarded by the lock
     WaitQueue<WaitEntry> waiters;
@@ -496,7 +381,6 @@ public:
     SceInt32 signal(SignalTarget target);
     // Returns how many threads wait on the condition variable, 0 once it was deleted.
     SceUInt32 num_waiters() const;
-    void end_for_callback(ThreadState &thread, uint64_t generation) override;
 
 protected:
     // Guarded by the lock, read by the info of a condition variable
@@ -508,6 +392,7 @@ private:
     friend class Mutex;
 
     void on_delete(SceUID deleter) override;
+    bool depart_locked(ThreadState &thread, uint64_t generation, Departure reason) override;
     bool lightweight() const { return get_uid_class() == UidClass::lw_cond; }
     // Takes the condition variable off its mutex's conditions. The lock must be held.
     void detach();
@@ -537,7 +422,6 @@ public:
     SceInt32 cancel(const ThreadStatePtr &thread, SceInt32 new_count, SceUInt32 *num_wait_threads);
     // Gives the mutex to its next waiter if thread, which is ending, owns it.
     void release_ended_owner(const ThreadState &thread);
-    void end_for_callback(ThreadState &thread, uint64_t generation) override;
 
 protected:
     struct WaitEntry {
@@ -558,6 +442,7 @@ private:
     friend class Condvar;
 
     void on_delete(SceUID deleter) override;
+    bool depart_locked(ThreadState &thread, uint64_t generation, Departure reason) override;
     bool lightweight() const { return get_uid_class() == UidClass::lw_mutex; }
     // Unlocks like release(), with the lock already held, as a condition that shares it does
     SceInt32 release_held(MemState &mem, const ThreadStatePtr &thread, SceInt32 unlock_count);
@@ -569,7 +454,7 @@ private:
     // returns nothing. The lock must be held.
     std::optional<SceInt32> take_if_free(MemState &mem, const ThreadStatePtr &thread, SceInt32 count);
     // Gives a free mutex to the first waiter, if there is one.
-    void serve() override;
+    void serve_locked() override;
     // Writes the owner and lock count to a lightweight mutex's work area, which the guest reads. The lock must be held.
     void update_workarea(MemState &mem);
 };
@@ -610,7 +495,6 @@ public:
     void release_ended_writer(const ThreadState &thread);
     // Fills info with what the rwlock's info reports, or returns UNKNOWN_RW_LOCK_ID if it was deleted.
     SceInt32 info(SceKernelRWLockInfo &info) const;
-    void end_for_callback(ThreadState &thread, uint64_t generation) override;
 
 private:
     struct WaitEntry {
@@ -618,6 +502,7 @@ private:
     };
 
     void on_delete(SceUID deleter) override;
+    bool depart_locked(ThreadState &thread, uint64_t generation, Departure reason) override;
     SceInt32 acquire(const ThreadStatePtr &thread, bool is_write, SceUInt32 *timeout, bool callbacks);
     SceInt32 try_acquire(const ThreadStatePtr &thread, bool is_write);
     SceInt32 release(const ThreadStatePtr &thread, bool is_write);
@@ -625,7 +510,7 @@ private:
     SceInt32 try_take(const ThreadStatePtr &thread, bool is_write);
     // Gives the lock to the waiters that get it next: every waiting reader while no writer holds or
     // waits for it, or else the first waiting writer once nobody holds it.
-    void serve() override;
+    void serve_locked() override;
 
     // Guarded by the lock
     // The read locks of every reader, or the writer's count. Readers aren't tracked one by one, like
@@ -659,7 +544,6 @@ public:
     SceInt32 info(SceKernelEventFlagInfo &info) const;
     // Drops the holds of thread, which is ending.
     void release_ended_holder(const ThreadState &thread);
-    void end_for_callback(ThreadState &thread, uint64_t generation) override;
 
 private:
     struct WaitEntry {
@@ -680,10 +564,10 @@ private:
     // asks for and releases its hold. The lock must be held.
     void take(const WaitEntry &wait);
     // Gives the flags to the waits they match, in queue order.
-    void serve() override;
-    // Gives a wait that timed out or left for its callback the flag's bits. A timeout gives back its
+    void serve_locked() override;
+    // Gives a wait that times out or leaves for its callback the flag's bits. A timeout gives back its
     // hold, a callback notify keeps it.
-    void departing(const ThreadState &thread, SceInt32 reason) override;
+    bool depart_locked(ThreadState &thread, uint64_t generation, Departure reason) override;
     // Gives back one hold of the holder, the wait that took it ended. The lock must be held.
     void drop_hold();
 
@@ -729,9 +613,10 @@ struct MsgPipeVector {
     SceSize size;
 };
 
-class MsgPipe final : public WithUidClass<SyncPrimitive, UidClass::msg_pipe> {
+// A message pipe, which is an event too, with the events of the create and the delete
+class MsgPipe final : public WithUidClass<Event, UidClass::msg_pipe> {
 public:
-    MsgPipe(SceUInt32 attr, const char *name, std::size_t buf_size);
+    MsgPipe(SceUInt32 attr, const char *name, std::size_t buf_size, SceUID creator);
 
     // Returns the error a create with these arguments gets, or SCE_KERNEL_OK
     static SceInt32 check_create(const char *name, SceUInt32 type, SceUInt32 attr, SceSize buf_size);
@@ -747,7 +632,6 @@ public:
     // Fills info with what the message pipe's info reports, or returns UNKNOWN_MSG_PIPE_ID if it was
     // deleted.
     SceInt32 info(SceKernelMppInfo &info) const;
-    void end_for_callback(ThreadState &thread, uint64_t generation) override;
 
 private:
     // How far a send or a receive got, kept in its waiter so that whoever moves bytes carries it on
@@ -756,6 +640,8 @@ private:
         MemState *mem;
         // Where the caller gets the size moved, or null
         SceSize *size;
+        // Where the call keeps the size moved, for the event it posts
+        SceSize *moved;
         SceSize total;
         SceSize left;
         bool full;
@@ -763,7 +649,7 @@ private:
         std::size_t piece = 0;
         SceSize offset = 0;
 
-        Transfer(MemState &mem, std::span<const MsgPipeVector> pieces, SceSize *size, SceSize total, bool full);
+        Transfer(MemState &mem, std::span<const MsgPipeVector> pieces, SceSize *size, SceSize *moved, SceSize total, bool full);
         // Returns whether it moved what its mode asks for
         bool done() const;
         // Returns whether it moved part of its bytes, which keeps it at the head of its queue
@@ -771,7 +657,7 @@ private:
         // Returns the guest bytes at its position, at most n and within one piece
         std::span<char> run(SceSize n);
         void advance(SceSize n);
-        // Writes the size moved so far for the caller
+        // Writes the size moved so far for the caller and for its call's event
         void report() const;
     };
 
@@ -783,12 +669,15 @@ private:
         // A DONT_REMOVE receive, which copies bytes without taking them
         bool peek;
 
-        Receiver(MemState &mem, std::span<const MsgPipeVector> pieces, SceSize *size, SceSize total, bool full, bool peek);
+        Receiver(MemState &mem, std::span<const MsgPipeVector> pieces, SceSize *size, SceSize *moved, SceSize total, bool full, bool peek);
     };
 
     void on_delete(SceUID deleter) override;
-    // Carries on the first receiver's and the first sender's transfers until neither ends
-    void serve() override;
+    // A pipe's own waits are on one side or the other, and an event wait on its waiters
+    bool depart_locked(ThreadState &thread, uint64_t generation, Departure reason) override;
+    // Carries on the first receiver's and the first sender's transfers until neither ends, then gives
+    // the event's bits to the event waits they match
+    void serve_locked() override;
     // Moves the sender's bytes to the waiting receivers, then puts the rest into the pipe. Returns
     // whether the sender is done.
     bool give(Sender &sender);
@@ -807,6 +696,11 @@ private:
     // Returns whether a new call goes ahead of the calls already waiting on its side
     template <typename Side>
     static bool goes_first(WaitQueue<Side> &side, int priority);
+    // Posts the end of a send or a receive as an event of the pipe: done_bit if it moved bytes, the
+    // error bit if it failed with anything but a suspend or a stop, and the result and the size
+    // moved as the user data. A send that leaves bytes in the pipe adds DATA_EXIST, and a receive
+    // that leaves it empty clears it. The lock must be held.
+    void post(SceUInt32 done_bit, SceInt32 result, SceSize moved);
 
     // Guarded by the lock. At most one side waits, except right after a waiter came back from its
     // callbacks.
@@ -816,3 +710,6 @@ private:
 };
 
 using MsgPipePtr = std::shared_ptr<MsgPipe>;
+
+// Returns the simple event, timer or message pipe with this UID, the objects that are events, or null
+EventPtr find_event(const KernelObjects &objects, SceUID uid);

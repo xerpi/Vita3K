@@ -41,6 +41,26 @@ struct WaitTarget {
     bool callbacks = false;
 };
 
+// Why a queued wait leaves its queue without getting what it waits for
+enum class Departure {
+    callback,
+    timeout,
+    exit,
+};
+
+// The result a departure ends a wait with
+inline WaitResult departure_result(Departure reason) {
+    switch (reason) {
+    case Departure::callback:
+        return SCE_KERNEL_ERROR_NOTIFY_CALLBACK;
+    case Departure::timeout:
+        return SCE_KERNEL_ERROR_WAIT_TIMEOUT;
+    case Departure::exit:
+        break;
+    }
+    return std::unexpected{ ThreadExiting{} };
+}
+
 // Converts a guest timeout in microseconds into a deadline. A null timeout waits forever.
 inline Deadline deadline_from(const SceUInt32 *timeout) {
     if (!timeout)
