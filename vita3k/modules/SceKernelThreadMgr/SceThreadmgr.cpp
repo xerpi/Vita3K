@@ -1167,16 +1167,27 @@ EXPORT(SceInt32, _sceKernelWaitSemaCB, SceUID semaId, SceInt32 needCount, SceUIn
     return result;
 }
 
+// Waits for a signal to thread, writing the time left back to timeout
+static int wait_signal(const ThreadStatePtr &thread, SceUInt32 *timeout, bool callbacks) {
+    // The wait writes to a local copy that goes to the guest when it returns, so callbacks that run
+    // during the wait still see the old value
+    SceUInt32 time_left = timeout ? *timeout : 0;
+    const WaitResult r = thread->wait_for_signal(timeout ? &time_left : nullptr, callbacks);
+    if (timeout)
+        *timeout = time_left;
+    return guest_result(r);
+}
+
 EXPORT(int, _sceKernelWaitSignal, uint32_t unknown, uint32_t delay, SceUInt32 *timeout) {
     TRACY_FUNC(_sceKernelWaitSignal, unknown, delay, timeout);
-    return guest_result(emuenv.kernel.get_thread(thread_id)->wait_for_signal(timeout, false));
+    return wait_signal(emuenv.kernel.get_thread(thread_id), timeout, false);
 }
 
 EXPORT(int, _sceKernelWaitSignalCB, uint32_t unknown, uint32_t delay, SceUInt32 *timeout) {
     TRACY_FUNC(_sceKernelWaitSignalCB, unknown, delay, timeout);
     const ThreadStatePtr thread = emuenv.kernel.get_thread(thread_id);
     thread->process_callbacks();
-    return guest_result(thread->wait_for_signal(timeout, true));
+    return wait_signal(thread, timeout, true);
 }
 
 // Waits for target to end, writing the time left back to timeout

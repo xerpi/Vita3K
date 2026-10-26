@@ -74,7 +74,7 @@ cb_wait_callback_writes_timeout pass
 cb_wait_callback_writes_timeout_more fail     # the signal and thread end waits with callbacks read the timeout a callback wrote
 cb_wait_check_order             pass
 cb_wait_check_order_more        fail     # a message pipe call refused for its size doesn't run pending callbacks
-cb_wait_deadline_during_callback fail     # a signal wait with callbacks ended by a send during its callback writes no time left
+cb_wait_deadline_during_callback fail     # the thread end wait with callbacks writes the time left when it returns, not when a notify ended its sleep
 cb_wait_early_notify_timeout    pass
 cb_wait_early_notify_timeout_more fail     # a pending callback ends the signal wait with callbacks instead of it sleeping until its timeout
 cb_wait_initial_callback_deadline pass
@@ -85,7 +85,7 @@ cb_wait_take_final_check_more   pass
 cb_wait_timeout_copy            pass
 cb_wait_timeout_copy_more       pass
 cb_wait_zero_timeout_notify     pass
-cb_wait_zero_timeout_notify_more fail     # the signal and thread end waits with callbacks and a timeout of 0 return 0 after a pending callback
+cb_wait_zero_timeout_notify_more fail     # the thread end wait with callbacks and a timeout of 0 returns 0 after a pending callback
 cb_waits                        pass
 ceiling_base_change             fail     # a mutex ceiling doesn't raise its owner's priority
 ceiling_cancel_drops_boost      fail     # a ceiling mutex doesn't raise its owner's priority

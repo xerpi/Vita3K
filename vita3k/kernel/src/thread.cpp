@@ -478,15 +478,9 @@ WaitResult ThreadState::delay_until(Deadline deadline, bool callbacks) {
                 return SCE_KERNEL_OK;
             continue;
         }
-        const uint64_t generation = *registered;
         // A delay has no object, so only its own timeout, a callback notify (N1) or the thread's end
         // ends it, each under the thread lock
-        WaitResult state = check_wait();
-        while (state && *state != SCE_KERNEL_OK && std::chrono::steady_clock::now() < deadline)
-            state = park(deadline);
-        if (!state || *state == SCE_KERNEL_ERROR_WAIT_TIMEOUT)
-            end_wait(generation, state);
-        const WaitEnd end = unregister_wait(generation);
+        const WaitEnd end = sleep_registered(*registered, deadline);
         if (!end.result)
             return end.result;
         if (*end.result != SCE_KERNEL_ERROR_NOTIFY_CALLBACK)
@@ -496,34 +490,36 @@ WaitResult ThreadState::delay_until(Deadline deadline, bool callbacks) {
 }
 
 WaitResult ThreadState::wait_for_signal(SceUInt32 *timeout, bool callbacks) {
-    const auto take_signal = [this] {
-        const std::lock_guard<std::mutex> lock(mutex);
-        return std::exchange(signal_pending, false);
-    };
-    // A signal sent before ends the wait at once, with the timeout untouched
-    if (take_signal())
-        return SCE_KERNEL_OK;
     const Deadline deadline = deadline_from(timeout);
-    WaitResult r = SCE_KERNEL_OK;
-    while (!take_signal()) {
-        r = wait({ SCE_KERNEL_WAITTYPE_SIGNAL, SIGNAL_WAIT_ID, callbacks }, deadline);
-        if (r && *r == SCE_KERNEL_ERROR_NOTIFY_CALLBACK)
-            r = run_callbacks();
-        if (!r || *r != SCE_KERNEL_OK)
-            break;
+    while (true) {
+        const std::expected<uint64_t, SceInt32> registered = register_signal_wait(callbacks, deadline, timeout);
+        if (registered) {
+            // A signal wait has no object, so only a send, its own timeout, a callback notify (N1) or
+            // the thread's end ends it, each under the thread lock
+            const WaitEnd end = sleep_registered(*registered, deadline);
+            if (!end.result || *end.result != SCE_KERNEL_ERROR_NOTIFY_CALLBACK)
+                return end.result;
+        } else if (registered.error() != SCE_KERNEL_ERROR_NOTIFY_CALLBACK) {
+            if (timeout && registered.error() == SCE_KERNEL_ERROR_WAIT_TIMEOUT)
+                *timeout = 0;
+            return registered.error();
+        }
+        // The callbacks run before the wait looks for a signal again
+        if (const WaitResult ran = run_callbacks(); !ran)
+            return ran;
     }
-    writeback_timeout(timeout, deadline);
-    return r;
 }
 
 SceInt32 ThreadState::send_signal() {
-    {
-        const std::lock_guard<std::mutex> lock(mutex);
-        if (signal_pending)
-            return SCE_KERNEL_ERROR_ALREADY_SENT;
-        signal_pending = true;
+    const std::lock_guard<std::mutex> lock(mutex);
+    // A waiting signal wait takes the signal at once, else it stays pending for the next one
+    if (wait_phase == WaitPhase::waiting && wait_target.type == SCE_KERNEL_WAITTYPE_SIGNAL) {
+        end_registration(SCE_KERNEL_OK);
+        return SCE_KERNEL_OK;
     }
-    wake();
+    if (signal_pending)
+        return SCE_KERNEL_ERROR_ALREADY_SENT;
+    signal_pending = true;
     return SCE_KERNEL_OK;
 }
 
@@ -629,6 +625,23 @@ std::expected<uint64_t, SceInt32> ThreadState::register_wait(WaitTarget target, 
         return std::unexpected(SCE_KERNEL_ERROR_WAIT_TIMEOUT);
     if (target.callbacks && !is_processing_callbacks && callbacks_notified())
         return std::unexpected(SCE_KERNEL_ERROR_NOTIFY_CALLBACK);
+    return begin_registration(target, deadline, time_left);
+}
+
+std::expected<uint64_t, SceInt32> ThreadState::register_signal_wait(bool callbacks, Deadline deadline, SceUInt32 *time_left) {
+    const std::lock_guard<std::mutex> lock(mutex);
+    assert(wait_phase == WaitPhase::none);
+    // A signal sent before is taken without waiting
+    if (std::exchange(signal_pending, false))
+        return std::unexpected(SCE_KERNEL_OK);
+    if (std::chrono::steady_clock::now() >= deadline)
+        return std::unexpected(SCE_KERNEL_ERROR_WAIT_TIMEOUT);
+    if (callbacks && !is_processing_callbacks && callbacks_notified())
+        return std::unexpected(SCE_KERNEL_ERROR_NOTIFY_CALLBACK);
+    return begin_registration({ SCE_KERNEL_WAITTYPE_SIGNAL, SIGNAL_WAIT_ID, callbacks }, deadline, time_left);
+}
+
+uint64_t ThreadState::begin_registration(WaitTarget target, Deadline deadline, SceUInt32 *time_left) {
     // Only an armed registration gets a time left
     wait_deadline = deadline;
     wait_time_left = time_left;
@@ -711,6 +724,16 @@ ThreadState::WaitEnd ThreadState::unregister_wait(uint64_t generation) {
     return { wait_result, wait_ended_at };
 }
 
+ThreadState::WaitEnd ThreadState::sleep_registered(uint64_t generation, Deadline deadline) {
+    WaitResult state = check_wait();
+    while (state && *state != SCE_KERNEL_OK && std::chrono::steady_clock::now() < deadline)
+        state = park(deadline);
+    // The waiter claims its own timeout, and its end
+    if (!state || *state == SCE_KERNEL_ERROR_WAIT_TIMEOUT)
+        end_wait(generation, state);
+    return unregister_wait(generation);
+}
+
 bool ThreadState::has_pending_callbacks() {
     const std::lock_guard<std::mutex> lock(mutex);
     return !is_processing_callbacks && callbacks_notified();
@@ -764,9 +787,9 @@ std::optional<ThreadState::CallbackDeparture> ThreadState::notify_callback(bool 
     wait_cv.notify_all();
     if (wait_phase != WaitPhase::waiting || !callback_ends_wait())
         return std::nullopt;
-    // A multiple event wait isn't queued on one object and a delay is on none, so the notify ends
-    // them here
-    if (wait_target.type == SCE_KERNEL_WAITTYPE_MP_EVENTS || wait_target.type == SCE_KERNEL_WAITTYPE_DELAY) {
+    // A multiple event wait isn't queued on one object, and a delay or a signal wait is on none, so
+    // the notify ends them here
+    if (wait_target.type == SCE_KERNEL_WAITTYPE_MP_EVENTS || wait_target.type == SCE_KERNEL_WAITTYPE_DELAY || wait_target.type == SCE_KERNEL_WAITTYPE_SIGNAL) {
         end_registration(SCE_KERNEL_ERROR_NOTIFY_CALLBACK);
         return std::nullopt;
     }

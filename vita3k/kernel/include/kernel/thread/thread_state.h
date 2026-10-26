@@ -281,6 +281,16 @@ private:
     bool takes_results(uint64_t generation) const { return wait_generation == generation && (wait_phase == WaitPhase::scanning || wait_phase == WaitPhase::waiting); }
     // Shows the registration waiting on target
     void arm(WaitTarget target);
+    // Arms a registration on target and returns its generation. The claim that ends it writes the
+    // time left until deadline to time_left, if it isn't null.
+    uint64_t begin_registration(WaitTarget target, Deadline deadline, SceUInt32 *time_left);
+    // Takes a pending signal, else registers a signal wait like register_wait(). Returns the
+    // generation, or the result that ends the wait without queuing: SCE_KERNEL_OK for the signal
+    // taken, WAIT_TIMEOUT or NOTIFY_CALLBACK. Takes mutex.
+    std::expected<uint64_t, SceInt32> register_signal_wait(bool callbacks, Deadline deadline, SceUInt32 *time_left);
+    // Sleeps until the registered wait of generation, which no object queues, ended, claiming its
+    // timeout or the thread's end itself, then unregisters it. Takes mutex.
+    WaitEnd sleep_registered(uint64_t generation, Deadline deadline);
     // Ends the registration with result and wakes the thread
     void end_registration(WaitResult result);
     // How the registration stands: ThreadExiting, then SCE_KERNEL_OK if it ended, else WAIT_TIMEOUT
