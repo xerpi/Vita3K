@@ -724,6 +724,7 @@ public:
     SceInt32 signal(SignalTarget target);
     // Returns how many threads wait on the condition variable, 0 once it was deleted.
     SceUInt32 num_waiters() const;
+    void end_for_callback(ThreadState &thread, uint64_t generation) override;
 
 protected:
     // Guarded by the lock, read by the info of a condition variable

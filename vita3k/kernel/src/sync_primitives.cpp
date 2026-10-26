@@ -1304,7 +1304,7 @@ Condvar::Condvar(SceUInt32 attr, const char *name, MutexPtr associated_mutex)
 
 void Condvar::on_delete(SceUID) {
     // wait() maps this to the condition's own delete error
-    waiters.wake_all(SCE_KERNEL_ERROR_WAIT_DELETE);
+    waiters.end_all(SCE_KERNEL_ERROR_WAIT_DELETE);
 }
 
 SceInt32 Condvar::wait(MemState &mem, const ThreadStatePtr &thread, SceUInt32 *timeout, bool callbacks) {
@@ -1316,7 +1316,7 @@ SceInt32 Condvar::wait(MemState &mem, const ThreadStatePtr &thread, SceUInt32 *t
         return error;
 
     // Condition waits have nothing to take, they only wait for a signal
-    const WaitResult r = wait_loop(waiters, guard, thread, { lightweight() ? SCE_KERNEL_WAITTYPE_LW_COND_SIGNAL : SCE_KERNEL_WAITTYPE_COND_SIGNAL, uid, callbacks }, std::monostate{}, timeout, CallbacksCheck::on_delete, [](std::monostate &, SceInt32) -> std::optional<SceInt32> {
+    const WaitResult r = registered_wait_loop(waiters, guard, thread, { lightweight() ? SCE_KERNEL_WAITTYPE_LW_COND_SIGNAL : SCE_KERNEL_WAITTYPE_COND_SIGNAL, uid, callbacks }, std::monostate{}, timeout, CallbacksCheck::on_delete, [](std::monostate &, SceInt32) -> std::optional<SceInt32> {
         return std::nullopt;
     });
     // Deleted during the wait, or while its callbacks ran
@@ -1354,16 +1354,20 @@ SceInt32 Condvar::signal(SignalTarget target) {
         auto *waiter = waiters.find_if([&](auto &w) { return w.thread->id == target.thread_id; });
         if (!waiter)
             return SCE_KERNEL_ERROR_ILLEGAL_THREAD_ID;
-        waiters.wake(*waiter);
+        waiters.end(*waiter);
     } else if (target.type == SignalTarget::Type::Any) {
-        // Wakes the first waiter in queue order
+        // Ends the first waiter's wait in queue order
         if (auto *waiter = waiters.front())
-            waiters.wake(*waiter);
+            waiters.end(*waiter);
     } else {
-        waiters.wake_all();
+        waiters.end_all(SCE_KERNEL_OK);
     }
 
     return SCE_KERNEL_OK;
+}
+
+void Condvar::end_for_callback(ThreadState &thread, uint64_t generation) {
+    depart_for_callback(waiters, thread, generation);
 }
 
 SceUInt32 Condvar::num_waiters() const {
