@@ -65,7 +65,9 @@ MultiEventWait::MultiEventWait(KernelState &kernel, ThreadStatePtr thread, std::
             objects[i] = object->uid;
         else
             objects[i] = kernel.get_thread(uid) ? uid : NO_OBJECT;
-        tokens[i] = { .thread = this->thread, .entry = { list[i].eventPattern, nullptr, nullptr, this, i } };
+        // Set in place, since a token can't be copied
+        tokens[i].thread = this->thread;
+        tokens[i].entry = { list[i].eventPattern, nullptr, nullptr, this, i };
     }
 }
 
@@ -1765,8 +1767,8 @@ void MsgPipe::drain(Receiver &receiver) {
 
 SceSize MsgPipe::available() const {
     SceSize bytes = static_cast<SceSize>(data_buffer.Used());
-    for (const auto *sender : senders)
-        bytes += sender->entry.left;
+    for (const auto &sender : senders)
+        bytes += sender.entry.left;
     return bytes;
 }
 
