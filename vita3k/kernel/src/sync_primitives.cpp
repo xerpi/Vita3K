@@ -113,12 +113,12 @@ bool MultiEventWait::EntryRecipient::accept(uint64_t generation, const EventResu
 
 bool MultiEventWait::end_entry(uint64_t generation, const Ended &ended) {
     const std::lock_guard<std::mutex> lock(thread->mutex);
-    if (!thread->takes_results(generation) || finished.test(ended.index))
+    if (!thread->registration.takes_results(generation) || finished.test(ended.index))
         return false;
     finished.set(ended.index);
     results[num_results++] = ended;
     // The entry that ends an OR wait, or the last of an AND wait, ends a waiting registration
-    if (thread->wait_phase == ThreadState::WaitPhase::waiting && (any || (waiting_on & ~finished).none()))
+    if (thread->registration.waiting() && (any || (waiting_on & ~finished).none()))
         thread->end_registration(SCE_KERNEL_OK);
     return true;
 }
@@ -158,7 +158,7 @@ MultiEventWait::Entries MultiEventWait::scan(uint64_t generation) {
 
 bool MultiEventWait::arm(uint64_t generation, const Entries &queued, bool callbacks, Deadline deadline) {
     const std::lock_guard<std::mutex> lock(thread->mutex);
-    assert(thread->wait_phase == ThreadState::WaitPhase::scanning && thread->wait_generation == generation);
+    assert(thread->registration.scanning() && thread->registration.current(generation));
     // A token an event ended after it was queued waits no more
     waiting_on = queued & ~finished;
     const std::size_t left = waiting_on.count();

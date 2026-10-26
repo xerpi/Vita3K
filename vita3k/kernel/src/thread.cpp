@@ -532,7 +532,7 @@ WaitResult ThreadState::wait_for_signal(SceUInt32 *timeout, bool callbacks) {
 SceInt32 ThreadState::send_signal() {
     const std::lock_guard<std::mutex> lock(mutex);
     // A waiting signal wait takes the signal at once, else it stays pending for the next one
-    if (wait_phase == WaitPhase::waiting && wait_target.type == SCE_KERNEL_WAITTYPE_SIGNAL) {
+    if (registration.waiting() && registration.target.type == SCE_KERNEL_WAITTYPE_SIGNAL) {
         end_registration(SCE_KERNEL_OK);
         return SCE_KERNEL_OK;
     }
@@ -637,7 +637,7 @@ void ThreadState::wake() {
 
 std::expected<uint64_t, SceInt32> ThreadState::register_wait(WaitTarget target, Deadline deadline, SceUInt32 *time_left, std::shared_ptr<Waitable> endpoint) {
     const std::lock_guard<std::mutex> lock(mutex);
-    assert(wait_phase == WaitPhase::none);
+    assert(registration.phase == WaitRegistration::Phase::none);
     // A passed deadline wins over a pending callback
     if (std::chrono::steady_clock::now() >= deadline)
         return std::unexpected(SCE_KERNEL_ERROR_WAIT_TIMEOUT);
@@ -648,7 +648,7 @@ std::expected<uint64_t, SceInt32> ThreadState::register_wait(WaitTarget target, 
 
 std::expected<uint64_t, SceInt32> ThreadState::register_signal_wait(bool callbacks, Deadline deadline, SceUInt32 *time_left) {
     const std::lock_guard<std::mutex> lock(mutex);
-    assert(wait_phase == WaitPhase::none);
+    assert(registration.phase == WaitRegistration::Phase::none);
     // A signal sent before is taken without waiting
     if (std::exchange(signal_pending, false))
         return std::unexpected(SCE_KERNEL_OK);
@@ -659,44 +659,72 @@ std::expected<uint64_t, SceInt32> ThreadState::register_signal_wait(bool callbac
     return begin_registration({ SCE_KERNEL_WAITTYPE_SIGNAL, SIGNAL_WAIT_ID, callbacks }, deadline, time_left, nullptr);
 }
 
-uint64_t ThreadState::begin_registration(WaitTarget target, Deadline deadline, SceUInt32 *time_left, std::shared_ptr<Waitable> endpoint) {
+uint64_t WaitRegistration::begin(WaitTarget target, Deadline deadline, SceUInt32 *time_left, std::shared_ptr<Waitable> endpoint) {
+    assert(phase == Phase::none);
     // Only an armed registration gets a time left
-    wait_deadline = deadline;
-    wait_time_left = time_left;
-    wait_endpoint = std::move(endpoint);
+    this->deadline = deadline;
+    this->time_left = time_left;
+    this->endpoint = std::move(endpoint);
     arm(target);
-    return ++wait_generation;
+    return ++generation;
+}
+
+uint64_t WaitRegistration::begin_scan() {
+    assert(phase == Phase::none && !time_left && !endpoint);
+    // A multiple event wait writes its own time left, and a callback notify ends it by itself
+    phase = Phase::scanning;
+    return ++generation;
+}
+
+void WaitRegistration::arm(WaitTarget target) {
+    this->target = target;
+    phase = Phase::waiting;
+}
+
+void WaitRegistration::end(WaitResult result) {
+    assert(phase == Phase::scanning || phase == Phase::waiting);
+    phase = Phase::ended;
+    this->result = result;
+    ended_at = std::chrono::steady_clock::now();
+    // The claimant writes it before the thread wakes, with the waited object's lock held, since a
+    // message pipe's time left is the guest's own
+    if (time_left)
+        *time_left = time_left_until(deadline, ended_at);
+}
+
+void WaitRegistration::clear() {
+    assert(phase == Phase::ended);
+    phase = Phase::none;
+    target = {};
+    time_left = nullptr;
+    // Not the last reference, the waiting call holds its own
+    endpoint.reset();
+}
+
+uint64_t ThreadState::begin_registration(WaitTarget target, Deadline deadline, SceUInt32 *time_left, std::shared_ptr<Waitable> endpoint) {
+    const uint64_t generation = registration.begin(target, deadline, time_left, std::move(endpoint));
+    update_status(ThreadStatus::waiting);
+    return generation;
 }
 
 uint64_t ThreadState::begin_scan() {
     const std::lock_guard<std::mutex> lock(mutex);
-    assert(wait_phase == WaitPhase::none);
-    // A multiple event wait writes its own time left
-    wait_time_left = nullptr;
-    wait_phase = WaitPhase::scanning;
-    return ++wait_generation;
+    return registration.begin_scan();
 }
 
 void ThreadState::arm(WaitTarget target) {
-    wait_target = target;
-    wait_phase = WaitPhase::waiting;
+    registration.arm(target);
     update_status(ThreadStatus::waiting);
 }
 
 void ThreadState::end_registration(WaitResult result) {
-    wait_phase = WaitPhase::ended;
-    wait_result = result;
-    wait_ended_at = std::chrono::steady_clock::now();
-    // The claimant writes it before the thread wakes, with the waited object's lock held, since a
-    // message pipe's time left is the guest's own
-    if (wait_time_left)
-        *wait_time_left = time_left_until(wait_deadline, wait_ended_at);
+    registration.end(result);
     wait_cv.notify_all();
 }
 
 bool ThreadState::end_wait(uint64_t generation, WaitResult result) {
     const std::lock_guard<std::mutex> lock(mutex);
-    if (wait_phase != WaitPhase::waiting || wait_generation != generation)
+    if (!registration.waiting() || !registration.current(generation))
         return false;
     end_registration(result);
     return true;
@@ -704,7 +732,7 @@ bool ThreadState::end_wait(uint64_t generation, WaitResult result) {
 
 WaitResult ThreadState::park(Deadline until) {
     std::unique_lock<std::mutex> lock(mutex);
-    const auto over = [&] { return exiting() || wait_phase != WaitPhase::waiting || wake_pending; };
+    const auto over = [&] { return exiting() || !registration.waiting() || wake_pending; };
     if (until == Deadline::max())
         wait_cv.wait(lock, over);
     else
@@ -724,25 +752,21 @@ WaitResult ThreadState::check_wait() {
 WaitResult ThreadState::wait_state() const {
     if (exiting())
         return std::unexpected{ ThreadExiting{} };
-    if (wait_phase != WaitPhase::waiting)
+    if (!registration.waiting())
         return SCE_KERNEL_OK;
     return SCE_KERNEL_ERROR_WAIT_TIMEOUT;
 }
 
 ThreadState::WaitEnd ThreadState::unregister_wait(uint64_t generation) {
     const std::lock_guard<std::mutex> lock(mutex);
-    assert(wait_phase == WaitPhase::ended && wait_generation == generation);
-    wait_phase = WaitPhase::none;
-    wait_target = {};
-    wait_time_left = nullptr;
-    // Not the last reference, the waiting call holds its own
-    wait_endpoint.reset();
+    assert(registration.ended() && registration.current(generation));
+    registration.clear();
     // A thread something holds goes on to its gate, which keeps it from its callbacks and its code
     update_status(ThreadStatus::running);
     // An exit wins over whatever ended the wait, which stays done
     if (exiting())
-        return { std::unexpected{ ThreadExiting{} }, wait_ended_at };
-    return { wait_result, wait_ended_at };
+        return { std::unexpected{ ThreadExiting{} }, registration.ended_at };
+    return { registration.result, registration.ended_at };
 }
 
 ThreadState::WaitEnd ThreadState::sleep_registered(uint64_t generation, Deadline deadline) {
@@ -804,15 +828,15 @@ std::optional<ThreadState::CallbackDeparture> ThreadState::notify_callback(bool 
     const std::lock_guard<std::mutex> lock(mutex);
     if (first)
         ++notified_callbacks;
-    if (wait_phase != WaitPhase::waiting || !callback_ends_wait())
+    if (!registration.waiting() || !callback_ends_wait())
         return std::nullopt;
     // A wait with no endpoint, a delay, a signal, a vblank or a multiple event wait, ends here
-    if (!wait_endpoint) {
+    if (!registration.endpoint) {
         end_registration(SCE_KERNEL_ERROR_NOTIFY_CALLBACK);
         return std::nullopt;
     }
     // A wait on a waitable ends only by a claim, which takes the waitable's lock first
-    return CallbackDeparture{ wait_endpoint, wait_generation };
+    return CallbackDeparture{ registration.endpoint, registration.generation };
 }
 
 void ThreadState::end_wait_for_callback(const CallbackDeparture &departure) {
@@ -845,9 +869,9 @@ SceKernelThreadInfo ThreadState::info() {
     // A thread whose kernel wait is over is READY until it goes on, and waits on nothing, like on a
     // Vita, where the waker ends the wait. A host wait, like an audio output, has no target and
     // stays WAITING.
-    const bool over = wait_phase == WaitPhase::ended || exiting();
-    const bool ready = status == ThreadStatus::waiting && wait_target.type != 0 && over;
-    const WaitTarget reported = ready ? WaitTarget{} : wait_target;
+    const bool over = registration.ended() || exiting();
+    const bool ready = status == ThreadStatus::waiting && registration.target.type != 0 && over;
+    const WaitTarget reported = ready ? WaitTarget{} : registration.target;
     info.status = ready ? SCE_KERNEL_THREAD_STATUS_READY : std::to_underlying(status);
     info.waitType = reported.callbacks ? reported.type | WAITTYPE_CB_BIT : reported.type;
     info.waitId = reported.id;

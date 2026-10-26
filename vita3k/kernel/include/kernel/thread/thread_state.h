@@ -97,6 +97,70 @@ enum class ThreadStatus : SceUInt32 {
     suspended = SCE_KERNEL_THREAD_STATUS_SUSPENDED, // Suspended by debugger
 };
 
+// A thread's registered wait, one at a time, guarded by the thread's mutex. Anyone with that lock may
+// ask how it stands, but only ThreadState changes it, so a wait that ends always wakes its thread.
+class WaitRegistration {
+public:
+    WaitRegistration() = default;
+    // Never replaced as a whole, which would reset the generation
+    WaitRegistration(const WaitRegistration &) = delete;
+    WaitRegistration &operator=(const WaitRegistration &) = delete;
+
+    // Whether generation is the current registration's
+    bool current(uint64_t generation) const { return this->generation == generation; }
+    // Whether a multiple event wait looks at its events, not armed yet
+    bool scanning() const { return phase == Phase::scanning; }
+    // Whether the wait is armed and nobody ended it yet
+    bool waiting() const { return phase == Phase::waiting; }
+    // Whether a claim ended the wait
+    bool ended() const { return phase == Phase::ended; }
+    // Whether the registration of generation still takes results, in its scan or armed
+    bool takes_results(uint64_t generation) const { return current(generation) && (scanning() || waiting()); }
+
+private:
+    friend struct ThreadState;
+
+    enum class Phase : uint8_t {
+        // No wait is registered
+        none,
+        // A multiple event wait looks at its events and queues its tokens
+        scanning,
+        // Queued and parked, and nobody ended it yet
+        waiting,
+        // A claim ended it with result
+        ended,
+    };
+
+    // Registers a wait armed on target and returns its generation. The claim that ends it writes the
+    // time left until deadline to time_left, if it isn't null, and a callback notify departs it
+    // through endpoint, if there is one.
+    uint64_t begin(WaitTarget target, Deadline deadline, SceUInt32 *time_left, std::shared_ptr<Waitable> endpoint);
+    // Registers a multiple event wait in its scan and returns its generation
+    uint64_t begin_scan();
+    // Arms the registration on target
+    void arm(WaitTarget target);
+    // Ends the registration with result, and writes the time left as of now
+    void end(WaitResult result);
+    // Drops the ended registration. Keeps the generation, the result and when it ended.
+    void clear();
+
+    // What the armed wait waits on, empty otherwise
+    WaitTarget target;
+    Phase phase = Phase::none;
+    // Bumped by each registration, never reset. Queue entries carry it, so a late claim never ends a
+    // newer wait.
+    uint64_t generation = 0;
+    WaitResult result = SCE_KERNEL_OK;
+    // When the claim ended it, for the time left
+    Deadline ended_at;
+    // The deadline, and where the claim that ends the wait writes the time left, or null
+    Deadline deadline;
+    SceUInt32 *time_left = nullptr;
+    // The waitable a callback notify departs the wait through, null for a wait it ends by itself.
+    // Never the last reference, since the waiting call holds one too.
+    std::shared_ptr<Waitable> endpoint;
+};
+
 struct ThreadState : std::enable_shared_from_this<ThreadState> {
     // Fixed when the thread is created
     const SceUID id;
@@ -307,13 +371,9 @@ private:
     friend class ThreadEnd;
 
     // The private methods are called with mutex held, unless they say otherwise
-    // Whether the registration of generation still takes results
-    bool takes_results(uint64_t generation) const { return wait_generation == generation && (wait_phase == WaitPhase::scanning || wait_phase == WaitPhase::waiting); }
-    // Shows the registration waiting on target
+    // Arms the registration on target and shows the thread waiting
     void arm(WaitTarget target);
-    // Arms a registration on target and returns its generation. The claim that ends it writes the
-    // time left until deadline to time_left, if it isn't null, and a callback notify departs it
-    // through endpoint, if there is one.
+    // Registers a wait armed on target like WaitRegistration::begin(), and shows the thread waiting
     uint64_t begin_registration(WaitTarget target, Deadline deadline, SceUInt32 *time_left, std::shared_ptr<Waitable> endpoint);
     // Takes a pending signal, else registers a signal wait like register_wait(), but also with a
     // callback pending. Returns the generation, or the result that ends the wait without queuing:
@@ -348,7 +408,7 @@ private:
     bool callbacks_notified() const { return notified_callbacks > 0; }
     // Whether a notified callback ends the current wait. Callbacks don't nest, so a wait inside a
     // callback runs none. With mutex held.
-    bool callback_ends_wait() const { return wait_target.callbacks && !is_processing_callbacks && callbacks_notified(); }
+    bool callback_ends_wait() const { return registration.target.callbacks && !is_processing_callbacks && callbacks_notified(); }
     // Keeps the thread from going on into guest code while anything holds it, unless it's ending.
     // With mutex held through lock.
     void wait_while_held(std::unique_lock<std::mutex> &lock, StopPoint where);
@@ -388,33 +448,9 @@ private:
     SceInt32 affinity_mask;
 
     // Waits
-    // What the thread waits on while waiting, empty otherwise
-    WaitTarget wait_target;
+    WaitRegistration registration;
     // Set by wake() and cleared by the next park() or check_wait()
     bool wake_pending = false;
-    // Where the registered wait is
-    enum class WaitPhase : uint8_t {
-        // No wait is registered
-        none,
-        // A multiple event wait looks at its events and queues its tokens, not armed yet
-        scanning,
-        // Queued and parked, and nobody ended it yet
-        waiting,
-        // A claim ended it with wait_result
-        ended,
-    };
-    WaitPhase wait_phase = WaitPhase::none;
-    // Bumped by each registration. Queue entries carry it, so a late claim never ends a newer wait.
-    uint64_t wait_generation = 0;
-    WaitResult wait_result = SCE_KERNEL_OK;
-    // When the registered wait was claimed, for the time left
-    Deadline wait_ended_at;
-    // The registered wait's deadline, and where the claim that ends it writes the time left, or null
-    Deadline wait_deadline;
-    SceUInt32 *wait_time_left = nullptr;
-    // The waitable a callback notify departs the registered wait through, null for a wait it ends by
-    // itself. Never the last reference, since the waiting call holds one too.
-    std::shared_ptr<Waitable> wait_endpoint;
     // A sceKernelSendSignal is pending for this thread.
     bool signal_pending = false;
     // The vblank the thread's last display wait ended on
