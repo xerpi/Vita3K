@@ -24,6 +24,7 @@
 #include <renderer/state.h>
 
 #include <chrono>
+#include <optional>
 #include <motion/functions.h>
 #include <touch/functions.h>
 
@@ -34,6 +35,24 @@ static constexpr int64_t TARGET_MICRO_PER_FRAME = 1000000LL / TARGET_FPS;
 // how many cycles do we need to see before we start predicting the next frame
 static constexpr int predict_threshold = 3;
 static constexpr int max_expected_swapchain_size = 6;
+
+// Notifies every vblank callback, each taken under the display lock and notified without it, since
+// a notify may end a wait under the waited object's lock
+static void notify_vblank_callbacks(DisplayState &display) {
+    std::optional<SceUID> last;
+    while (true) {
+        CallbackPtr cb;
+        {
+            const std::lock_guard<std::mutex> guard(display.mutex);
+            const auto it = last ? display.vblank_callbacks.upper_bound(*last) : display.vblank_callbacks.begin();
+            if (it == display.vblank_callbacks.end())
+                return;
+            last = it->first;
+            cb = it->second;
+        }
+        cb->event_notify(cb->get_notifier_id());
+    }
+}
 
 static void vblank_sync_thread(EmuEnvState &emuenv) {
     DisplayState &display = emuenv.display;
@@ -58,11 +77,11 @@ static void vblank_sync_thread(EmuEnvState &emuenv) {
             // maybe we should also use a mutex for this part, but it shouldn't be an issue
             touch_vsync_update(emuenv);
             refresh_motion(emuenv.motion, emuenv.ctrl);
-
-            // Notify Vblank callback in each VBLANK start
-            for (auto &[_, cb] : display.vblank_callbacks)
-                cb->event_notify(cb->get_notifier_id());
-
+        }
+        // The vblank's callback notifies come before the waits it ends
+        notify_vblank_callbacks(display);
+        {
+            const std::lock_guard<std::mutex> guard(display.mutex);
             // The waits whose vblank came end here, unless a callback notify ended them first
             display.vblank_waiters.remove_if([&](auto &waiter) {
                 if (waiter.entry.target_vcount > display.vblank_count)

@@ -209,11 +209,9 @@ EXPORT(SceInt32, sceDisplayRegisterVblankStartCallback, SceUID uid) {
 
 EXPORT(SceInt32, sceDisplayUnregisterVblankStartCallback, SceUID uid) {
     TRACY_FUNC(sceDisplayUnregisterVblankStartCallback, uid);
-    if (!emuenv.display.vblank_callbacks.contains(uid))
+    const std::lock_guard<std::mutex> guard(emuenv.display.mutex);
+    if (!emuenv.display.vblank_callbacks.erase(uid))
         return RET_ERROR(SCE_DISPLAY_ERROR_INVALID_VALUE);
-
-    std::lock_guard<std::mutex> guard(emuenv.display.mutex);
-    emuenv.display.vblank_callbacks.erase(uid);
 
     return 0;
 }
