@@ -767,6 +767,13 @@ SceInt32 Mutex::check_count(SceInt32 count) const {
 }
 
 void Mutex::on_delete(SceUID) {
+    // The waits of its conditions end first, then its own, as the firmware's delete does. The
+    // conditions share the mutex's lock, which is held here.
+    for (auto it = conditions.begin(); it != conditions.end();) {
+        Condvar &cond = *it;
+        it = conditions.erase(it);
+        cond.end_for_mutex_delete();
+    }
     waiters.end_all(SCE_KERNEL_ERROR_WAIT_DELETE);
     owner = 0;
 }
@@ -884,7 +891,12 @@ SceInt32 Mutex::release(MemState &mem, const ThreadStatePtr &thread, SceInt32 un
     // Deleted meanwhile, which a lightweight mutex reports as not owned
     if (!guard)
         return lightweight() ? SCE_KERNEL_ERROR_LW_MUTEX_NOT_OWNED : SCE_KERNEL_ERROR_UNKNOWN_MUTEX_ID;
+    return release_held(mem, thread, unlock_count);
+}
 
+SceInt32 Mutex::release_held(MemState &mem, const ThreadStatePtr &thread, SceInt32 unlock_count) {
+    if (was_deleted())
+        return lightweight() ? SCE_KERNEL_ERROR_LW_MUTEX_NOT_OWNED : SCE_KERNEL_ERROR_UNKNOWN_MUTEX_ID;
     if (const SceInt32 error = check_count(unlock_count))
         return error;
     if (thread->id != owner)
@@ -1302,11 +1314,43 @@ SceInt32 Semaphore::info(SceKernelSemaInfo &info) const {
 Condvar::Condvar(SceUInt32 attr, const char *name, MutexPtr associated_mutex)
     : SyncPrimitive(attr, name)
     , associated_mutex(std::move(associated_mutex))
-    , waiters(attr) {}
+    , waiters(attr) {
+    // A condition's waits and its mutex's state are always used together, and the mutex's delete
+    // ends the condition's waits
+    share_lock_of(*this->associated_mutex);
+}
+
+Condvar::~Condvar() {
+    // One that was never deleted is still in its mutex's conditions
+    const auto guard = lock();
+    if (guard)
+        detach();
+}
+
+SceInt32 Condvar::attach() {
+    const auto guard = lock();
+    // The mutex's lock is this one, so its delete can't run meanwhile
+    if (associated_mutex->was_deleted())
+        return lightweight() ? SCE_KERNEL_ERROR_UNKNOWN_LW_MUTEX_ID : SCE_KERNEL_ERROR_UNKNOWN_MUTEX_ID;
+    associated_mutex->conditions.push_back(*this);
+    return SCE_KERNEL_OK;
+}
+
+void Condvar::detach() {
+    // Not in the list once the mutex's delete took it out
+    associated_mutex->conditions.remove(*this);
+}
+
+void Condvar::end_for_mutex_delete() {
+    mutex_deleted = true;
+    // wait() maps this to the error of the mutex's kind
+    waiters.end_all(SCE_KERNEL_ERROR_WAIT_DELETE_MUTEX);
+}
 
 void Condvar::on_delete(SceUID) {
     // wait() maps this to the condition's own delete error
     waiters.end_all(SCE_KERNEL_ERROR_WAIT_DELETE);
+    detach();
 }
 
 SceInt32 Condvar::wait(MemState &mem, const ThreadStatePtr &thread, SceUInt32 *timeout, bool callbacks) {
@@ -1314,7 +1358,8 @@ SceInt32 Condvar::wait(MemState &mem, const ThreadStatePtr &thread, SceUInt32 *t
     if (!guard)
         return lightweight() ? SCE_KERNEL_ERROR_UNKNOWN_LW_COND_ID : SCE_KERNEL_ERROR_UNKNOWN_COND_ID;
 
-    if (const SceInt32 error = associated_mutex->release(mem, thread, 1))
+    // The mutex's lock is the condition's, held here
+    if (const SceInt32 error = associated_mutex->release_held(mem, thread, 1))
         return error;
 
     // Condition waits have nothing to take, they only wait for a signal
@@ -1324,6 +1369,9 @@ SceInt32 Condvar::wait(MemState &mem, const ThreadStatePtr &thread, SceUInt32 *t
     // Deleted during the wait, or while its callbacks ran
     if (r && *r == SCE_KERNEL_ERROR_WAIT_DELETE)
         return lightweight() ? SCE_KERNEL_ERROR_WAIT_DELETE_LW_COND : SCE_KERNEL_ERROR_WAIT_DELETE_COND;
+    // The mutex was deleted while the wait was queued, so it ends without a relock
+    if (r && *r == SCE_KERNEL_ERROR_WAIT_DELETE_MUTEX)
+        return lightweight() ? SCE_KERNEL_ERROR_WAIT_DELETE_LW_MUTEX : SCE_KERNEL_ERROR_WAIT_DELETE_MUTEX;
     // A timed out wait still takes the mutex back
     const bool timed_out = r && *r == SCE_KERNEL_ERROR_WAIT_TIMEOUT;
     if (!r || (*r != SCE_KERNEL_OK && !timed_out))
@@ -1390,7 +1438,7 @@ SceInt32 HeavyCond::info(SceKernelCondInfo &info) const {
     info.condId = uid;
     strncpy(info.name, name.c_str(), KERNELOBJECT_MAX_NAME_LENGTH + 1);
     info.attr = attr;
-    info.mutexId = associated_mutex->uid;
+    info.mutexId = mutex_deleted ? -1 : associated_mutex->uid;
     info.numWaitThreads = static_cast<SceUInt32>(waiters.size());
     return SCE_KERNEL_OK;
 }

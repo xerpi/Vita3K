@@ -22,6 +22,7 @@
 #include <kernel/thread/wait_queue.h>
 #include <kernel/types.h>
 #include <util/byte_ring_buffer.h>
+#include <util/intrusive_list.h>
 
 #include <array>
 #include <bitset>
@@ -520,6 +521,63 @@ private:
 
 using SemaphorePtr = std::shared_ptr<Semaphore>;
 
+class Mutex;
+using MutexPtr = std::shared_ptr<Mutex>;
+
+class Condvar : public SyncPrimitive {
+public:
+    struct SignalTarget {
+        enum class Type {
+            Any, // signal any one waiting thread
+            Specific, // signal a specific waiting thread (target_thread)
+            All, // signal all waiting threads
+        } type;
+
+        SceUID thread_id; // for Type::One
+
+        explicit SignalTarget(Type type)
+            : type(type)
+            , thread_id(0) {}
+        SignalTarget(Type type, SceUID thread_id)
+            : type(type)
+            , thread_id(thread_id) {}
+    };
+
+    const MutexPtr associated_mutex;
+
+    Condvar(SceUInt32 attr, const char *name, MutexPtr associated_mutex);
+    ~Condvar() override;
+    // Links the condition variable into its mutex's conditions, which the mutex's delete reaches,
+    // or returns the unknown mutex error if the mutex was deleted. Once, after it is made.
+    SceInt32 attach();
+
+    SceInt32 wait(MemState &mem, const ThreadStatePtr &thread, SceUInt32 *timeout, bool callbacks);
+    SceInt32 signal(SignalTarget target);
+    // Returns how many threads wait on the condition variable, 0 once it was deleted.
+    SceUInt32 num_waiters() const;
+    void end_for_callback(ThreadState &thread, uint64_t generation) override;
+
+protected:
+    // Guarded by the lock, read by the info of a condition variable
+    WaitQueue<std::monostate> waiters;
+    // Whether the mutex was deleted, guarded by the lock
+    bool mutex_deleted = false;
+
+private:
+    friend class Mutex;
+
+    void on_delete(SceUID deleter) override;
+    bool lightweight() const { return get_uid_class() == UidClass::lw_cond; }
+    // Takes the condition variable off its mutex's conditions. The lock must be held.
+    void detach();
+    // Ends the waits queued on the condition variable for the delete of its mutex, which its info
+    // then doesn't report. Called by the mutex's delete, with the lock held.
+    void end_for_mutex_delete();
+
+    // Its place in its mutex's conditions, guarded by the lock
+    IntrusiveLink<Condvar> mutex_link;
+};
+
 class Mutex : public SyncPrimitive {
 public:
     const SceInt32 init_count;
@@ -551,10 +609,17 @@ protected:
     // The UID of the thread that holds it, or 0. A UID and not the thread, since a lightweight mutex
     // stays locked by an owner that ended and was deleted.
     SceUID owner;
+    // The conditions on the mutex, linked through them. They share the mutex's lock, which guards
+    // the list.
+    IntrusiveList<Condvar, &Condvar::mutex_link> conditions;
 
 private:
+    friend class Condvar;
+
     void on_delete(SceUID deleter) override;
     bool lightweight() const { return get_uid_class() == UidClass::lw_mutex; }
+    // Unlocks like release(), with the lock already held, as a condition that shares it does
+    SceInt32 release_held(MemState &mem, const ThreadStatePtr &thread, SceInt32 unlock_count);
     // Returns ILLEGAL_COUNT for a lock or unlock count the mutex can't take, or SCE_KERNEL_OK
     SceInt32 check_count(SceInt32 count) const;
     // Takes the mutex if it is free or owned by thread, or returns why it can't. The lock must be held.
@@ -584,8 +649,6 @@ public:
     // Fills info with what the mutex's info reports, or returns UNKNOWN_MUTEX_ID if it was deleted.
     SceInt32 info(SceKernelMutexInfo &info) const;
 };
-
-using MutexPtr = std::shared_ptr<Mutex>;
 
 class RWLock final : public WithUidClass<SyncPrimitive, UidClass::rw_lock> {
 public:
@@ -696,44 +759,6 @@ private:
 };
 
 using EventFlagPtr = std::shared_ptr<EventFlag>;
-
-class Condvar : public SyncPrimitive {
-public:
-    struct SignalTarget {
-        enum class Type {
-            Any, // signal any one waiting thread
-            Specific, // signal a specific waiting thread (target_thread)
-            All, // signal all waiting threads
-        } type;
-
-        SceUID thread_id; // for Type::One
-
-        explicit SignalTarget(Type type)
-            : type(type)
-            , thread_id(0) {}
-        SignalTarget(Type type, SceUID thread_id)
-            : type(type)
-            , thread_id(thread_id) {}
-    };
-
-    const MutexPtr associated_mutex;
-
-    Condvar(SceUInt32 attr, const char *name, MutexPtr associated_mutex);
-
-    SceInt32 wait(MemState &mem, const ThreadStatePtr &thread, SceUInt32 *timeout, bool callbacks);
-    SceInt32 signal(SignalTarget target);
-    // Returns how many threads wait on the condition variable, 0 once it was deleted.
-    SceUInt32 num_waiters() const;
-    void end_for_callback(ThreadState &thread, uint64_t generation) override;
-
-protected:
-    // Guarded by the lock, read by the info of a condition variable
-    WaitQueue<std::monostate> waiters;
-
-private:
-    void on_delete(SceUID deleter) override;
-    bool lightweight() const { return get_uid_class() == UidClass::lw_cond; }
-};
 
 class LwCond final : public WithUidClass<Condvar, UidClass::lw_cond> {
 public:

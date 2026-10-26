@@ -45,6 +45,10 @@ enum class UidClass : SceUInt32 {
 // A kernel object that guest code refers to by UID.
 class KernelObject {
 public:
+    KernelObject() = default;
+    // Not copyable, since the lock it uses may be its own
+    KernelObject(const KernelObject &) = delete;
+    KernelObject &operator=(const KernelObject &) = delete;
     virtual ~KernelObject() = default;
     // Returns the class reported by sceKernelGetThreadmgrUIDClass.
     virtual UidClass get_uid_class() const = 0;
@@ -55,7 +59,7 @@ protected:
     // Locks the object, which guards its fields. The lock is empty if the object was deleted. Only
     // the object's own methods take it.
     [[nodiscard]] std::unique_lock<std::mutex> lock() const {
-        std::unique_lock<std::mutex> guard(mutex);
+        std::unique_lock<std::mutex> guard(*mutex);
         if (deleted)
             guard.unlock();
         return guard;
@@ -67,18 +71,24 @@ protected:
     // Whether the object was deleted. With the lock held.
     bool was_deleted() const { return deleted; }
 
+    // Makes the object use other's lock as its own, so one lock guards the state of both. other must
+    // outlive the object. Only in the object's constructor.
+    void share_lock_of(const KernelObject &other) { mutex = other.mutex; }
+
 private:
     friend class KernelObjects;
 
     // Marks the object deleted by the thread deleter and runs on_delete().
     void mark_deleted(SceUID deleter) {
-        const std::lock_guard<std::mutex> guard(mutex);
+        const std::lock_guard<std::mutex> guard(*mutex);
         assert(!deleted);
         deleted = true;
         on_delete(deleter);
     }
 
-    mutable std::mutex mutex;
+    mutable std::mutex own_mutex;
+    // The lock the object takes, its own unless it shares another object's
+    std::mutex *mutex = &own_mutex;
     bool deleted = false;
 };
 
@@ -148,7 +158,7 @@ public:
         for (const auto &[_, obj] : objects) {
             if (obj->get_uid_class() != T::uid_class)
                 continue;
-            const std::lock_guard<std::mutex> obj_lock(obj->mutex);
+            const std::lock_guard<std::mutex> obj_lock(*obj->mutex);
             if (pick(static_cast<const T &>(*obj)))
                 return std::static_pointer_cast<T>(obj);
         }
