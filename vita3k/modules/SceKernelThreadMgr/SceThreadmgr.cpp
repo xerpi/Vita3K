@@ -1188,12 +1188,16 @@ EXPORT(int, _sceKernelWaitSignalCB, uint32_t unknown, uint32_t delay, SceUInt32 
     return wait_signal(emuenv.kernel.get_thread(thread_id), timeout, true);
 }
 
-// Waits for target to end, writing the time left back to timeout
+// Waits for target to end, writing its exit status to stat and the time left back to timeout
 static int wait_thread_end(const ThreadStatePtr &waiter, const ThreadStatePtr &target, int *stat, SceUInt *timeout, bool callbacks) {
-    // The wait writes to a local copy that goes to the guest when it returns, so callbacks that run
-    // during the wait still see the old value
+    // The wait writes to local copies that go to the guest when it returns, the status only if it
+    // succeeded, so callbacks that run during the wait and other threads still see the old values
+    SceInt32 status = 0;
     SceUInt32 time_left = timeout ? *timeout : 0;
-    const WaitResult r = target->wait_for_thread_end(waiter, stat, timeout ? &time_left : nullptr, callbacks);
+    const WaitResult r = target->wait_for_thread_end(waiter, stat ? &status : nullptr, timeout ? &time_left : nullptr, callbacks);
+    // The status goes first, so a timeout at the same address ends up with the time left
+    if (stat && r && *r == SCE_KERNEL_OK)
+        *stat = status;
     if (timeout)
         *timeout = time_left;
     return guest_result(r);
