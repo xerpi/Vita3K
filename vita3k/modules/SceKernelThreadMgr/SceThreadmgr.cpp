@@ -1190,9 +1190,12 @@ EXPORT(int, _sceKernelWaitSignalCB, uint32_t unknown, uint32_t delay, SceUInt32 
 
 // Waits for target to end, writing the time left back to timeout
 static int wait_thread_end(const ThreadStatePtr &waiter, const ThreadStatePtr &target, int *stat, SceUInt *timeout, bool callbacks) {
-    const Deadline deadline = deadline_from(timeout);
-    const WaitResult r = target->wait_for_thread_end(waiter, stat, deadline, callbacks);
-    writeback_timeout(timeout, deadline);
+    // The wait writes to a local copy that goes to the guest when it returns, so callbacks that run
+    // during the wait still see the old value
+    SceUInt32 time_left = timeout ? *timeout : 0;
+    const WaitResult r = target->wait_for_thread_end(waiter, stat, timeout ? &time_left : nullptr, callbacks);
+    if (timeout)
+        *timeout = time_left;
     return guest_result(r);
 }
 

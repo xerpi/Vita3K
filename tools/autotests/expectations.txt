@@ -74,7 +74,7 @@ cb_wait_callback_writes_timeout pass
 cb_wait_callback_writes_timeout_more fail     # the thread end wait with callbacks reads the timeout a callback wrote
 cb_wait_check_order             pass
 cb_wait_check_order_more        fail     # a message pipe call refused for its size doesn't run pending callbacks
-cb_wait_deadline_during_callback fail     # the thread end wait with callbacks writes the time left when it returns, not when a notify ended its sleep
+cb_wait_deadline_during_callback pass
 cb_wait_early_notify_timeout    pass
 cb_wait_early_notify_timeout_more pass
 cb_wait_initial_callback_deadline pass
@@ -85,7 +85,7 @@ cb_wait_take_final_check_more   pass
 cb_wait_timeout_copy            pass
 cb_wait_timeout_copy_more       pass
 cb_wait_zero_timeout_notify     pass
-cb_wait_zero_timeout_notify_more fail     # the thread end wait with callbacks and a timeout of 0 returns 0 after a pending callback
+cb_wait_zero_timeout_notify_more pass
 cb_waits                        pass
 ceiling_base_change             fail     # a mutex ceiling doesn't raise its owner's priority
 ceiling_cancel_drops_boost      fail     # a ceiling mutex doesn't raise its owner's priority
@@ -152,7 +152,7 @@ display                         crash    # display size, framebuffer pitch check
 display_framebuf_blocks         fail     # no framebuffer base alignment check
 display_framebuf_free           skip     # whether the renderer crashes on a freed framebuffer depends on timing
 display_framebuf_set_freed      skip     # a framebuffer where a block was freed is taken, whether the renderer crashes on it depends on timing
-end_wait_claim_races            fail     # a woken thread runs at once, and an end waiter out for its callback gets the first run's status
+end_wait_claim_races            fail     # a woken thread runs at once, so it has ended when the main thread reads its status
 end_wait_cycle                  pass
 end_wait_during_end_handler     fail     # end waiters are woken before the END handler runs
 end_wait_error_order            fail     # a thread end wait on UID 0 gives UNKNOWN_THREAD_ID, not ILLEGAL_THREAD_ID
@@ -580,7 +580,7 @@ thread_event_handler_register_before_run pass
 thread_event_handler_stack      fail     # event handler sp is 0x28 below the stack top and 16 aligned, the Vita's is 0x30
 thread_event_handler_unregister_in_entry fail     # an unregister from the thread's own entry doesn't stop its END run
 thread_event_handler_vfp        pass
-thread_exit_status              fail     # an end wait for an ended thread writes back part of its timeout
+thread_exit_status              pass
 thread_for_vm_errors            pass
 thread_fpscr                    pass
 thread_id_registers             pass

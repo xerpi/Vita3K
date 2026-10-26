@@ -117,6 +117,8 @@ int ThreadState::start(SceSize arglen, const Ptr<void> argp, bool run_entry_call
 }
 
 int ThreadState::start_at(Address entry, SceSize arglen, const Ptr<void> argp, bool run_entry_callback) {
+    // The end waiters see whether the thread ended under their queue's lock
+    const std::lock_guard<std::mutex> end_lock(end_waiters_mutex);
     std::unique_lock<std::mutex> thread_lock(mutex);
     if (status != ThreadStatus::dormant)
         return SCE_KERNEL_ERROR_NOT_DORMANT;
@@ -263,7 +265,7 @@ void ThreadState::run_loop(bool top_level) {
                     run_thread_end_callback();
                 release_locks();
                 delete_callbacks();
-                update_status(ending == Ending::exit ? ThreadStatus::dormant : ThreadStatus::deleted);
+                end_for_waiters(lock);
             }
             if (ending != Ending::exit)
                 break;
@@ -446,15 +448,30 @@ void ThreadState::update_status(ThreadStatus status, std::optional<ThreadStatus>
 
     this->status = status;
     status_cond.notify_all();
+}
 
-    if (status == ThreadStatus::dormant || status == ThreadStatus::deleted) {
-        const std::lock_guard<std::mutex> end_lock(end_waiters_mutex);
-        end_waiters.wake_if([&](auto &waiter) {
-            if (waiter.entry.exit_status)
-                *waiter.entry.exit_status = static_cast<SceInt32>(returned_value);
-            return true;
-        });
+void ThreadState::end_for_waiters(std::unique_lock<std::mutex> &lock) {
+    lock.unlock();
+    const std::lock_guard<std::mutex> end_lock(end_waiters_mutex);
+    lock.lock();
+    update_status(ending == Ending::exit ? ThreadStatus::dormant : ThreadStatus::deleted);
+    const SceInt32 exit_status = static_cast<SceInt32>(returned_value);
+    // A claim takes the waiter's lock, which no thread's lock may be held for
+    lock.unlock();
+    // In queue order, each with the status before the claim that wakes it
+    while (auto *const waiter = end_waiters.front()) {
+        if (waiter->entry.exit_status)
+            *waiter->entry.exit_status = exit_status;
+        end_waiters.end(*waiter);
     }
+    lock.lock();
+}
+
+std::optional<SceInt32> ThreadState::ended_status() {
+    const std::lock_guard<std::mutex> lock(mutex);
+    if (status != ThreadStatus::dormant && status != ThreadStatus::deleted)
+        return std::nullopt;
+    return static_cast<SceInt32>(returned_value);
 }
 
 WaitResult ThreadState::delay_until(Deadline deadline, bool callbacks) {
@@ -569,16 +586,56 @@ uint64_t ThreadState::next_display_wait(uint64_t next_vblank, int vcount) {
     return last_vblank_waited;
 }
 
-WaitResult ThreadState::wait_for_thread_end(const ThreadStatePtr &waiter, SceInt32 *exit_status, Deadline deadline, bool callbacks) {
-    std::unique_lock<std::mutex> lock(mutex);
-    if (status == ThreadStatus::dormant || status == ThreadStatus::deleted) {
-        if (exit_status)
-            *exit_status = static_cast<SceInt32>(returned_value);
-        return SCE_KERNEL_OK;
+WaitResult ThreadState::wait_for_thread_end(const ThreadStatePtr &waiter, SceInt32 *exit_status, SceUInt32 *timeout, bool callbacks) {
+    // One queue entry for the whole call
+    WaitQueue<EndWaitEntry>::Waiter queued{ .thread = waiter, .entry = { exit_status } };
+    const WaitTarget target{ SCE_KERNEL_WAITTYPE_WAITTHEND, id, callbacks };
+    const Deadline deadline = deadline_from(timeout);
+    while (true) {
+        std::unique_lock<std::mutex> end_lock(end_waiters_mutex);
+        if (const std::optional<SceInt32> status = ended_status()) {
+            if (exit_status)
+                *exit_status = *status;
+            return SCE_KERNEL_OK;
+        }
+        const std::expected<uint64_t, SceInt32> registered = waiter->register_wait(target, deadline, timeout);
+        if (registered) {
+            queued.generation = *registered;
+            end_waiters.push(queued);
+            // Each look reads the registration under the queue's lock, so the waiter's own claim of
+            // its timeout or its end takes it off the queue in the same step
+            WaitResult state = waiter->check_wait();
+            while (state && *state != SCE_KERNEL_OK && std::chrono::steady_clock::now() < deadline) {
+                end_lock.unlock();
+                (void)waiter->park(deadline);
+                end_lock.lock();
+                state = waiter->check_wait();
+            }
+            if ((!state || *state == SCE_KERNEL_ERROR_WAIT_TIMEOUT) && waiter->end_wait(queued.generation, state))
+                end_waiters.remove(queued);
+            const WaitEnd end = waiter->unregister_wait(queued.generation);
+            if (!end.result || *end.result != SCE_KERNEL_ERROR_NOTIFY_CALLBACK)
+                return end.result;
+        } else if (registered.error() != SCE_KERNEL_ERROR_NOTIFY_CALLBACK) {
+            if (timeout)
+                *timeout = 0;
+            return registered.error();
+        }
+        // The callbacks run with no lock held, before the wait looks at the thread again
+        end_lock.unlock();
+        if (const WaitResult ran = waiter->run_callbacks(); !ran)
+            return ran;
     }
-    std::unique_lock<std::mutex> end_lock(end_waiters_mutex);
-    lock.unlock();
-    return end_waiters.wait(end_lock, waiter, { SCE_KERNEL_WAITTYPE_WAITTHEND, id, callbacks }, { exit_status }, deadline);
+}
+
+void ThreadState::depart_end_waiter(ThreadState &waiter, uint64_t generation) {
+    const std::lock_guard<std::mutex> end_lock(end_waiters_mutex);
+    end_waiters.remove_if([&](auto &queued) {
+        if (queued.thread.get() != &waiter || queued.generation != generation)
+            return false;
+        end_waiters.claim(queued, SCE_KERNEL_ERROR_NOTIFY_CALLBACK);
+        return true;
+    });
 }
 
 WaitResult ThreadState::wait(WaitTarget target, Deadline deadline) {
@@ -796,11 +853,17 @@ std::optional<ThreadState::CallbackDeparture> ThreadState::notify_callback(bool 
         return std::nullopt;
     }
     // A registered single wait ends only by a claim, which takes the waited object's lock first
-    return CallbackDeparture{ wait_target.id, wait_generation };
+    return CallbackDeparture{ wait_target.type, wait_target.id, wait_generation };
 }
 
 void ThreadState::end_wait_for_callback(const CallbackDeparture &departure) {
-    // Looked up again, since the wait may have ended and the object gone since the notify found it
+    // Looked up again, since the wait may have ended and the object gone since the notify found it.
+    // An end wait waits on a thread, which isn't a kernel object.
+    if (departure.type == SCE_KERNEL_WAITTYPE_WAITTHEND) {
+        if (const ThreadStatePtr target = kernel.get_thread(departure.object))
+            target->depart_end_waiter(*this, departure.generation);
+        return;
+    }
     if (const auto object = std::dynamic_pointer_cast<SyncPrimitive>(kernel.objects.find(departure.object)))
         object->end_for_callback(*this, departure.generation);
 }

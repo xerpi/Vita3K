@@ -59,13 +59,6 @@ inline SceUInt32 time_left_until(Deadline deadline) {
     return time_left_until(deadline, std::chrono::steady_clock::now());
 }
 
-// Writes the time left before the deadline back to a guest timeout.
-inline void writeback_timeout(SceUInt32 *timeout, Deadline deadline) {
-    if (!timeout || deadline == Deadline::max())
-        return;
-    *timeout = time_left_until(deadline);
-}
-
 // Turns a wait result into the value returned to the guest.
 // ThreadExiting becomes SCE_KERNEL_OK, which the guest never sees: after the HLE call returns,
 // run_loop sees the exit or delete request and stops the thread before the next guest instruction.
