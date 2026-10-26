@@ -21,6 +21,7 @@
 #include <kernel/callback.h>
 #include <kernel/thread/wait_queue.h>
 #include <kernel/types.h>
+#include <kernel/waitable.h>
 #include <mem/block.h>
 #include <mem/ptr.h>
 
@@ -28,6 +29,7 @@
 #include <condition_variable>
 #include <expected>
 #include <list>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -54,6 +56,38 @@ constexpr SceUInt32 THREAD_ATTR_UNKNOWN_2000 = 0x00002000U;
 // The FPSCR a thread starts with: round to nearest, flush-to-zero and default NaN
 constexpr uint32_t INITIAL_FPSCR = 0x03000000U;
 
+// The end of a thread, which its end waits wait for. It lives in the thread, whose UID and lifetime
+// it shares, and its lock comes before the thread's.
+class ThreadEnd final : public Waitable {
+public:
+    explicit ThreadEnd(ThreadState &thread);
+
+    // Blocks waiter until the thread ends or the timeout passes, writing the exit status to
+    // exit_status and the time left back to timeout.
+    [[nodiscard]] WaitResult wait(const ThreadStatePtr &waiter, SceInt32 *exit_status, SceUInt32 *timeout, bool callbacks);
+    // The endpoint of an end wait, which keeps the thread alive
+    std::shared_ptr<Waitable> endpoint();
+    // A thread's end is never deleted
+    bool was_deleted() const { return false; }
+
+private:
+    friend struct ThreadState;
+
+    struct WaitEntry {
+        // Where to write the exit status, or null
+        SceInt32 *exit_status;
+    };
+
+    bool depart_locked(ThreadState &waiter, uint64_t generation, Departure reason) override;
+
+    ThreadState &thread;
+    // Guards the queue, and whether the thread ended for its waiters. It comes before the thread's
+    // lock and each waiter's, and the thread's start and end take it too, so whether the thread
+    // ended doesn't change while a waiter holds it.
+    std::mutex mutex;
+    WaitQueue<WaitEntry> waiters;
+};
+
 // Values are what sceKernelGetThreadInfo reports
 enum class ThreadStatus : SceUInt32 {
     running = SCE_KERNEL_THREAD_STATUS_RUNNING,
@@ -63,7 +97,7 @@ enum class ThreadStatus : SceUInt32 {
     suspended = SCE_KERNEL_THREAD_STATUS_SUSPENDED, // Suspended by debugger
 };
 
-struct ThreadState {
+struct ThreadState : std::enable_shared_from_this<ThreadState> {
     // Fixed when the thread is created
     const SceUID id;
     const std::string name;
@@ -142,9 +176,6 @@ struct ThreadState {
     // Blocks waiter until this thread ends or the timeout passes, writing the exit status to
     // exit_status and the time left back to timeout.
     [[nodiscard]] WaitResult wait_for_thread_end(const ThreadStatePtr &waiter, SceInt32 *exit_status, SceUInt32 *timeout, bool callbacks);
-    // Ends waiter's end wait of generation for a callback notify and takes it off the end queue, if
-    // it still waits. Takes end_waiters_mutex.
-    void depart_end_waiter(ThreadState &waiter, uint64_t generation);
     // Runs the notified callbacks for a wait that ended with NOTIFY_CALLBACK, with no lock held.
     // Returns ThreadExiting if the thread exits or is deleted meanwhile.
     [[nodiscard]] WaitResult run_callbacks();
@@ -155,8 +186,9 @@ struct ThreadState {
     // Registers a wait on target, with the object's lock held. Returns its generation, or the result
     // that ends it without queuing: WAIT_TIMEOUT once the deadline passed, else NOTIFY_CALLBACK with
     // a callback pending. The claim that ends the registration writes the time left until deadline
-    // to time_left, if it isn't null.
-    [[nodiscard]] std::expected<uint64_t, SceInt32> register_wait(WaitTarget target, Deadline deadline, SceUInt32 *time_left);
+    // to time_left, if it isn't null. A callback notify departs the wait through endpoint, the
+    // waitable it is queued on, or ends it by itself if there is none.
+    [[nodiscard]] std::expected<uint64_t, SceInt32> register_wait(WaitTarget target, Deadline deadline, SceUInt32 *time_left, std::shared_ptr<Waitable> endpoint);
     // Registers a multiple event wait in its scan and returns its generation. MultiEventWait arms
     // and ends it with the thread's mutex held.
     uint64_t begin_scan();
@@ -195,8 +227,8 @@ struct ThreadState {
     void add_callback(const CallbackPtr &cb);
     // A registered wait that a callback notify ends
     struct CallbackDeparture {
-        SceUInt32 type;
-        SceUID object;
+        // Keeps the waitable alive until the departure is done
+        std::shared_ptr<Waitable> endpoint;
         uint64_t generation;
     };
     // Counts a notification of a callback of this thread. The first one since the callback last ran
@@ -269,13 +301,10 @@ private:
         syscall,
     };
 
-    struct EndWaitEntry {
-        // Where to write the exit status, or null
-        SceInt32 *exit_status;
-    };
-
     // Arms and ends the multiple event waits with mutex held
     friend class MultiEventWait;
+    // Reads whether the thread ended
+    friend class ThreadEnd;
 
     // The private methods are called with mutex held, unless they say otherwise
     // Whether the registration of generation still takes results
@@ -283,8 +312,9 @@ private:
     // Shows the registration waiting on target
     void arm(WaitTarget target);
     // Arms a registration on target and returns its generation. The claim that ends it writes the
-    // time left until deadline to time_left, if it isn't null.
-    uint64_t begin_registration(WaitTarget target, Deadline deadline, SceUInt32 *time_left);
+    // time left until deadline to time_left, if it isn't null, and a callback notify departs it
+    // through endpoint, if there is one.
+    uint64_t begin_registration(WaitTarget target, Deadline deadline, SceUInt32 *time_left, std::shared_ptr<Waitable> endpoint);
     // Takes a pending signal, else registers a signal wait like register_wait(), but also with a
     // callback pending. Returns the generation, or the result that ends the wait without queuing:
     // SCE_KERNEL_OK for the signal taken, or WAIT_TIMEOUT. Takes mutex.
@@ -306,12 +336,11 @@ private:
     // Set the priority or the affinity mask and the TLS slot that shows it
     void set_priority(int new_priority);
     void set_affinity_mask(SceInt32 new_affinity_mask);
-    // Starts a dormant thread at entry, like start() does at its entry point. Takes
-    // end_waiters_mutex, then mutex.
+    // Starts a dormant thread at entry, like start() does at its entry point. Takes end's lock, then
+    // mutex.
     int start_at(Address entry, SceSize arglen, Ptr<void> argp, bool run_entry_callback);
     // Shows the thread ended, DORMANT after an exit and else DELETED, and ends its end waiters with
-    // its exit status. With mutex held through lock, which it lets go of to take end_waiters_mutex
-    // first.
+    // its exit status. With mutex held through lock, which it lets go of to take end's lock first.
     void end_for_waiters(std::unique_lock<std::mutex> &lock);
     // The exit status of the thread once it ended, for its end waits. Takes mutex.
     std::optional<SceInt32> ended_status();
@@ -383,6 +412,9 @@ private:
     // The registered wait's deadline, and where the claim that ends it writes the time left, or null
     Deadline wait_deadline;
     SceUInt32 *wait_time_left = nullptr;
+    // The waitable a callback notify departs the registered wait through, null for a wait it ends by
+    // itself. Never the last reference, since the waiting call holds one too.
+    std::shared_ptr<Waitable> wait_endpoint;
     // A sceKernelSendSignal is pending for this thread.
     bool signal_pending = false;
     // The vblank the thread's last display wait ended on
@@ -406,11 +438,8 @@ private:
     // Where the thread stopped the last time something held it
     StopPoint stop_point = StopPoint::guest_code;
 
-    // Threads blocked in sceKernelWaitThreadEnd on this one, with their own lock. It comes before
-    // mutex and before each waiter's, and the start and the end of the thread hold it too, so
-    // whether the thread ended doesn't change while a waiter holds it.
-    std::mutex end_waiters_mutex;
-    WaitQueue<EndWaitEntry> end_waiters;
+    // The threads blocked in sceKernelWaitThreadEnd on this one
+    ThreadEnd end{ *this };
 };
 
 using ThreadStatePtr = std::shared_ptr<ThreadState>;

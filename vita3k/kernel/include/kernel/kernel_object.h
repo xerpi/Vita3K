@@ -46,6 +46,10 @@ enum class UidClass : SceUInt32 {
 class KernelObject {
 public:
     KernelObject() = default;
+    // An object whose lock is share_lock_with's, so one lock guards the state of both, or its own if
+    // that is null. share_lock_with must outlive it.
+    explicit KernelObject(const KernelObject *share_lock_with)
+        : mutex(share_lock_with ? share_lock_with->mutex : &own_mutex) {}
     // Not copyable, since the lock it uses may be its own
     KernelObject(const KernelObject &) = delete;
     KernelObject &operator=(const KernelObject &) = delete;
@@ -54,6 +58,9 @@ public:
     virtual UidClass get_uid_class() const = 0;
 
     SceUID uid{};
+
+    // Whether the object was deleted. With the lock held.
+    bool was_deleted() const { return deleted; }
 
 protected:
     // Locks the object, which guards its fields. The lock is empty if the object was deleted. Only
@@ -68,12 +75,8 @@ protected:
     // Ends what the object is doing when the thread deleter deletes it. Runs once, with the lock held.
     virtual void on_delete(SceUID deleter) {}
 
-    // Whether the object was deleted. With the lock held.
-    bool was_deleted() const { return deleted; }
-
-    // Makes the object use other's lock as its own, so one lock guards the state of both. other must
-    // outlive the object. Only in the object's constructor.
-    void share_lock_of(const KernelObject &other) { mutex = other.mutex; }
+    // The lock the object takes, its own or the one it shares
+    std::mutex &lock_mutex() const { return *mutex; }
 
 private:
     friend class KernelObjects;

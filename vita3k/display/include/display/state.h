@@ -19,6 +19,7 @@
 
 #include <kernel/callback.h>
 #include <kernel/thread/wait_queue.h>
+#include <kernel/waitable.h>
 #include <mem/ptr.h>
 #include <util/types.h>
 
@@ -34,6 +35,23 @@ enum SceDisplayPixelFormat {
 
 struct VBlankWaitEntry {
     uint64_t target_vcount;
+};
+
+// The threads waiting for a vblank, a waitable in the display with the display's lock as its own
+class VBlankWaits final : public Waitable {
+public:
+    explicit VBlankWaits(std::mutex &lock)
+        : Waitable(lock) {}
+
+    // A vblank wait has no endpoint, so a callback notify ends it by itself
+    std::shared_ptr<Waitable> endpoint() { return nullptr; }
+    bool was_deleted() const { return false; }
+
+    // Guarded by the display's lock
+    WaitQueue<VBlankWaitEntry> waiters;
+
+private:
+    bool depart_locked(ThreadState &thread, uint64_t generation, Departure reason) override;
 };
 
 struct DisplayFrameInfo {
@@ -69,7 +87,7 @@ struct DisplayState {
     std::atomic<bool> imgui_render{ true };
     std::atomic<bool> fullscreen{ false };
     std::atomic<std::uint64_t> vblank_count{ 0 };
-    WaitQueue<VBlankWaitEntry> vblank_waiters;
+    VBlankWaits vblank_waits{ mutex };
     std::atomic<uint64_t> last_setframe_vblank_count = 0;
     std::map<SceUID, CallbackPtr> vblank_callbacks{};
 

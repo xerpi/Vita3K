@@ -94,7 +94,7 @@ static void vblank_sync_thread(EmuEnvState &emuenv) {
         {
             const std::lock_guard<std::mutex> guard(display.mutex);
             // The waits whose vblank came end here, unless a callback notify ended them first
-            display.vblank_waiters.remove_if([&](auto &waiter) {
+            display.vblank_waits.waiters.remove_if([&](auto &waiter) {
                 if (waiter.entry.target_vcount > display.vblank_count)
                     return false;
                 waiter.thread->end_wait(waiter.generation, SCE_KERNEL_OK);
@@ -111,51 +111,41 @@ void start_sync_thread(EmuEnvState &emuenv) {
     emuenv.display.vblank_thread = std::make_unique<std::thread>(vblank_sync_thread, std::ref(emuenv));
 }
 
-void wait_vblank(DisplayState &display, const ThreadStatePtr &wait_thread, const uint64_t target_vcount, const bool is_cb) {
-    if (!wait_thread) {
-        return;
-    }
+bool VBlankWaits::depart_locked(ThreadState &thread, uint64_t generation, Departure reason) {
+    return depart_queued(waiters, thread, generation, reason);
+}
 
-    // One queue entry for the whole call
-    WaitQueue<VBlankWaitEntry>::Waiter waiter{ .thread = wait_thread, .entry = { target_vcount } };
-    const WaitTarget target{ .type = SCE_KERNEL_WAITTYPE_EVENT, .callbacks = is_cb };
-    while (true) {
-        std::unique_lock<std::mutex> lock(display.mutex);
-        if (target_vcount <= display.vblank_count)
-            return;
-        // With no deadline only a pending callback keeps the wait from registering
-        if (const std::expected<uint64_t, SceInt32> registered = wait_thread->register_wait(target, Deadline::max(), nullptr)) {
-            waiter.generation = *registered;
-            display.vblank_waiters.push(waiter);
-            // The vblank thread and a callback notify end the wait, and the thread's end ends it here
-            WaitResult state = wait_thread->check_wait();
-            while (state && *state != SCE_KERNEL_OK) {
-                lock.unlock();
-                (void)wait_thread->park(Deadline::max());
-                lock.lock();
-                state = wait_thread->check_wait();
-            }
-            if (!state)
-                wait_thread->end_wait(waiter.generation, state);
-            // A notify ends the wait without the queue's lock, so the waiter may still be queued
-            display.vblank_waiters.remove(waiter);
-            const ThreadState::WaitEnd end = wait_thread->unregister_wait(waiter.generation);
-            // Nothing runs after the wait, so a thread exiting during it needs no handling here
-            if (!end.result)
-                return;
-            if (*end.result != SCE_KERNEL_ERROR_NOTIFY_CALLBACK) {
-                // The callbacks notified after the vblank ended the wait run before it returns
-                lock.unlock();
-                if (is_cb && wait_thread->has_pending_callbacks())
-                    (void)wait_thread->run_callbacks();
-                return;
-            }
+// Waits on the display for the vblank count target returns, which it calls once, on the first pass,
+// so after the callbacks pending at the call ran
+template <typename Target>
+static void wait_for_vblank(DisplayState &display, const ThreadStatePtr &wait_thread, bool is_cb, Target target) {
+    if (!wait_thread)
+        return;
+
+    std::unique_lock<std::mutex> lock(display.mutex);
+    bool counted = false;
+    // Nothing runs after the wait, so a thread exiting during it needs no handling here
+    std::ignore = wait_loop(display.vblank_waits, display.vblank_waits.waiters, lock, wait_thread, { .type = SCE_KERNEL_WAITTYPE_EVENT, .callbacks = is_cb }, VBlankWaitEntry{ 0 }, nullptr, CallbacksCheck::after_wait, [&](VBlankWaitEntry &entry, SceInt32) -> std::optional<SceInt32> {
+        if (!counted) {
+            entry.target_vcount = target();
+            counted = true;
         }
-        // The callbacks run with no lock held, before the wait looks at the vblank count again
-        lock.unlock();
-        if (const WaitResult ran = wait_thread->run_callbacks(); !ran)
-            return;
-    }
+        if (entry.target_vcount <= display.vblank_count)
+            return SCE_KERNEL_OK;
+        return std::nullopt;
+    });
+}
+
+void wait_vblank(DisplayState &display, const ThreadStatePtr &wait_thread, uint64_t target_vcount, bool is_cb) {
+    wait_for_vblank(display, wait_thread, is_cb, [&] { return target_vcount; });
+}
+
+void wait_display_vblank(DisplayState &display, const ThreadStatePtr &wait_thread, int vcount, bool since_setbuf, bool is_cb) {
+    wait_for_vblank(display, wait_thread, is_cb, [&] {
+        // A wait since the last frame set counts from that frame. Any other counts from the vblank
+        // the thread's last display wait ended on, and waits for one vblank at least.
+        return since_setbuf ? display.last_setframe_vblank_count + vcount : wait_thread->next_display_wait(display.vblank_count + 1, vcount);
+    });
 }
 
 static void reset_swapchain_cycle(DisplayState &display, Address sync_object) {

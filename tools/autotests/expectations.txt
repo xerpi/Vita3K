@@ -30,7 +30,7 @@ callback_deleted_object         pass
 callback_edges                  pass
 callback_entry_state            fail     # a Thumb callback run by a check starts with the wrong r4 to r9 values
 callback_errors                 crash    # callback NULL argument errors, a NULL name
-callback_event_results          fail     # event calls don't take message pipe UIDs
+callback_event_results          fail     # a DONT_WAIT pipe receive ends at once, so its event doesn't come while the waiter runs its callback
 callback_event_waits            pass
 callback_info                   pass
 callback_info_fields            fail     # the notify ID of a callback is -1 and 0 swapped, fresh and inside a run
@@ -327,18 +327,21 @@ msgpipe_async_pending_limit     fail     # message pipe calls with DONT_WAIT FUL
 msgpipe_async_piece_error       fail     # message pipe calls with DONT_WAIT FULL finish at once instead of in the background
 msgpipe_async_wakes_receiver    fail     # message pipe calls with DONT_WAIT FULL finish at once instead of in the background
 msgpipe_async_wrong_uid         fail     # a DONT_WAIT FULL send checks the UID before it returns
+msgpipe_auto_reset_data_exist   pass
 msgpipe_callback_partial        pass
 msgpipe_callback_rejoin_order   pass
+msgpipe_cancel_data_exist       pass
 msgpipe_check_order             fail     # a count 0 vector send to an unknown or deleted pipe gives 0x8002000F, not 0x80028221
 msgpipe_check_order_null        crash    # a send with mode 0x200 and a NULL buffer crashes Vita3K
 msgpipe_create_types            pass
 msgpipe_edges                   pass
 msgpipe_errors                  crash    # closing unknown UIDs, a NULL buffer
+msgpipe_event_before_callbacks  pass
 msgpipe_failed_sizes            pass
 msgpipe_info_event_waiter       fail     # a pipe's info has no waiter attribute bit and doesn't count event waiters
-msgpipe_mixed_queue             fail     # a message pipe in an event waiter's queue gives the wrong waits and error
+msgpipe_mixed_queue             fail     # a pipe's info has no waiter attribute bit and doesn't count event waiters
 msgpipe_modes                   pass
-msgpipe_open_close_bits         fail     # a poll after open then close gives 0x80028201 and loses the send's user data
+msgpipe_open_close_bits         fail     # a pipe's close posts no close event, and an opened UID doesn't keep the pipe alive after the creating UID's delete
 msgpipe_order                   pass
 msgpipe_partial_head_order      pass
 msgpipe_partial_head_rejoin     fail     # no requeue on a priority change
@@ -355,7 +358,7 @@ msgpipe_sender_head_leaves      pass
 msgpipe_sender_jump_ahead       pass
 msgpipe_sender_mix              pass
 msgpipe_sender_requeue          fail     # no requeue on a priority change
-msgpipe_sync_events             fail     # a message pipe isn't an event
+msgpipe_sync_events             pass
 msgpipe_try_empty_vectors       pass
 msgpipe_try_receive_senders     pass
 msgpipe_vector_waiters          pass
@@ -364,7 +367,7 @@ msgpipe_waits                   pass
 msgpipe_wake_state              skip     # threads ignore their core and priority, so whether the woken waiter ran before its status is read is a race
 msgpipe_wake_time_left          pass
 msgpipe_zero_bytes              pass
-msgpipe_zero_pattern_wait       fail     # event calls don't take message pipe UIDs
+msgpipe_zero_pattern_wait       pass
 mspace                          fail     # sceClib memory space info
 multi_events                    pass
 multi_events_and_delete         pass
@@ -373,7 +376,7 @@ multi_events_callback_copies    pass
 multi_events_cancel_after_end   pass
 multi_events_errors             pass
 multi_events_final_check        pass
-multi_events_pipe               fail     # a message pipe isn't an event
+multi_events_pipe               pass
 multi_events_plain_mix          fail     # a multiple event wait claimed by e1 doesn't count e2's waiters after e2 is set
 multi_events_requeue            fail     # no requeue on a priority change
 multi_events_results_past       pass

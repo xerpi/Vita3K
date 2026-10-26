@@ -55,14 +55,12 @@ static void write_info(T *info, T full, SceSize size) {
     memcpy(info, &full, size);
 }
 
-// Finds a simple event or a timer, which are both events.
+// Finds a simple event, a timer or a message pipe, which are all events.
 static EventPtr find_event(EmuEnvState &emuenv, SceUID event_id) {
-    if (SimpleEventPtr event = emuenv.kernel.objects.find<SimpleEvent>(event_id))
-        return event;
-    return emuenv.kernel.objects.find<Timer>(event_id);
+    return find_event(emuenv.kernel.objects, event_id);
 }
 
-// Waits on a simple event or a timer, which are both events.
+// Waits on an event.
 static SceInt32 wait_event(EmuEnvState &emuenv, const char *export_name, SceUID thread_id, SceUID event_id, SceUInt32 bit_pattern, SceUInt32 *result_pattern, SceUInt64 *user_data, SceUInt32 *timeout, bool callbacks) {
     // The wait writes to local copies that go to the guest when it returns, so callbacks that run
     // during the wait still see the old values. Outputs the wait doesn't write are 0.
@@ -74,10 +72,8 @@ static SceInt32 wait_event(EmuEnvState &emuenv, const char *export_name, SceUID 
     SceUInt32 *const timeout_copy = timeout ? &time_left : nullptr;
     const ThreadStatePtr thread = emuenv.kernel.get_thread(thread_id);
     SceInt32 result;
-    if (const SimpleEventPtr event = emuenv.kernel.objects.find<SimpleEvent>(event_id))
+    if (const EventPtr event = find_event(emuenv, event_id))
         result = event->wait(thread, bit_pattern, pattern_copy, data_copy, timeout_copy, callbacks);
-    else if (const TimerPtr timer = emuenv.kernel.objects.find<Timer>(event_id))
-        result = timer->wait(thread, bit_pattern, pattern_copy, data_copy, timeout_copy, callbacks);
     else
         result = RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_EVENT_ID);
     if (result_pattern)
@@ -1673,6 +1669,9 @@ EXPORT(SceUID, sceKernelOpenMsgPipe, const char *pName) {
     if (!found)
         return RET_ERROR(SCE_KERNEL_ERROR_UID_CANNOT_FIND_BY_NAME);
 
+    // A delete that came first wins, as if the name wasn't found
+    if (found->set_system_event(SCE_KERNEL_EVENT_OPEN, system_event_user_data(thread_id)) != SCE_KERNEL_OK)
+        return RET_ERROR(SCE_KERNEL_ERROR_UID_CANNOT_FIND_BY_NAME);
     return found->uid;
 }
 
