@@ -459,6 +459,8 @@ void ThreadState::update_status(ThreadStatus status, std::optional<ThreadStatus>
 
 WaitResult ThreadState::delay_until(Deadline deadline, bool callbacks) {
     const WaitTarget target{ .type = SCE_KERNEL_WAITTYPE_DELAY, .callbacks = callbacks };
+    // Whether a callback notify ended the last sleep
+    bool notified = false;
     while (true) {
         // The callbacks pending at the loop top run first, as before each sleep
         if (callbacks && has_pending_callbacks()) {
@@ -470,7 +472,10 @@ WaitResult ThreadState::delay_until(Deadline deadline, bool callbacks) {
             // Reaching the deadline is the expected outcome of a delay
             if (registered.error() == SCE_KERNEL_ERROR_WAIT_TIMEOUT)
                 return SCE_KERNEL_OK;
-            // A callback is already pending, so the loop top runs it
+            // A callback pending again after the loop top's ends the delay with 0, unless a notify
+            // ended the last sleep, in which case the loop top runs it
+            if (!notified)
+                return SCE_KERNEL_OK;
             continue;
         }
         const uint64_t generation = *registered;
@@ -486,6 +491,7 @@ WaitResult ThreadState::delay_until(Deadline deadline, bool callbacks) {
             return end.result;
         if (*end.result != SCE_KERNEL_ERROR_NOTIFY_CALLBACK)
             return SCE_KERNEL_OK;
+        notified = true;
     }
 }
 

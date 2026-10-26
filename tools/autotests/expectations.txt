@@ -81,7 +81,7 @@ cb_wait_initial_callback_deadline pass
 cb_wait_initial_callback_deadline_more fail     # the signal and thread end waits with callbacks count their timeout from after the callbacks pending at the call
 cb_wait_self_notify_during_sleep fail     # the signal wait with callbacks runs a callback its own callback notified again before it sleeps
 cb_wait_take_final_check        pass
-cb_wait_take_final_check_more   fail     # the delay with callbacks runs a callback its own callback notified, multiple event waits return 0
+cb_wait_take_final_check_more   pass
 cb_wait_timeout_copy            pass
 cb_wait_timeout_copy_more       pass
 cb_wait_zero_timeout_notify     pass
@@ -136,9 +136,9 @@ create_attributes               fail     # the attributes condition variables, l
 create_attrs                    fail     # the attribute bits each create accepts
 cross_core_scheduling           fail     # threads ignore their core and priority
 delay                           pass
-delay_cb_early_return           fail     # a delay with callbacks sleeps to its deadline after a callback pass that no wake ended
+delay_cb_early_return           pass
 delay_cb_one_yields             pass
-delay_cb_self_notify            fail     # the delay with callbacks runs a callback its own callback notified before it returns
+delay_cb_self_notify            fail     # the signal wait with callbacks runs a callback its own callback notified before it returns
 delay_huge_values               pass
 delay_negative                  pass
 delay_precision                 skip     # timing, how long short delays and timeouts take
