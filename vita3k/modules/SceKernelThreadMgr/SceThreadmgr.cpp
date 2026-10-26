@@ -1185,9 +1185,7 @@ EXPORT(int, _sceKernelWaitSignal, uint32_t unknown, uint32_t delay, SceUInt32 *t
 
 EXPORT(int, _sceKernelWaitSignalCB, uint32_t unknown, uint32_t delay, SceUInt32 *timeout) {
     TRACY_FUNC(_sceKernelWaitSignalCB, unknown, delay, timeout);
-    const ThreadStatePtr thread = emuenv.kernel.get_thread(thread_id);
-    thread->process_callbacks();
-    return wait_signal(thread, timeout, true);
+    return wait_signal(emuenv.kernel.get_thread(thread_id), timeout, true);
 }
 
 // Waits for target to end, writing the time left back to timeout

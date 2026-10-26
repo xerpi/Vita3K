@@ -492,21 +492,25 @@ WaitResult ThreadState::delay_until(Deadline deadline, bool callbacks) {
 WaitResult ThreadState::wait_for_signal(SceUInt32 *timeout, bool callbacks) {
     const Deadline deadline = deadline_from(timeout);
     while (true) {
+        // The callbacks pending at the loop top run before the wait looks for a signal, those
+        // pending at the call within the timeout
+        if (callbacks && has_pending_callbacks()) {
+            if (const WaitResult ran = run_callbacks(); !ran)
+                return ran;
+        }
         const std::expected<uint64_t, SceInt32> registered = register_signal_wait(callbacks, deadline, timeout);
-        if (registered) {
-            // A signal wait has no object, so only a send, its own timeout, a callback notify (N1) or
-            // the thread's end ends it, each under the thread lock
-            const WaitEnd end = sleep_registered(*registered, deadline);
-            if (!end.result || *end.result != SCE_KERNEL_ERROR_NOTIFY_CALLBACK)
-                return end.result;
-        } else if (registered.error() != SCE_KERNEL_ERROR_NOTIFY_CALLBACK) {
+        if (!registered) {
+            if (registered.error() == SCE_KERNEL_ERROR_NOTIFY_CALLBACK)
+                continue;
             if (timeout && registered.error() == SCE_KERNEL_ERROR_WAIT_TIMEOUT)
                 *timeout = 0;
             return registered.error();
         }
-        // The callbacks run before the wait looks for a signal again
-        if (const WaitResult ran = run_callbacks(); !ran)
-            return ran;
+        // A signal wait has no object, so only a send, its own timeout, a callback notify (N1) or
+        // the thread's end ends it, each under the thread lock
+        const WaitEnd end = sleep_registered(*registered, deadline);
+        if (!end.result || *end.result != SCE_KERNEL_ERROR_NOTIFY_CALLBACK)
+            return end.result;
     }
 }
 
