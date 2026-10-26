@@ -458,14 +458,33 @@ void ThreadState::update_status(ThreadStatus status, std::optional<ThreadStatus>
 }
 
 WaitResult ThreadState::delay_until(Deadline deadline, bool callbacks) {
+    const WaitTarget target{ .type = SCE_KERNEL_WAITTYPE_DELAY, .callbacks = callbacks };
     while (true) {
-        WaitResult r = wait({ .type = SCE_KERNEL_WAITTYPE_DELAY, .callbacks = callbacks }, deadline);
-        if (r && *r == SCE_KERNEL_ERROR_NOTIFY_CALLBACK)
-            r = run_callbacks();
-        if (!r)
-            return r;
-        // Reaching the deadline is the expected outcome of a delay
-        if (*r == SCE_KERNEL_ERROR_WAIT_TIMEOUT)
+        // The callbacks pending at the loop top run first, as before each sleep
+        if (callbacks && has_pending_callbacks()) {
+            if (const WaitResult ran = run_callbacks(); !ran)
+                return ran;
+        }
+        const std::expected<uint64_t, SceInt32> registered = register_wait(target, deadline, nullptr);
+        if (!registered) {
+            // Reaching the deadline is the expected outcome of a delay
+            if (registered.error() == SCE_KERNEL_ERROR_WAIT_TIMEOUT)
+                return SCE_KERNEL_OK;
+            // A callback is already pending, so the loop top runs it
+            continue;
+        }
+        const uint64_t generation = *registered;
+        // A delay has no object, so only its own timeout, a callback notify (N1) or the thread's end
+        // ends it, each under the thread lock
+        WaitResult state = check_wait();
+        while (state && *state != SCE_KERNEL_OK && std::chrono::steady_clock::now() < deadline)
+            state = park(deadline);
+        if (!state || *state == SCE_KERNEL_ERROR_WAIT_TIMEOUT)
+            end_wait(generation, state);
+        const WaitEnd end = unregister_wait(generation);
+        if (!end.result)
+            return end.result;
+        if (*end.result != SCE_KERNEL_ERROR_NOTIFY_CALLBACK)
             return SCE_KERNEL_OK;
     }
 }
@@ -739,8 +758,9 @@ std::optional<ThreadState::CallbackDeparture> ThreadState::notify_callback(bool 
     wait_cv.notify_all();
     if (wait_phase != WaitPhase::waiting || !callback_ends_wait())
         return std::nullopt;
-    // A multiple event wait isn't queued on one object, so the notify ends it here
-    if (wait_target.type == SCE_KERNEL_WAITTYPE_MP_EVENTS) {
+    // A multiple event wait isn't queued on one object and a delay is on none, so the notify ends
+    // them here
+    if (wait_target.type == SCE_KERNEL_WAITTYPE_MP_EVENTS || wait_target.type == SCE_KERNEL_WAITTYPE_DELAY) {
         end_registration(SCE_KERNEL_ERROR_NOTIFY_CALLBACK);
         return std::nullopt;
     }
