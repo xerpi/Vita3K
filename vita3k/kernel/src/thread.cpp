@@ -500,8 +500,6 @@ WaitResult ThreadState::wait_for_signal(SceUInt32 *timeout, bool callbacks) {
         }
         const std::expected<uint64_t, SceInt32> registered = register_signal_wait(callbacks, deadline, timeout);
         if (!registered) {
-            if (registered.error() == SCE_KERNEL_ERROR_NOTIFY_CALLBACK)
-                continue;
             if (timeout && registered.error() == SCE_KERNEL_ERROR_WAIT_TIMEOUT)
                 *timeout = 0;
             return registered.error();
@@ -640,8 +638,8 @@ std::expected<uint64_t, SceInt32> ThreadState::register_signal_wait(bool callbac
         return std::unexpected(SCE_KERNEL_OK);
     if (std::chrono::steady_clock::now() >= deadline)
         return std::unexpected(SCE_KERNEL_ERROR_WAIT_TIMEOUT);
-    if (callbacks && !is_processing_callbacks && callbacks_notified())
-        return std::unexpected(SCE_KERNEL_ERROR_NOTIFY_CALLBACK);
+    // A callback pending already doesn't keep the wait from sleeping, only a notify while it waits
+    // ends it
     return begin_registration({ SCE_KERNEL_WAITTYPE_SIGNAL, SIGNAL_WAIT_ID, callbacks }, deadline, time_left);
 }
 

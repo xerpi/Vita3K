@@ -76,10 +76,10 @@ cb_wait_check_order             pass
 cb_wait_check_order_more        fail     # a message pipe call refused for its size doesn't run pending callbacks
 cb_wait_deadline_during_callback fail     # the thread end wait with callbacks writes the time left when it returns, not when a notify ended its sleep
 cb_wait_early_notify_timeout    pass
-cb_wait_early_notify_timeout_more fail     # a pending callback ends the signal wait with callbacks instead of it sleeping until its timeout
+cb_wait_early_notify_timeout_more pass
 cb_wait_initial_callback_deadline pass
 cb_wait_initial_callback_deadline_more fail     # the thread end wait with callbacks counts its timeout from after the callbacks pending at the call
-cb_wait_self_notify_during_sleep fail     # the signal wait with callbacks runs a callback its own callback notified again before it sleeps
+cb_wait_self_notify_during_sleep pass
 cb_wait_take_final_check        pass
 cb_wait_take_final_check_more   pass
 cb_wait_timeout_copy            pass
@@ -138,7 +138,7 @@ cross_core_scheduling           fail     # threads ignore their core and priorit
 delay                           pass
 delay_cb_early_return           pass
 delay_cb_one_yields             pass
-delay_cb_self_notify            fail     # the signal wait with callbacks runs a callback its own callback notified before it returns
+delay_cb_self_notify            pass
 delay_huge_values               pass
 delay_negative                  pass
 delay_precision                 skip     # timing, how long short delays and timeouts take
