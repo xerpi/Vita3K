@@ -849,9 +849,9 @@ std::optional<ThreadState::CallbackDeparture> ThreadState::notify_callback(bool 
     wait_cv.notify_all();
     if (wait_phase != WaitPhase::waiting || !callback_ends_wait())
         return std::nullopt;
-    // A multiple event wait isn't queued on one object, and a delay or a signal wait is on none, so
-    // the notify ends them here
-    if (wait_target.type == SCE_KERNEL_WAITTYPE_MP_EVENTS || wait_target.type == SCE_KERNEL_WAITTYPE_DELAY || wait_target.type == SCE_KERNEL_WAITTYPE_SIGNAL) {
+    // A multiple event wait isn't queued on one object, and a signal wait or a wait on no object, like
+    // a delay or a vblank wait, has no kernel object to look up, so the notify ends them here
+    if (wait_target.type == SCE_KERNEL_WAITTYPE_MP_EVENTS || wait_target.type == SCE_KERNEL_WAITTYPE_SIGNAL || wait_target.id == SCE_UID_INVALID_UID) {
         end_registration(SCE_KERNEL_ERROR_NOTIFY_CALLBACK);
         return std::nullopt;
     }
