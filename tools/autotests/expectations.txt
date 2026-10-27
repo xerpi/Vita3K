@@ -19,9 +19,9 @@ cache_mount                     fail     # sceAppUtilCacheMount's init and mount
 call_with_change_stack          fail     # a call that switches to a new stack doesn't run the function or return its value
 callback                        pass
 callback_after_wake             skip     # threads ignore their core and priority, so whether the woken thread ran before the notify is a race
-callback_after_wake_more        fail     # threads ignore their core and priority, so T runs on after the wake, its callback runs at the check or never, and the notify fails once T deleted it
-callback_cancel_departed        skip     # threads ignore their core and priority, so whether a notified callback runs before the cancel or delete is a race
-callback_cancel_flag            fail     # a cancel or delete of a pending callback clears the flag, the Vita keeps it
+callback_after_wake_more        skip     # threads ignore their core and priority, so whether the woken thread ran before the notify is a race
+callback_cancel_departed        skip     # a cancelled or deleted semaphore's callback still runs, and the output varies with host timing
+callback_cancel_flag            pass
 callback_cancel_sets_waited_bits pass
 callback_changes                pass
 callback_clobbers_registers     pass
@@ -30,7 +30,7 @@ callback_deleted_object         pass
 callback_edges                  pass
 callback_entry_state            fail     # a Thumb callback run by a check starts with the wrong r4 to r9 values
 callback_errors                 crash    # callback NULL argument errors, a NULL name
-callback_event_results          fail     # event calls don't take message pipe UIDs
+callback_event_results          fail     # a DONT_WAIT pipe receive ends at once, so its event doesn't come while the waiter runs its callback
 callback_event_waits            pass
 callback_info                   pass
 callback_info_fields            fail     # the notify ID of a callback is -1 and 0 swapped, fresh and inside a run
@@ -49,9 +49,9 @@ callback_notify_during_run      fail     # a callback's notify ID reads -1 befor
 callback_notify_equal_priority  skip     # threads ignore their core and priority, so whether a notify switches to the waiter is a race
 callback_notify_preempt         skip     # threads ignore their core and priority, so whether the callback runs inside the notify is a race
 callback_notify_then_release    skip     # threads ignore their core and priority, so whether the notified waiter runs before the release is a race
-callback_notify_then_release_more skip     # a notified waiter leaves the queue only when its thread runs, so whether the object still counts it right after the notify is a race
+callback_notify_then_release_more skip     # threads ignore their core and priority, so whether the notified waiter left the queue when the main thread looks is a race
 callback_notify_time_left       fail     # threads ignore their core and priority, so the waiter runs its callback during the notifier's busy interval and waits again
-callback_notify_time_left_more  fail     # after a callback notify the time left is the one when the wait returns, not the one at the notify, and a simple event wait that takes its bits after a notify returns 0, not NOTIFY_CALLBACK
+callback_notify_time_left_more  fail     # after a callback notify the time left is the one when the wait returns, not the one at the notify
 callback_outer_timeout          pass
 callback_outer_wake             pass
 callback_outer_wake_kinds       pass
@@ -68,25 +68,25 @@ callback_return_pass            pass
 callback_stack                  fail     # callbacks don't run inside callbacks
 callback_wait_requeue           pass
 cancel_calls                    pass
-cancel_calls_more               fail     # sceKernelWaitMultipleEvents
+cancel_calls_more               pass
 cancel_unknown_counts           fail     # failed event flag, simple event, message pipe and timer cancels leave their counts as they were
 cb_wait_callback_writes_timeout pass
-cb_wait_callback_writes_timeout_more fail     # signal and thread end waits with callbacks read their timeout only after the pending callbacks ran, so a callback's write sets their timeout
+cb_wait_callback_writes_timeout_more pass
 cb_wait_check_order             pass
 cb_wait_check_order_more        fail     # a message pipe call refused for its size doesn't run pending callbacks
-cb_wait_deadline_during_callback fail     # a signal or thread end wait whose deadline passes during a callback writes a time left of 0
+cb_wait_deadline_during_callback pass
 cb_wait_early_notify_timeout    pass
-cb_wait_early_notify_timeout_more fail     # a signal wait with callbacks runs a callback again after it notified itself, so it gets the signal at once instead of timing out
+cb_wait_early_notify_timeout_more pass
 cb_wait_initial_callback_deadline pass
-cb_wait_initial_callback_deadline_more fail     # signal and thread end waits count their timeout from after the callbacks pending at the call, not from the call
-cb_wait_self_notify_during_sleep fail     # a signal wait runs a callback that notified itself again before it sleeps, where the Vita sleeps with it pending
+cb_wait_initial_callback_deadline_more pass
+cb_wait_self_notify_during_sleep pass
 cb_wait_take_final_check        pass
-cb_wait_take_final_check_more   fail     # a delay runs a callback pending again on its first pass instead of returning, and sceKernelWaitMultipleEvents
+cb_wait_take_final_check_more   pass
 cb_wait_timeout_copy            pass
-cb_wait_timeout_copy_more       fail     # sceKernelWaitMultipleEvents
+cb_wait_timeout_copy_more       pass
 cb_wait_zero_timeout_notify     pass
-cb_wait_zero_timeout_notify_more fail     # a signal or thread end wait with callbacks and a timeout of 0 runs a callback that notified itself again, and gets what that run gave instead of timing out
-cb_waits                        fail     # sceKernelWaitMultipleEvents
+cb_wait_zero_timeout_notify_more pass
+cb_waits                        pass
 ceiling_base_change             fail     # a mutex ceiling doesn't raise its owner's priority
 ceiling_cancel_drops_boost      fail     # a ceiling mutex doesn't raise its owner's priority
 ceiling_cond_relock_priority    fail     # a ceiling mutex doesn't raise its owner's priority
@@ -102,21 +102,21 @@ clocks                          fail     # a NULL process time pointer
 cond                            pass
 cond_callback_after_wake        skip     # threads ignore their core and priority, so whether the waiter ran before the notify is a race
 cond_callback_departure         pass
-cond_callback_departure_deletes fail     # a condition wait whose mutex was deleted before the relock returns 0x800281A2 instead of the unknown mutex error
+cond_callback_departure_deletes pass
 cond_callback_rejoin            pass
 cond_callback_takes_mutex       pass
 cond_delete_relock              fail     # a condition or a mutex deleted after a signal, before the waiter relocks
-cond_error_time_left            fail     # a mutex delete ends its conditions' waits only at their timeout
+cond_error_time_left            pass
 cond_errors                     fail     # close, signal to a thread errors, create attributes, open with a NULL name
-cond_final_check_kinds          fail     # threads ignore their core and priority, so the waiter runs as soon as its wait ends, returns before the notify and runs the callback only at its check
-cond_info_after_mutex_delete    fail     # a condition's info still names its mutex after the mutex's delete
+cond_final_check_kinds          skip     # threads ignore their core and priority, so whether the signaled waiter already ran when the main thread looks is a race
+cond_info_after_mutex_delete    pass
 cond_mutex_cancel_during_wait   pass
 cond_mutex_delete               pass
-cond_mutex_delete_wakes         fail     # a mutex delete ends its conditions' waits only at their timeout
+cond_mutex_delete_wakes         pass
 cond_owner_end_relock           pass
-cond_relock_callback_notify     fail     # threads ignore their core and priority, so a notified relocker above the notifier runs its callback after the notifier's next line
+cond_relock_callback_notify     skip     # threads ignore their priority, so whether a notified relocker above the notifier runs its callback before the notifier's next line is a race
 cond_relock_cancel_mutex        pass
-cond_relock_notify_at_once      fail     # threads ignore their core and priority, so the notified heavy relocker already runs when the main thread reads its status
+cond_relock_notify_at_once      skip     # threads ignore their core and priority, so whether the notified relocker already ran when the main thread reads is a race
 cond_relock_owned_cancel        pass
 cond_relock_requeue             fail     # a condition waiter taking its mutex back isn't requeued on a priority change
 cond_relock_time_left           pass
@@ -127,7 +127,7 @@ cond_signal_all_order           pass
 cond_signal_before_relock       fail     # a signaled waiter runs at once on its host thread, so it is in its relock before the main thread reads
 cond_signal_to_mixed_priority   pass
 cond_signal_to_race             pass
-cond_suspend_for_vm_steps       fail     # a waiter suspended for VM waits for a held mutex after its signal or timeout instead of staying suspended, and a mutex delete doesn't end its conditions' waits
+cond_suspend_for_vm_steps       fail     # a waiter suspended for VM still relocks after its signal or timeout instead of staying suspended
 cond_timeout_claim_races        fail     # a woken thread runs at once, so it has relocked before the main thread acts
 cond_waits                      pass
 core_affinity                   fail     # threads ignore their core affinity and the priorities on a core
@@ -136,9 +136,9 @@ create_attributes               fail     # the attributes condition variables, l
 create_attrs                    fail     # the attribute bits each create accepts
 cross_core_scheduling           fail     # threads ignore their core and priority
 delay                           pass
-delay_cb_early_return           fail     # a delay runs a callback that notified itself again and sleeps instead of returning with it pending
+delay_cb_early_return           pass
 delay_cb_one_yields             pass
-delay_cb_self_notify            fail     # a delay or a signal wait runs a callback that notified itself again instead of returning or sleeping with it pending
+delay_cb_self_notify            pass
 delay_huge_values               pass
 delay_negative                  pass
 delay_precision                 skip     # timing, how long short delays and timeouts take
@@ -146,18 +146,18 @@ delay_variants                  pass
 delay_wait_id                   pass
 delete_race_end_waiters         pass
 delete_with_waiters             pass
-delete_with_waiters_more        fail     # sceKernelWaitMultipleEvents
+delete_with_waiters_more        pass
 directories                     fail     # directory mode, not empty and wrong type errors
 display                         crash    # display size, framebuffer pitch checks, a NULL pointer
 display_framebuf_blocks         fail     # no framebuffer base alignment check
 display_framebuf_free           skip     # whether the renderer crashes on a freed framebuffer depends on timing
 display_framebuf_set_freed      skip     # a framebuffer where a block was freed is taken, whether the renderer crashes on it depends on timing
-end_wait_claim_races            fail     # threads ignore their core and priority, so a timed out waiter has already ended, and an end wait takes an end during its callback instead of waiting again
+end_wait_claim_races            fail     # a woken thread runs at once, so it has ended when the main thread reads its status
 end_wait_cycle                  pass
 end_wait_during_end_handler     fail     # end waiters are woken before the END handler runs
 end_wait_error_order            fail     # a thread end wait on UID 0 gives UNKNOWN_THREAD_ID, not ILLEGAL_THREAD_ID
 end_wait_exit_preempt           fail     # threads ignore their priority, so the run order after the end differs
-end_waiter_priority_change      skip     # threads ignore their core and priority, so end waiters woken together run in host order
+end_waiter_priority_change      skip     # threads ignore their priority, so end waiters woken together run in host order
 event_bit_mask                  pass
 event_bits                      pass
 event_call_error_order          fail     # a bad mode with pattern 0 gives 0x80020005 where the Vita gives 0x80020010
@@ -177,14 +177,14 @@ event_flag_single_waiter        pass
 event_flag_wait_out_bits        pass
 event_flag_waits                pass
 event_flag_wake_release         fail     # a woken thread isn't READY before it runs, its out bits are written at the wake, and a notified waiter leaves the queue only once its thread runs
-event_info_multi_wait_nodes     fail     # sceKernelWaitMultipleEvents
+event_info_multi_wait_nodes     pass
 event_info_partial_wakes        pass
 event_initial_user_data         pass
 event_notify_callback           fail     # callbacks registered to simple events
 event_notify_other_waits        fail     # a notify on one event leaves other waits and their callbacks in the wrong state
 event_set_walk_before_dispatch  fail     # event flag waiters wake out of FIFO order when the flag is set
 event_take_past_queue           pass
-event_timeout_then_set          fail     # a timed out waiter reports DORMANT where the Vita reports READY, and sceKernelWaitMultipleEvents
+event_timeout_then_set          fail     # a timed out event waiter reports DORMANT where the Vita reports READY
 evf_hold_initial_callbacks      pass
 evf_initial_callback_other_wait pass
 evf_multi_poll_waiter_queued    pass
@@ -322,26 +322,26 @@ module_start_threads            fail     # thread event handlers don't run for m
 module_start_vfp                pass
 msgpipe                         pass
 msgpipe_async                   fail     # message pipe sends and receives that don't wait
-msgpipe_async_partial_receive   fail     # message pipe calls with DONT_WAIT finish at once like a try instead of in the background, and a pipe isn't an event
-msgpipe_async_pending_limit     fail     # message pipe calls with DONT_WAIT FULL finish at once instead of in the background, and a pipe isn't an event
-msgpipe_async_piece_error       fail     # DONT_WAIT FULL sends return their error at once instead of in an error event, and a pipe isn't an event
-msgpipe_async_wakes_receiver    fail     # a DONT_WAIT FULL send finishes at once like a try and writes its size, and a pipe isn't an event
+msgpipe_async_partial_receive   fail     # message pipe calls with DONT_WAIT FULL finish at once instead of in the background
+msgpipe_async_pending_limit     fail     # message pipe calls with DONT_WAIT FULL finish at once instead of in the background
+msgpipe_async_piece_error       fail     # message pipe calls with DONT_WAIT FULL finish at once instead of in the background
+msgpipe_async_wakes_receiver    fail     # message pipe calls with DONT_WAIT FULL finish at once instead of in the background
 msgpipe_async_wrong_uid         fail     # a DONT_WAIT FULL send checks the UID before it returns
-msgpipe_auto_reset_data_exist   fail     # a pipe isn't an event, and sceKernelWaitMultipleEvents
+msgpipe_auto_reset_data_exist   pass
 msgpipe_callback_partial        pass
 msgpipe_callback_rejoin_order   pass
-msgpipe_cancel_data_exist       fail     # a pipe isn't an event
+msgpipe_cancel_data_exist       pass
 msgpipe_check_order             fail     # a count 0 vector send to an unknown or deleted pipe gives 0x8002000F, not 0x80028221
 msgpipe_check_order_null        crash    # a send with mode 0x200 and a NULL buffer crashes Vita3K
 msgpipe_create_types            pass
 msgpipe_edges                   pass
 msgpipe_errors                  crash    # closing unknown UIDs, a NULL buffer
-msgpipe_event_before_callbacks  fail     # a pipe isn't an event
+msgpipe_event_before_callbacks  pass
 msgpipe_failed_sizes            pass
-msgpipe_info_event_waiter       fail     # a pipe isn't an event, and its info has no waiter attribute bit
-msgpipe_mixed_queue             fail     # a pipe isn't an event, and its info has no waiter attribute bit
+msgpipe_info_event_waiter       fail     # a pipe's info has no waiter attribute bit and doesn't count event waiters
+msgpipe_mixed_queue             fail     # a pipe's info has no waiter attribute bit and doesn't count event waiters
 msgpipe_modes                   pass
-msgpipe_open_close_bits         fail     # a pipe isn't an event, and an opened UID doesn't keep the pipe alive after the creating UID's delete
+msgpipe_open_close_bits         fail     # a pipe's close posts no close event, and an opened UID doesn't keep the pipe alive after the creating UID's delete
 msgpipe_order                   pass
 msgpipe_partial_head_order      pass
 msgpipe_partial_head_rejoin     fail     # no requeue on a priority change
@@ -358,33 +358,33 @@ msgpipe_sender_head_leaves      pass
 msgpipe_sender_jump_ahead       pass
 msgpipe_sender_mix              pass
 msgpipe_sender_requeue          fail     # no requeue on a priority change
-msgpipe_sync_events             fail     # a pipe isn't an event
+msgpipe_sync_events             pass
 msgpipe_try_empty_vectors       pass
 msgpipe_try_receive_senders     pass
 msgpipe_vector_waiters          pass
 msgpipe_vectors                 pass
 msgpipe_waits                   pass
 msgpipe_wake_state              skip     # threads ignore their core and priority, so whether the woken waiter ran before its status is read is a race
-msgpipe_wake_time_left          skip     # a pipe waiter writes its own time left once it runs, and threads ignore their core and priority, so whether it is written right after the wake is a race
+msgpipe_wake_time_left          pass
 msgpipe_zero_bytes              pass
-msgpipe_zero_pattern_wait       fail     # a pipe isn't an event
+msgpipe_zero_pattern_wait       pass
 mspace                          fail     # sceClib memory space info
-multi_events                    fail     # waiting on several events, callbacks registered to events
-multi_events_and_delete         fail     # sceKernelWaitMultipleEvents, deleted events and the wait type and UID
-multi_events_and_pulse          fail     # sceKernelWaitMultipleEvents
-multi_events_callback_copies    fail     # sceKernelWaitMultipleEvents
-multi_events_cancel_after_end   fail     # sceKernelWaitMultipleEvents
-multi_events_errors             fail     # waiting on several events with unknown UIDs
-multi_events_final_check        fail     # sceKernelWaitMultipleEvents
-multi_events_pipe               fail     # sceKernelWaitMultipleEvents, and a pipe isn't an event
-multi_events_plain_mix          fail     # sceKernelWaitMultipleEvents
-multi_events_requeue            fail     # sceKernelWaitMultipleEvents
-multi_events_results_past       fail     # sceKernelWaitMultipleEvents
-multi_events_same_event         fail     # sceKernelWaitMultipleEvents
-multi_events_timer_and          fail     # sceKernelWaitMultipleEvents
-multi_events_two_handles        fail     # sceKernelWaitMultipleEvents, and an opened event's UID is its creating one
-multi_events_unknown_uid        fail     # sceKernelWaitMultipleEvents with unusable entries and cancels
-multi_events_waits              fail     # multiple event wait results, wait type and auto reset
+multi_events                    pass
+multi_events_and_delete         pass
+multi_events_and_pulse          pass
+multi_events_callback_copies    pass
+multi_events_cancel_after_end   pass
+multi_events_errors             pass
+multi_events_final_check        pass
+multi_events_pipe               pass
+multi_events_plain_mix          skip     # the woken thread may remove its other event waiter before the main thread reads it
+multi_events_requeue            fail     # no requeue on a priority change
+multi_events_results_past       pass
+multi_events_same_event         fail     # no requeue on a priority change
+multi_events_timer_and          pass
+multi_events_two_handles        fail     # an opened event's UID is its creating one
+multi_events_unknown_uid        pass
+multi_events_waits              pass
 mutex                           pass
 mutex_cancel_counts             pass
 mutex_ceiling                   fail     # mutex priority ceilings
@@ -426,7 +426,7 @@ out_past_block_end              fail     # no write check on output parameters, 
 outside_mask_rerun              fail     # threads ignore their core
 owner_end                       pass
 owner_end_more                  pass
-poll_calls                      pass
+poll_calls                      skip     # the woken waiter runs at once on its host thread and can finish before the main thread reads
 preempt_keeps_context           fail     # the FPSCR a preempted thread set is lost when the preempting thread runs
 preempt_latency                 fail     # threads ignore their core and priority
 preempt_migrate                 fail     # threads ignore their core
@@ -437,11 +437,11 @@ priority_change_preempt         fail     # threads ignore their core and priorit
 priority_inheritance            fail     # threads ignore their core and priority
 priority_queue_areas            fail     # threads ignore their core and priority
 priority_requeue_others         fail     # waiters keep their place in a priority queue when their priority changes
-priority_requeue_others_more    fail     # no requeue on a priority change, and threads ignore their core and priority, so read lock and thread end waiters woken together run in host order
+priority_requeue_others_more    skip     # threads ignore their priority, so readers woken together run in host order
 queue_area_bounds               fail     # threads ignore their core and priority
 queue_order                     fail     # priority changes while waiting
 queue_order_matrix              fail     # a waiter whose priority changes keeps its place in a priority queue
-queue_order_matrix_more         skip     # no requeue on a priority change, and threads ignore their core and priority, so readers and thread end waiters woken together run in host order
+queue_order_matrix_more         skip     # threads ignore their priority, so readers woken together run in host order
 queue_order_timer               fail     # a priority change doesn't move a timer's waiter in its queue
 queued_mask_change_busy_core    fail     # a queued affinity change runs T on the held core 0 and reports DORMANT, not STANDBY
 readonly_in                     fail     # timer and simple event names, the mutex ceiling from its option struct
@@ -451,7 +451,7 @@ readonly_timeouts               fail     # no write check on timeouts
 readonly_waits                  fail     # an opened block is its original, so the read only view is writable
 ready_changes                   fail     # threads ignore their core and priority
 ready_cpu_field                 fail     # the CPU fields of thread info, threads ignore their core
-ready_order_cores_1_2           skip     # threads ignore their core and priority, so started threads run at once in host order while the gate spins
+ready_order_cores_1_2           skip     # threads ignore their core and priority, so started threads run in host order
 ready_queue_order               fail     # threads ignore their core and priority
 release_errors_waiters          skip     # threads ignore their core and priority, so the writer a read unlock wakes may unlock before the count is read
 release_preempt                 fail     # threads ignore their core and priority
@@ -486,7 +486,7 @@ rwlock_wake_counts              fail     # woken threads aren't READY before the
 rwlock_wake_order               pass
 savedata_slot_id                fail     # save data slot ID range checks
 self_lower_order                fail     # a thread that lowers itself doesn't go to the head of its new priority
-self_mask_change_busy_target    timeout  # threads ignore their core, so a self affinity change onto a busy core returns at once, and the test runs past the timeout
+self_mask_change_busy_target    timeout  # a self affinity change onto a busy core never returns, the Vita's returns
 self_mask_change_yield          fail     # a self affinity change to a new mask doesn't yield to the other thread
 self_priority_drop              fail     # threads ignore their core and priority
 sema_call_error_order           fail     # semaphore calls on a mutex UID give other errors than the Vita's 0x8002000F
@@ -501,7 +501,7 @@ sema_take_past_waiters          pass
 sema_waits                      pass
 semaphore                       pass
 shader_patcher_callback         fail     # a library callback's caller gets its FPSCR and TPIDRURW back after it
-shared_queue_mask_skip          fail     # threads ignore their core and priority, so R1 and R2 run at once in host order and are DORMANT before the first release
+shared_queue_mask_skip          fail     # R1 and R2 report DORMANT where the Vita has READY before the first release
 shared_raise_cores              fail     # threads are never READY and ignore their core
 shared_ready_raise              fail     # threads are never READY and ignore their core
 signal_during_object_waits      pass
@@ -530,14 +530,14 @@ standby_merge                   fail     # threads ignore their core and priorit
 standby_merge_irq               fail     # threads ignore their core and priority
 start_argument_copy_time        fail     # a start with a 0x1000 stack and an argument past it is accepted, the Vita refuses
 start_delay_cores               fail     # threads ignore their core
-start_equal_priority_same_core  fail     # threads ignore their core and priority, so starting a thread above the starter doesn't switch to it
+start_equal_priority_same_core  skip     # a thread started at the starter's priority runs at once, it passes or not by host timing
 start_restarted_last_cpu        fail     # a restarted thread's core fields are 0 where the Vita reports the cores it ran on
 stat_mode                       fail     # file and directory stat modes, attributes and directory sizes
 strings                         fail     # sceClibMemchr, case of bytes above 0x7F
 suspend_affinity_resume         fail     # threads that are ready can't be suspended for VM
 suspend_for_vm_edges            pass
 suspend_for_vm_handoff          pass
-suspend_for_vm_handoff_more     fail     # sceKernelWaitMultipleEvents
+suspend_for_vm_handoff_more     pass
 suspend_for_vm_notify           fail     # a thread a ForVM suspend holds shows a notified callback's pc
 suspend_ready_order             fail     # threads ignore their core and priority
 suspend_running_resume_order    fail     # resumed threads report RUNNING or DORMANT where the Vita has READY before the gate lifts
@@ -583,7 +583,7 @@ thread_event_handler_register_before_run pass
 thread_event_handler_stack      fail     # event handler sp is 0x28 below the stack top and 16 aligned, the Vita's is 0x30
 thread_event_handler_unregister_in_entry fail     # an unregister from the thread's own entry doesn't stop its END run
 thread_event_handler_vfp        pass
-thread_exit_status              fail     # an end wait for an ended thread writes back part of its timeout
+thread_exit_status              pass
 thread_for_vm_errors            pass
 thread_fpscr                    pass
 thread_id_registers             pass
@@ -592,7 +592,7 @@ thread_info_fields              fail     # thread info process, CPU and run time
 thread_info_sizes               pass
 thread_lifecycle                fail     # starting with more arguments than the stack holds
 thread_limit_release            fail     # thread creates aren't refused at the Vita's limit, which gives 0x8002450D
-thread_limits                   fail     # no limit on the number of threads
+thread_limits                   skip     # no limit on the number of threads, and the creates can outlast the timeout on a busy host
 thread_names                    pass
 thread_nouse_vfp                fail     # a waiting thread keeps d16 across its wait
 thread_null_name                pass
@@ -633,8 +633,8 @@ thread_switch_counters          fail     # sleeps and interrupt preempts don't g
 thread_vfp_exception            pass
 thread_wait_id_idle             fail     # a thread that can run but hasn't reports RUNNING instead of READY
 thread_zero_mask_lifecycle      fail     # a zero affinity mask reads back as 0x70000 where the Vita reads 0
-timeout_left_kinds              fail     # sceKernelWaitMultipleEvents
-timeout_left_kinds_more         fail     # sceKernelWaitMultipleEvents
+timeout_left_kinds              pass
+timeout_left_kinds_more         pass
 timeout_serves_before_run       fail     # a timed out thread isn't READY before it runs
 timeout_threshold               skip     # timing, which short timeouts end at once
 timeouts                        pass
@@ -702,18 +702,18 @@ wait_info_retries_more          pass
 wait_order                      pass
 wait_own_end                    pass
 wait_priority_change            fail     # a waiter changed to any priority goes behind the others at it
-wait_zero_timeout               fail     # multiple event waits with a timeout of 0
+wait_zero_timeout               pass
 wait_zero_timeout_more          pass
 wake_all_order                  fail     # threads ignore their core and priority
-wake_area_after_wait_priority_change fail     # threads ignore their core and priority, so T and U run past the gate, report DORMANT before it lifts and run in host order, and T's current CPU reads 0
+wake_area_after_wait_priority_change fail     # a thread whose priority changed while waiting reports DORMANT and no CPU before the gate
 wake_batch_cores                fail     # threads ignore their core
-wake_batch_yield_once           fail     # threads ignore their core and priority, so the waker and the woken waiters run in host order
+wake_batch_yield_once           fail     # a semaphore signal of three wakes threads in a different order than the Vita's
 wake_busy_cores                 fail     # threads are never READY or STANDBY and ignore their core
 wake_core_origin                fail     # threads ignore their core and priority
 wake_core_ties                  fail     # threads are never STANDBY and ignore their core
 wake_equal_cores_stay_standby   fail     # threads ignore their core and priority
 wake_handoff                    skip     # threads ignore their core and priority, so whether a woken waiter runs before the releaser's try is a race
-wake_handoff_kinds              skip     # threads ignore their core and priority, so whether the woken waiters run before the unlocker looks is a race
+wake_handoff_kinds              skip     # threads ignore their core and priority, so whether the woken waiter took the mutex before the unlocker's try is a race
 wake_idle_beats_equal_core      fail     # threads ignore their core
 wake_kinds_order                fail     # threads ignore their core and priority
 wake_ready_areas                fail     # threads ignore their core and priority

@@ -45,11 +45,22 @@ enum class UidClass : SceUInt32 {
 // A kernel object that guest code refers to by UID.
 class KernelObject {
 public:
+    KernelObject() = default;
+    // Shares another object's lock, so one lock guards both. Uses its own lock if the other object
+    // is null. The other object must outlive this one.
+    explicit KernelObject(const KernelObject *share_lock_with)
+        : mutex(share_lock_with ? share_lock_with->mutex : own_mutex) {}
+    // Not copyable, since the lock reference may point into the object itself
+    KernelObject(const KernelObject &) = delete;
+    KernelObject &operator=(const KernelObject &) = delete;
     virtual ~KernelObject() = default;
     // Returns the class reported by sceKernelGetThreadmgrUIDClass.
     virtual UidClass get_uid_class() const = 0;
 
     SceUID uid{};
+
+    // Whether the object was deleted. With the lock held.
+    bool was_deleted() const { return deleted; }
 
 protected:
     // Locks the object, which guards its fields. The lock is empty if the object was deleted. Only
@@ -64,9 +75,6 @@ protected:
     // Ends what the object is doing when the thread deleter deletes it. Runs once, with the lock held.
     virtual void on_delete(SceUID deleter) {}
 
-    // Whether the object was deleted. With the lock held.
-    bool was_deleted() const { return deleted; }
-
 private:
     friend class KernelObjects;
 
@@ -78,7 +86,10 @@ private:
         on_delete(deleter);
     }
 
-    mutable std::mutex mutex;
+    mutable std::mutex own_mutex;
+    // The lock the object uses: own_mutex, or another object's lock it shares. Declared after
+    // own_mutex so that own_mutex is built first.
+    std::mutex &mutex = own_mutex;
     bool deleted = false;
 };
 

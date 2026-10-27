@@ -28,24 +28,24 @@ Callback::Callback(const ThreadStatePtr &owner, const std::string &name, Ptr<Sce
     , owner(owner) {}
 
 void Callback::notify(SceUID notifier_id, SceInt32 notify_arg) {
-    const auto guard = lock();
-    if (!guard)
-        return;
-    this->notifier_id = notifier_id;
-    this->notification_arg = notify_arg;
-    // The owner already counts a callback with notifications, and only the first one wakes it
-    if (this->num_notifications++ == 0) {
-        if (const ThreadStatePtr thread = owner.lock())
-            thread->add_notified_callback();
+    // Declared before the guard, so the thread reference is dropped after the callback's lock
+    ThreadStatePtr thread;
+    {
+        const auto guard = lock();
+        if (!guard)
+            return;
+        this->notifier_id = notifier_id;
+        this->notification_arg = notify_arg;
+        ++this->num_notifications;
+        thread = owner.lock();
+        if (!thread)
+            return;
+        // Tell the owner on every notify, not only the first. A notify ends a wait with callbacks
+        // even if this callback was already pending.
+        thread->notify_callback();
     }
-}
-
-void Callback::event_notify(SceUID notifier_id) {
-    this->notify(notifier_id, 0);
-}
-
-void Callback::direct_notify(SceInt32 notify_arg) {
-    this->notify(SCE_UID_INVALID_UID, notify_arg);
+    // A queued waiter leaves its queue under the queue's lock, which must not wait on a callback lock
+    thread->wait_for_departure();
 }
 
 void Callback::cancel() {
@@ -84,10 +84,6 @@ std::optional<Callback::Notification> Callback::take_notification() {
 }
 
 void Callback::reset() {
-    if (this->num_notifications != 0) {
-        if (const ThreadStatePtr thread = owner.lock())
-            thread->remove_notified_callback();
-    }
     this->num_notifications = 0;
     this->notification_arg = 0;
     this->notifier_id = SCE_UID_INVALID_UID;

@@ -18,13 +18,14 @@
 #pragma once
 
 #include <kernel/callback.h>
-#include <kernel/thread/wait_queue.h>
+#include <kernel/thread/wait.h>
 #include <mem/ptr.h>
 #include <util/types.h>
 
 #include <atomic>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <thread>
 #include <vector>
 
@@ -32,8 +33,13 @@ enum SceDisplayPixelFormat {
     SCE_DISPLAY_PIXELFORMAT_A8B8G8R8 = 0x00000000U
 };
 
-struct VBlankWaitEntry {
-    uint64_t target_vcount;
+// A wait for a vblank
+struct VBlankRequest {
+    // The vblank count to wait for. A display wait sets it on its first try, after the pending
+    // callbacks ran.
+    std::optional<uint64_t> target;
+    int vcount = 0;
+    bool since_setbuf = false;
 };
 
 struct DisplayFrameInfo {
@@ -69,7 +75,8 @@ struct DisplayState {
     std::atomic<bool> imgui_render{ true };
     std::atomic<bool> fullscreen{ false };
     std::atomic<std::uint64_t> vblank_count{ 0 };
-    WaitQueue<VBlankWaitEntry> vblank_waiters;
+    // The threads waiting for a vblank, guarded by mutex
+    WaitQueue<VBlankRequest> vblank_waiters{ QueueOrder::fifo };
     std::atomic<uint64_t> last_setframe_vblank_count = 0;
     std::map<SceUID, CallbackPtr> vblank_callbacks{};
 
@@ -91,4 +98,9 @@ struct DisplayState {
     std::atomic<Address> current_sync_object;
 
     void deinit();
+
+private:
+    friend class QueuedThreadWait<DisplayState, VBlankRequest>;
+    // Nothing to do. A vblank waiter that leaves frees nothing for the others.
+    void serve_locked() {}
 };

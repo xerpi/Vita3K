@@ -19,7 +19,7 @@
 
 #include <cpu/state.h>
 #include <kernel/callback.h>
-#include <kernel/thread/wait_queue.h>
+#include <kernel/thread/wait.h>
 #include <kernel/types.h>
 #include <mem/block.h>
 #include <mem/ptr.h>
@@ -28,6 +28,7 @@
 #include <condition_variable>
 #include <expected>
 #include <list>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -35,6 +36,7 @@
 struct CPUContext;
 
 struct ThreadState;
+using ThreadStatePtr = std::shared_ptr<ThreadState>;
 struct ThreadParams;
 struct KernelState;
 
@@ -52,6 +54,28 @@ constexpr SceUInt32 THREAD_ATTR_VM = 0x04000000U;
 constexpr SceUInt32 THREAD_ATTR_UNKNOWN_2000 = 0x00002000U;
 // The FPSCR a thread starts with: round to nearest, flush-to-zero and default NaN
 constexpr uint32_t INITIAL_FPSCR = 0x03000000U;
+
+// The threads waiting in sceKernelWaitThreadEnd for a thread to end. It lives in the thread, and
+// only the thread uses it. Its lock comes before the thread's lock.
+class ThreadEnd {
+    friend struct ThreadState;
+
+    // One end wait, which the thread's end gives the exit status
+    struct Request {
+        // Where the exit status goes. The waiting call owns this variable.
+        SceInt32 &exit_status;
+    };
+
+    friend class QueuedThreadWait<ThreadEnd, Request>;
+    // Nothing to do. A waiter that leaves frees nothing for the others.
+    void serve_locked() {}
+
+    // Guards the queue and whether the thread has ended. Take it before the thread's lock or a
+    // waiter's lock, and hold only one thread lock at a time under it. The thread's start and end
+    // also take it, so the thread can't start or end while a waiter holds it.
+    std::mutex mutex;
+    WaitQueue<Request> waiters{ QueueOrder::fifo };
+};
 
 // Values are what sceKernelGetThreadInfo reports
 enum class ThreadStatus : SceUInt32 {
@@ -135,19 +159,13 @@ struct ThreadState {
     // Blocks this thread until the deadline passes.
     [[nodiscard]] WaitResult delay_until(Deadline deadline, bool callbacks);
     // Blocks this thread until a signal is sent to it or the timeout passes, writing the time left back.
-    [[nodiscard]] WaitResult wait_for_signal(SceUInt32 *timeout, bool callbacks);
+    [[nodiscard]] WaitResult wait_for_signal(WaitOptions options);
     // Sends a signal to this thread. Fails if the previous one was not consumed yet.
     SceInt32 send_signal();
-    // Blocks waiter until this thread becomes dormant, then writes its exit status to exit_status.
-    [[nodiscard]] WaitResult wait_for_thread_end(const ThreadStatePtr &waiter, SceInt32 *exit_status, Deadline deadline, bool callbacks);
-    // Waits on target until woken by wake(), the thread exits or is deleted, or the deadline passes.
-    // With target.callbacks, a notified callback ends it with NOTIFY_CALLBACK, and the caller runs
-    // it with run_callbacks(). A stale wake can end it early, so callers must recheck their condition.
-    [[nodiscard]] WaitResult wait(WaitTarget target, Deadline deadline);
-    // Runs the notified callbacks for a wait that ended with NOTIFY_CALLBACK, with no lock held.
-    // Returns ThreadExiting if the thread exits or is deleted meanwhile.
-    [[nodiscard]] WaitResult run_callbacks();
-    // Wakes this thread from wait().
+    // Blocks the waiting thread until this thread ends or the timeout passes. Writes back the exit
+    // status and the time left.
+    [[nodiscard]] WaitResult wait_for_thread_end(ThreadState &waiter, SceInt32 &exit_status, WaitOptions options);
+    // Makes the thread's parked wait check again. Used when a timer's next event changes.
     void wake();
     // Shows the thread WAITING while a host call blocks it, such as an audio output, and RUNNING after
     void begin_host_wait();
@@ -159,14 +177,8 @@ struct ThreadState {
     // Callbacks
     // Runs the notified callbacks of this thread and returns how many ran. Called by the thread itself.
     SceUInt32 process_callbacks();
-    // Returns whether a notified callback would run now, which none does inside a callback. Takes mutex.
-    bool has_pending_callbacks();
     // Adds a callback this thread created. Called by the thread itself.
     void add_callback(const CallbackPtr &cb);
-    // Counts a callback of this thread that was notified and hasn't run for it yet, waking a wait
-    // with callbacks, and stops counting it. Called by the callback with its lock held.
-    void add_notified_callback();
-    void remove_notified_callback();
 
     // Holds: the debugger, the emulator pause and the ForVM suspend
     // Stops the thread for the debugger, the next time it would run guest code
@@ -227,13 +239,26 @@ private:
         syscall,
     };
 
-    struct EndWaitEntry {
-        // Where to write the exit status, or null
-        SceInt32 *exit_status;
-    };
+    friend class ThreadWait;
+    // Begins and ends multiple event waits with mutex held
+    friend class MultiEventWait;
+    // A callback notify ends the wait or removes it from its queue
+    friend class Callback;
+
+    // Marks a callback notified, ends a wait in no queue that takes callbacks and wakes a queued one
+    // to leave its queue. Called with the callback's lock held.
+    void notify_callback();
+    // Returns once a queued wait that a notified callback ends has left its queue. Called with no
+    // lock held.
+    void wait_for_departure();
 
     // The private methods are called with mutex held, unless they say otherwise
-    void update_status(ThreadStatus status, std::optional<ThreadStatus> expected = std::nullopt);
+    // Makes wait the current wait, or returns what it ends with instead: ThreadExiting, a pending
+    // signal taken, WAIT_TIMEOUT (the time left becomes 0) or a pending NOTIFY_CALLBACK
+    std::optional<WaitResult> begin_locked(ThreadWait &wait);
+    // Whether the thread is in a wait that hasn't ended
+    bool still_waits() const { return active_wait && !active_wait->result; }
+    void update_status(ThreadStatus status);
     // Whether the thread is ending
     bool exiting() const { return ending != Ending::none; }
     // Asks the thread to end, keeping a stronger request already made
@@ -243,16 +268,16 @@ private:
     // Set the priority or the affinity mask and the TLS slot that shows it
     void set_priority(int new_priority);
     void set_affinity_mask(SceInt32 new_affinity_mask);
-    // Starts a dormant thread at entry, like start() does at its entry point. Takes mutex.
+    // Starts a dormant thread at entry, like start() does at its entry point. Takes end's lock, then
+    // mutex.
     int start_at(Address entry, SceSize arglen, Ptr<void> argp, bool run_entry_callback);
-    // Whether a callback of this thread was notified and hasn't run yet
-    bool callbacks_notified() const { return notified_callbacks > 0; }
-    // Whether a notified callback ends the current wait. Callbacks don't nest, so a wait inside a
-    // callback runs none. With mutex held.
-    bool callback_ends_wait() const { return wait_target.callbacks && !is_processing_callbacks && callbacks_notified(); }
-    // Whether the thread's current wait is over, by a wake, its end or a callback it runs, though
-    // the thread hasn't gone on yet. With mutex held.
-    bool wait_over() const { return exiting() || wake_pending || callback_ends_wait(); }
+    // Marks the thread DORMANT after an exit, else DELETED, and completes its end waiters with the
+    // exit status. Called with the thread lock held in lock. Releases it to take end's lock first,
+    // since end's lock comes before the thread lock, and takes it again before returning.
+    void end_for_waiters(std::unique_lock<std::mutex> &lock);
+    // Whether a notified callback ends wait. Callbacks don't nest, so a wait inside a callback runs
+    // none. With mutex held.
+    bool callback_ends(const ThreadWait &wait) const { return wait.callbacks && !is_processing_callbacks && callbacks_pending; }
     // Keeps the thread from going on into guest code while anything holds it, unless it's ending.
     // With mutex held through lock.
     void wait_while_held(std::unique_lock<std::mutex> &lock, StopPoint where);
@@ -284,28 +309,28 @@ private:
     Ending ending = Ending::none;
     // when calling sceKernelStartThread
     bool run_start_callback = false;
-    // Notified whenever the status or a hold changes
-    std::condition_variable status_cond;
+    // The one condition variable. The thread's waits, its dormant park and its hold gate wait on it,
+    // and so do other threads that wait for its status. Every change any of them reads notifies all.
+    std::condition_variable cv;
 
     // Priority and affinity
     int priority;
     SceInt32 affinity_mask;
 
     // Waits
-    // What the thread waits on while waiting, empty otherwise
-    WaitTarget wait_target;
-    // Set by wake() and consumed by the next wait().
-    bool wake_pending = false;
+    // The wait the thread is in, owned by the waiting call, or null
+    ThreadWait *active_wait = nullptr;
+    // A timer changed since the waiter last looked. Set by wake(), cleared on each look of a sleep.
+    bool recheck_pending = false;
     // A sceKernelSendSignal is pending for this thread.
     bool signal_pending = false;
     // The vblank the thread's last display wait ended on
     uint64_t last_vblank_waited = 0;
-    // Notified whenever a condition a wait may be blocked on changes.
-    std::condition_variable wait_cv;
 
     // Callbacks
-    // Callbacks of this thread with notifications they haven't run for.
-    SceUInt32 notified_callbacks = 0;
+    // A callback of this thread was notified since the last callback pass began. Every notify sets
+    // it, and the start of a pass clears it. Canceling or deleting a callback leaves it set.
+    bool callbacks_pending = false;
     // Set while the thread runs its callbacks. They don't nest. With mutex held.
     bool is_processing_callbacks = false;
     // Callbacks this thread created, in creation order. The kernel owns them. Only this thread
@@ -319,9 +344,6 @@ private:
     // Where the thread stopped the last time something held it
     StopPoint stop_point = StopPoint::guest_code;
 
-    // Threads blocked in sceKernelWaitThreadEnd on this one, with their own lock, taken after mutex
-    std::mutex end_waiters_mutex;
-    WaitQueue<EndWaitEntry> end_waiters;
+    // The threads blocked in sceKernelWaitThreadEnd on this one
+    ThreadEnd end;
 };
-
-using ThreadStatePtr = std::shared_ptr<ThreadState>;

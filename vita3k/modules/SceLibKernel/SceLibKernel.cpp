@@ -1257,7 +1257,7 @@ EXPORT(int, sceKernelCreateMsgPipe, const char *name, uint32_t type, uint32_t at
     if (const SceInt32 error = MsgPipe::check_create(name, type, attr, bufSize))
         return RET_ERROR(error);
 
-    const auto msgpipe = std::make_shared<MsgPipe>(attr, name, bufSize);
+    const auto msgpipe = std::make_shared<MsgPipe>(attr, name, bufSize, thread_id);
     return emuenv.kernel.objects.add(msgpipe, emuenv.kernel.get_next_uid());
 }
 
@@ -1599,11 +1599,11 @@ EXPORT(int, sceKernelLockLwMutexCB, Ptr<SceKernelLwMutexWork> workarea, int lock
         return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_LW_MUTEX_ID);
     const ThreadStatePtr thread = emuenv.kernel.get_thread(thread_id);
     // A Vita takes a lightweight mutex no other thread holds in user code, which runs no callbacks
-    const SceInt32 taken = mutex->try_acquire(emuenv.mem, thread, lock_count);
+    const SceInt32 taken = mutex->try_acquire(emuenv.mem, *thread, lock_count);
     if (taken != SCE_KERNEL_ERROR_LW_MUTEX_FAILED_TO_OWN)
         return taken;
     SceUInt32 time_left = ptimeout ? *ptimeout : 0;
-    const SceInt32 result = mutex->acquire(emuenv.mem, thread, lock_count, ptimeout ? &time_left : nullptr, true);
+    const SceInt32 result = mutex->acquire(emuenv.mem, *thread, lock_count, { .timeout = ptimeout ? &time_left : nullptr, .callbacks = true });
     if (ptimeout)
         *ptimeout = time_left;
     return result;
@@ -1687,7 +1687,7 @@ static SceInt32 receive_msg_pipe(EmuEnvState &emuenv, const char *export_name, S
     const MsgPipePtr msgpipe = emuenv.kernel.objects.find<MsgPipe>(msgPipeId);
     if (!msgpipe)
         return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_MSG_PIPE_ID);
-    return msgpipe->receive(emuenv.kernel.get_thread(thread_id), emuenv.mem, waitMode, pieces, pResult, pTimeout, callbacks);
+    return msgpipe->receive(*emuenv.kernel.get_thread(thread_id), emuenv.mem, waitMode, pieces, pResult, { .timeout = pTimeout, .callbacks = callbacks });
 }
 
 EXPORT(SceInt32, sceKernelReceiveMsgPipe, SceUID msgPipeId, Ptr<void> pRecvBuf, SceSize recvSize, SceUInt32 waitMode, SceSize *pResult, SceUInt32 *pTimeout) {
@@ -1731,7 +1731,7 @@ static SceInt32 send_msg_pipe(EmuEnvState &emuenv, const char *export_name, SceU
     const MsgPipePtr msgpipe = emuenv.kernel.objects.find<MsgPipe>(msgPipeId);
     if (!msgpipe)
         return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_MSG_PIPE_ID);
-    return msgpipe->send(emuenv.kernel.get_thread(thread_id), emuenv.mem, waitMode, pieces, pResult, pTimeout, callbacks);
+    return msgpipe->send(*emuenv.kernel.get_thread(thread_id), emuenv.mem, waitMode, pieces, pResult, { .timeout = pTimeout, .callbacks = callbacks });
 }
 
 EXPORT(SceInt32, sceKernelSendMsgPipe, SceUID msgPipeId, Ptr<const void> pSendBuf, SceSize sendSize, SceUInt32 waitMode, SceSize *pResult, SceUInt32 *pTimeout) {
@@ -1796,7 +1796,7 @@ EXPORT(int, sceKernelSignalLwCond, Ptr<SceKernelLwCondWork> workarea) {
     const CondvarPtr condvar = emuenv.kernel.objects.find<LwCond>(condid);
     if (!condvar)
         return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_LW_COND_ID);
-    return condvar->signal(Condvar::SignalTarget(Condvar::SignalTarget::Type::Any));
+    return condvar->signal();
 }
 
 EXPORT(int, sceKernelSignalLwCondAll, Ptr<SceKernelLwCondWork> workarea) {
@@ -1805,7 +1805,7 @@ EXPORT(int, sceKernelSignalLwCondAll, Ptr<SceKernelLwCondWork> workarea) {
     const CondvarPtr condvar = emuenv.kernel.objects.find<LwCond>(condid);
     if (!condvar)
         return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_LW_COND_ID);
-    return condvar->signal(Condvar::SignalTarget(Condvar::SignalTarget::Type::All));
+    return condvar->signal_all();
 }
 
 EXPORT(int, sceKernelSignalLwCondTo, Ptr<SceKernelLwCondWork> workarea, SceUID thread_target) {
@@ -1816,7 +1816,7 @@ EXPORT(int, sceKernelSignalLwCondTo, Ptr<SceKernelLwCondWork> workarea, SceUID t
         return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_LW_COND_ID);
     if (!emuenv.kernel.get_thread(thread_target))
         return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_THREAD_ID);
-    return condvar->signal(Condvar::SignalTarget(Condvar::SignalTarget::Type::Specific, thread_target));
+    return condvar->signal_to(thread_target);
 }
 
 EXPORT(int, sceKernelStackChkFail) {
@@ -1850,7 +1850,7 @@ EXPORT(int, sceKernelTryLockLwMutex, Ptr<SceKernelLwMutexWork> workarea, int loc
     const MutexPtr mutex = emuenv.kernel.objects.find<LwMutex>(lwmutexid);
     if (!mutex)
         return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_LW_MUTEX_ID);
-    return mutex->try_acquire(emuenv.mem, emuenv.kernel.get_thread(thread_id), lock_count);
+    return mutex->try_acquire(emuenv.mem, *emuenv.kernel.get_thread(thread_id), lock_count);
 }
 
 EXPORT(int, sceKernelTryLockLwMutex_16XX, Ptr<SceKernelLwMutexWork> workarea, int lock_count) {
@@ -1864,7 +1864,7 @@ EXPORT(int, sceKernelTryReceiveMsgPipe, SceUID msgpipe_id, Ptr<void> recv_buf, S
     if (!msgpipe)
         return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_MSG_PIPE_ID);
     const MsgPipeVector piece{ recv_buf, msg_size };
-    return msgpipe->try_receive(emuenv.kernel.get_thread(thread_id), emuenv.mem, wait_mode, { &piece, 1 }, result);
+    return msgpipe->try_receive(*emuenv.kernel.get_thread(thread_id), emuenv.mem, wait_mode, { &piece, 1 }, result);
 }
 
 EXPORT(SceInt32, sceKernelTryReceiveMsgPipeVector, SceUID msgPipeId, const MsgPipeVector *vectors, SceUInt32 count, SceUInt32 waitMode, SceSize *pResult) {
@@ -1874,7 +1874,7 @@ EXPORT(SceInt32, sceKernelTryReceiveMsgPipeVector, SceUID msgPipeId, const MsgPi
     const MsgPipePtr msgpipe = emuenv.kernel.objects.find<MsgPipe>(msgPipeId);
     if (!msgpipe)
         return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_MSG_PIPE_ID);
-    return msgpipe->try_receive(emuenv.kernel.get_thread(thread_id), emuenv.mem, waitMode, { vectors, count }, pResult);
+    return msgpipe->try_receive(*emuenv.kernel.get_thread(thread_id), emuenv.mem, waitMode, { vectors, count }, pResult);
 }
 
 EXPORT(int, sceKernelTrySendMsgPipe, SceUID msgPipeId, Ptr<const void> pSendBuf, SceSize sendSize, SceUInt32 waitMode, SceSize *pResult) {
@@ -1883,7 +1883,7 @@ EXPORT(int, sceKernelTrySendMsgPipe, SceUID msgPipeId, Ptr<const void> pSendBuf,
     if (!msgpipe)
         return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_MSG_PIPE_ID);
     const MsgPipeVector piece{ pSendBuf.cast<void>(), sendSize };
-    return msgpipe->try_send(emuenv.kernel.get_thread(thread_id), emuenv.mem, waitMode, { &piece, 1 }, pResult);
+    return msgpipe->try_send(*emuenv.kernel.get_thread(thread_id), emuenv.mem, waitMode, { &piece, 1 }, pResult);
 }
 
 EXPORT(SceInt32, sceKernelTrySendMsgPipeVector, SceUID msgPipeId, const MsgPipeVector *vectors, SceUInt32 count, SceUInt32 waitMode, SceSize *pResult) {
@@ -1893,7 +1893,7 @@ EXPORT(SceInt32, sceKernelTrySendMsgPipeVector, SceUID msgPipeId, const MsgPipeV
     const MsgPipePtr msgpipe = emuenv.kernel.objects.find<MsgPipe>(msgPipeId);
     if (!msgpipe)
         return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_MSG_PIPE_ID);
-    return msgpipe->try_send(emuenv.kernel.get_thread(thread_id), emuenv.mem, waitMode, { vectors, count }, pResult);
+    return msgpipe->try_send(*emuenv.kernel.get_thread(thread_id), emuenv.mem, waitMode, { vectors, count }, pResult);
 }
 
 EXPORT(int, sceKernelUnloadModule, SceUID uid, SceUInt32 flags, const void *pOpt) {
@@ -1908,7 +1908,7 @@ EXPORT(int, sceKernelUnlockLwMutex, Ptr<SceKernelLwMutexWork> workarea, int unlo
     // A delete clears the owner in the work area, so a Vita reports the unlock as not owned
     if (!mutex)
         return RET_ERROR(SCE_KERNEL_ERROR_LW_MUTEX_NOT_OWNED);
-    return mutex->release(emuenv.mem, emuenv.kernel.get_thread(thread_id), unlock_count);
+    return mutex->release(emuenv.mem, *emuenv.kernel.get_thread(thread_id), unlock_count);
 }
 
 EXPORT(int, sceKernelUnlockLwMutex_0, Ptr<SceKernelLwMutexWork> workarea, int unlock_count) {
@@ -1923,7 +1923,7 @@ EXPORT(int, sceKernelUnlockLwMutex2, Ptr<SceKernelLwMutexWork> workarea, int unl
     // A delete clears the owner in the work area, so a Vita reports the unlock as not owned
     if (!mutex)
         return RET_ERROR(SCE_KERNEL_ERROR_LW_MUTEX_NOT_OWNED);
-    return mutex->release(emuenv.mem, emuenv.kernel.get_thread(thread_id), unlock_count);
+    return mutex->release(emuenv.mem, *emuenv.kernel.get_thread(thread_id), unlock_count);
 }
 
 EXPORT(SceInt32, sceKernelWaitCond, SceUID condId, SceUInt32 *pTimeout) {
@@ -1973,7 +1973,7 @@ EXPORT(int, sceKernelWaitLwCond, Ptr<SceKernelLwCondWork> workarea, SceUInt32 *t
     if (!condvar)
         return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_LW_COND_ID);
     SceUInt32 time_left = timeout ? *timeout : 0;
-    const SceInt32 result = condvar->wait(emuenv.mem, emuenv.kernel.get_thread(thread_id), timeout ? &time_left : nullptr, false);
+    const SceInt32 result = condvar->wait(emuenv.mem, *emuenv.kernel.get_thread(thread_id), { .timeout = timeout ? &time_left : nullptr });
     if (timeout)
         *timeout = time_left;
     return result;

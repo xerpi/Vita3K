@@ -24,7 +24,9 @@
 #include <kernel/types.h>
 #include <packages/functions.h>
 
+#include <algorithm>
 #include <chrono>
+#include <span>
 #include <thread>
 #include <utility>
 
@@ -52,14 +54,7 @@ static void write_info(T *info, T full, SceSize size) {
     memcpy(info, &full, size);
 }
 
-// Finds a simple event or a timer, which are both events.
-static EventPtr find_event(EmuEnvState &emuenv, SceUID event_id) {
-    if (SimpleEventPtr event = emuenv.kernel.objects.find<SimpleEvent>(event_id))
-        return event;
-    return emuenv.kernel.objects.find<Timer>(event_id);
-}
-
-// Waits on a simple event or a timer, which are both events.
+// Waits on an event.
 static SceInt32 wait_event(EmuEnvState &emuenv, const char *export_name, SceUID thread_id, SceUID event_id, SceUInt32 bit_pattern, SceUInt32 *result_pattern, SceUInt64 *user_data, SceUInt32 *timeout, bool callbacks) {
     // The wait writes to local copies that go to the guest when it returns, so callbacks that run
     // during the wait still see the old values. Outputs the wait doesn't write are 0.
@@ -71,10 +66,8 @@ static SceInt32 wait_event(EmuEnvState &emuenv, const char *export_name, SceUID 
     SceUInt32 *const timeout_copy = timeout ? &time_left : nullptr;
     const ThreadStatePtr thread = emuenv.kernel.get_thread(thread_id);
     SceInt32 result;
-    if (const SimpleEventPtr event = emuenv.kernel.objects.find<SimpleEvent>(event_id))
-        result = event->wait(thread, bit_pattern, pattern_copy, data_copy, timeout_copy, callbacks);
-    else if (const TimerPtr timer = emuenv.kernel.objects.find<Timer>(event_id))
-        result = timer->wait(thread, bit_pattern, pattern_copy, data_copy, timeout_copy, callbacks);
+    if (const EventPtr event = find_event(emuenv.kernel.objects, event_id))
+        result = event->wait(*thread, bit_pattern, pattern_copy, data_copy, { .timeout = timeout_copy, .callbacks = callbacks });
     else
         result = RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_EVENT_ID);
     if (result_pattern)
@@ -95,7 +88,7 @@ static SceInt32 wait_event_flag(EmuEnvState &emuenv, const char *export_name, Sc
     SceUInt32 time_left = timeout ? *timeout : 0;
     SceInt32 result;
     if (const EventFlagPtr event = emuenv.kernel.objects.find<EventFlag>(evf_id))
-        result = event->wait(emuenv.kernel.get_thread(thread_id), bit_pattern, wait_mode, out_bits ? &bits : nullptr, timeout ? &time_left : nullptr, callbacks);
+        result = event->wait(*emuenv.kernel.get_thread(thread_id), bit_pattern, wait_mode, out_bits ? &bits : nullptr, { .timeout = timeout ? &time_left : nullptr, .callbacks = callbacks });
     else
         result = RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_EVF_ID);
     if (out_bits)
@@ -127,12 +120,10 @@ EXPORT(int, __sceKernelCreateLwMutex, Ptr<SceKernelLwMutexWork> workarea, const 
 
 EXPORT(SceInt32, _sceKernelCancelEvent, SceUID eventId, SceUInt32 *pNumWaitThreads) {
     TRACY_FUNC(_sceKernelCancelEvent, eventId, pNumWaitThreads);
-    const EventPtr event = find_event(emuenv, eventId);
+    const EventPtr event = find_event(emuenv.kernel.objects, eventId);
     if (!event)
         return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_EVENT_ID);
-    const SceInt32 result = event->cancel(pNumWaitThreads);
-    // A timer deleted since the lookup is reported like the other event functions do
-    return result == SCE_KERNEL_ERROR_UNKNOWN_TIMER_ID ? SCE_KERNEL_ERROR_UNKNOWN_EVENT_ID : result;
+    return event->cancel(pNumWaitThreads);
 }
 
 EXPORT(SceInt32, _sceKernelCancelEventFlag, SceUID event_id, SceUInt pattern, SceUInt32 *num_wait_thread) {
@@ -174,7 +165,7 @@ EXPORT(SceInt32, _sceKernelCancelMutex, SceUID mutexId, SceInt32 newCount, SceUI
     const MutexPtr mutex = emuenv.kernel.objects.find<HeavyMutex>(mutexId);
     if (!mutex)
         return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_MUTEX_ID);
-    return mutex->cancel(emuenv.kernel.get_thread(thread_id), newCount, pNumWaitThreads);
+    return mutex->cancel(*emuenv.kernel.get_thread(thread_id), newCount, pNumWaitThreads);
 }
 
 EXPORT(SceInt32, _sceKernelCancelRWLock, SceUID rwLockId, SceUInt32 *pNumReadWaitThreads, SceUInt32 *pNumWriteWaitThreads, SceInt32 flag) {
@@ -193,7 +184,7 @@ EXPORT(SceInt32, _sceKernelCancelRWLock, SceUID rwLockId, SceUInt32 *pNumReadWai
     const RWLockPtr rwlock = emuenv.kernel.objects.find<RWLock>(rwLockId);
     if (!rwlock)
         return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_RW_LOCK_ID);
-    return rwlock->cancel(emuenv.kernel.get_thread(thread_id), pNumReadWaitThreads, pNumWriteWaitThreads, flag);
+    return rwlock->cancel(*emuenv.kernel.get_thread(thread_id), pNumReadWaitThreads, pNumWriteWaitThreads, flag);
 }
 
 EXPORT(int, _sceKernelCancelSema, SceUID semaId, SceInt32 setCount, SceUInt32 *pNumWaitThreads) {
@@ -212,18 +203,23 @@ EXPORT(SceInt32, _sceKernelCancelTimer, SceUID timerId, SceUInt32 *pNumWaitThrea
     const TimerPtr timer = emuenv.kernel.objects.find<Timer>(timerId);
     if (!timer)
         return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_TIMER_ID);
-    return timer->cancel(pNumWaitThreads);
+    const SceInt32 result = timer->cancel(pNumWaitThreads);
+    // Report a timer deleted after the lookup with the timer error, like the other timer functions
+    return result == SCE_KERNEL_ERROR_UNKNOWN_EVENT_ID ? SCE_KERNEL_ERROR_UNKNOWN_TIMER_ID : result;
 }
 
 EXPORT(SceUID, _sceKernelCreateCond, const char *pName, SceUInt32 attr, SceUID mutexId, const SceKernelCondOptParam *pOptParam) {
     TRACY_FUNC(_sceKernelCreateCond, pName, attr, mutexId, pOptParam);
-    if (const SceInt32 error = SyncPrimitive::check_name(pName, attr))
+    if (const SceInt32 error = check_object_name(pName, attr))
         return RET_ERROR(error);
     const MutexPtr mutex = emuenv.kernel.objects.find<HeavyMutex>(mutexId);
     if (!mutex)
         return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_MUTEX_ID);
 
     const auto condvar = std::make_shared<HeavyCond>(attr, pName, mutex);
+    // Attaching fails if the mutex was deleted after the lookup
+    if (const SceInt32 error = condvar->attach())
+        return RET_ERROR(error);
     return emuenv.kernel.objects.add(condvar, emuenv.kernel.get_next_uid());
 }
 
@@ -240,13 +236,16 @@ EXPORT(int, _sceKernelCreateLwCond, Ptr<SceKernelLwCondWork> workarea, const cha
     TRACY_FUNC(_sceKernelCreateLwCond, workarea, name, attr, opt);
     const auto assoc_mutex_uid = opt.get(emuenv.mem)->workarea_mutex.get(emuenv.mem)->uid;
 
-    if (const SceInt32 error = SyncPrimitive::check_name(name, attr))
+    if (const SceInt32 error = check_object_name(name, attr))
         return RET_ERROR(error);
     const MutexPtr mutex = emuenv.kernel.objects.find<LwMutex>(assoc_mutex_uid);
     if (!mutex)
         return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_LW_MUTEX_ID);
 
     const auto condvar = std::make_shared<LwCond>(attr, name, mutex, workarea);
+    // Attaching fails if the mutex was deleted after the lookup
+    if (const SceInt32 error = condvar->attach())
+        return RET_ERROR(error);
     SceKernelLwCondWork *work = workarea.get(emuenv.mem);
     *work = {};
     work->uid = emuenv.kernel.objects.add(condvar, emuenv.kernel.get_next_uid());
@@ -303,7 +302,7 @@ EXPORT(SceUID, _sceKernelCreateSimpleEvent, const char *name, SceUInt32 attr, Sc
 
 EXPORT(int, _sceKernelCreateTimer, const char *name, SceUInt32 attr, const uint32_t *opt_params) {
     TRACY_FUNC(_sceKernelCreateTimer, name, attr, opt_params);
-    if (const SceInt32 error = SyncPrimitive::check_name(name, attr))
+    if (const SceInt32 error = check_object_name(name, attr))
         return RET_ERROR(error);
 
     const auto timer = std::make_shared<Timer>(attr, name, thread_id);
@@ -409,7 +408,7 @@ EXPORT(SceInt32, _sceKernelGetEventFlagInfo, SceUID evfId, Ptr<SceKernelEventFla
 EXPORT(SceInt32, _sceKernelGetEventInfo, SceUID eventId, Ptr<SceKernelEventInfo> pInfo) {
     TRACY_FUNC(_sceKernelGetEventInfo, eventId, pInfo);
     SceKernelEventInfo full;
-    const EventPtr event = find_event(emuenv, eventId);
+    const EventPtr event = find_event(emuenv.kernel.objects, eventId);
     if (!event || event->info(full) != SCE_KERNEL_OK)
         return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_EVENT_ID);
 
@@ -725,7 +724,7 @@ EXPORT(SceInt32, _sceKernelGetTimerInfo, SceUID timer_handle, Ptr<SceKernelTimer
     TRACY_FUNC(_sceKernelGetTimerInfo, timer_handle, pInfo);
     SceKernelTimerInfo full;
     const TimerPtr timer = emuenv.kernel.objects.find<Timer>(timer_handle);
-    if (!timer || timer->timer_info(full) != SCE_KERNEL_OK)
+    if (!timer || timer->info(full) != SCE_KERNEL_OK)
         return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_TIMER_ID);
 
     SceKernelTimerInfo *info = pInfo.get(emuenv.mem);
@@ -758,7 +757,7 @@ EXPORT(int, _sceKernelLockLwMutex, Ptr<SceKernelLwMutexWork> workarea, int lock_
     if (!mutex)
         return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_LW_MUTEX_ID);
     SceUInt32 time_left = ptimeout ? *ptimeout : 0;
-    const SceInt32 result = mutex->acquire(emuenv.mem, emuenv.kernel.get_thread(thread_id), lock_count, ptimeout ? &time_left : nullptr, false);
+    const SceInt32 result = mutex->acquire(emuenv.mem, *emuenv.kernel.get_thread(thread_id), lock_count, { .timeout = ptimeout ? &time_left : nullptr });
     if (ptimeout)
         *ptimeout = time_left;
     return result;
@@ -770,7 +769,7 @@ EXPORT(int, _sceKernelLockMutex, SceUID mutexid, int lock_count, unsigned int *t
     if (!mutex)
         return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_MUTEX_ID);
     SceUInt32 time_left = timeout ? *timeout : 0;
-    const SceInt32 result = mutex->acquire(emuenv.mem, emuenv.kernel.get_thread(thread_id), lock_count, timeout ? &time_left : nullptr, false);
+    const SceInt32 result = mutex->acquire(emuenv.mem, *emuenv.kernel.get_thread(thread_id), lock_count, { .timeout = timeout ? &time_left : nullptr });
     if (timeout)
         *timeout = time_left;
     return result;
@@ -782,7 +781,7 @@ EXPORT(SceInt32, _sceKernelLockMutexCB, SceUID mutexId, SceInt32 lockCount, SceU
     if (!mutex)
         return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_MUTEX_ID);
     SceUInt32 time_left = pTimeout ? *pTimeout : 0;
-    const SceInt32 result = mutex->acquire(emuenv.mem, emuenv.kernel.get_thread(thread_id), lockCount, pTimeout ? &time_left : nullptr, true);
+    const SceInt32 result = mutex->acquire(emuenv.mem, *emuenv.kernel.get_thread(thread_id), lockCount, { .timeout = pTimeout ? &time_left : nullptr, .callbacks = true });
     if (pTimeout)
         *pTimeout = time_left;
     return result;
@@ -794,7 +793,7 @@ EXPORT(SceInt32, _sceKernelLockReadRWLock, SceUID lock_id, SceUInt32 *timeout) {
     if (!rwlock)
         return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_RW_LOCK_ID);
     SceUInt32 time_left = timeout ? *timeout : 0;
-    const SceInt32 result = rwlock->acquire_read(emuenv.kernel.get_thread(thread_id), timeout ? &time_left : nullptr, false);
+    const SceInt32 result = rwlock->acquire(*emuenv.kernel.get_thread(thread_id), false, { .timeout = timeout ? &time_left : nullptr });
     if (timeout)
         *timeout = time_left;
     return result;
@@ -806,7 +805,7 @@ EXPORT(SceInt32, _sceKernelLockReadRWLockCB, SceUID lock_id, SceUInt32 *timeout)
     if (!rwlock)
         return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_RW_LOCK_ID);
     SceUInt32 time_left = timeout ? *timeout : 0;
-    const SceInt32 result = rwlock->acquire_read(emuenv.kernel.get_thread(thread_id), timeout ? &time_left : nullptr, true);
+    const SceInt32 result = rwlock->acquire(*emuenv.kernel.get_thread(thread_id), false, { .timeout = timeout ? &time_left : nullptr, .callbacks = true });
     if (timeout)
         *timeout = time_left;
     return result;
@@ -818,7 +817,7 @@ EXPORT(SceInt32, _sceKernelLockWriteRWLock, SceUID lock_id, SceUInt32 *timeout) 
     if (!rwlock)
         return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_RW_LOCK_ID);
     SceUInt32 time_left = timeout ? *timeout : 0;
-    const SceInt32 result = rwlock->acquire_write(emuenv.kernel.get_thread(thread_id), timeout ? &time_left : nullptr, false);
+    const SceInt32 result = rwlock->acquire(*emuenv.kernel.get_thread(thread_id), true, { .timeout = timeout ? &time_left : nullptr });
     if (timeout)
         *timeout = time_left;
     return result;
@@ -830,7 +829,7 @@ EXPORT(SceInt32, _sceKernelLockWriteRWLockCB, SceUID lock_id, SceUInt32 *timeout
     if (!rwlock)
         return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_RW_LOCK_ID);
     SceUInt32 time_left = timeout ? *timeout : 0;
-    const SceInt32 result = rwlock->acquire_write(emuenv.kernel.get_thread(thread_id), timeout ? &time_left : nullptr, true);
+    const SceInt32 result = rwlock->acquire(*emuenv.kernel.get_thread(thread_id), true, { .timeout = timeout ? &time_left : nullptr, .callbacks = true });
     if (timeout)
         *timeout = time_left;
     return result;
@@ -848,7 +847,7 @@ EXPORT(int, _sceKernelPollEvent, SceUID event_id, SceUInt32 bit_pattern, SceUInt
         *result_pattern = 0;
     if (user_data)
         *user_data = 0;
-    if (const EventPtr event = find_event(emuenv, event_id))
+    if (const EventPtr event = find_event(emuenv.kernel.objects, event_id))
         return event->poll(bit_pattern, result_pattern, user_data);
     return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_EVENT_ID);
 }
@@ -969,7 +968,7 @@ EXPORT(int, _sceKernelSignalLwCond, Ptr<SceKernelLwCondWork> workarea) {
     const CondvarPtr condvar = emuenv.kernel.objects.find<LwCond>(condid);
     if (!condvar)
         return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_LW_COND_ID);
-    return condvar->signal(Condvar::SignalTarget(Condvar::SignalTarget::Type::Any));
+    return condvar->signal();
 }
 
 EXPORT(int, _sceKernelSignalLwCondAll, Ptr<SceKernelLwCondWork> workarea) {
@@ -978,7 +977,7 @@ EXPORT(int, _sceKernelSignalLwCondAll, Ptr<SceKernelLwCondWork> workarea) {
     const CondvarPtr condvar = emuenv.kernel.objects.find<LwCond>(condid);
     if (!condvar)
         return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_LW_COND_ID);
-    return condvar->signal(Condvar::SignalTarget(Condvar::SignalTarget::Type::All));
+    return condvar->signal_all();
 }
 
 EXPORT(int, _sceKernelSignalLwCondTo) {
@@ -1022,7 +1021,7 @@ EXPORT(SceInt32, _sceKernelWaitCond, SceUID condId, SceUInt32 *pTimeout) {
     if (!condvar)
         return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_COND_ID);
     SceUInt32 time_left = pTimeout ? *pTimeout : 0;
-    const SceInt32 result = condvar->wait(emuenv.mem, emuenv.kernel.get_thread(thread_id), pTimeout ? &time_left : nullptr, false);
+    const SceInt32 result = condvar->wait(emuenv.mem, *emuenv.kernel.get_thread(thread_id), { .timeout = pTimeout ? &time_left : nullptr });
     if (pTimeout)
         *pTimeout = time_left;
     return result;
@@ -1034,7 +1033,7 @@ EXPORT(SceInt32, _sceKernelWaitCondCB, SceUID condId, SceUInt32 *pTimeout) {
     if (!condvar)
         return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_COND_ID);
     SceUInt32 time_left = pTimeout ? *pTimeout : 0;
-    const SceInt32 result = condvar->wait(emuenv.mem, emuenv.kernel.get_thread(thread_id), pTimeout ? &time_left : nullptr, true);
+    const SceInt32 result = condvar->wait(emuenv.mem, *emuenv.kernel.get_thread(thread_id), { .timeout = pTimeout ? &time_left : nullptr, .callbacks = true });
     if (pTimeout)
         *pTimeout = time_left;
     return result;
@@ -1077,7 +1076,7 @@ EXPORT(int, _sceKernelWaitLwCond, Ptr<SceKernelLwCondWork> workarea, SceUInt32 *
     if (!condvar)
         return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_LW_COND_ID);
     SceUInt32 time_left = timeout ? *timeout : 0;
-    const SceInt32 result = condvar->wait(emuenv.mem, emuenv.kernel.get_thread(thread_id), timeout ? &time_left : nullptr, false);
+    const SceInt32 result = condvar->wait(emuenv.mem, *emuenv.kernel.get_thread(thread_id), { .timeout = timeout ? &time_left : nullptr });
     if (timeout)
         *timeout = time_left;
     return result;
@@ -1090,20 +1089,53 @@ EXPORT(SceInt32, _sceKernelWaitLwCondCB, Ptr<SceKernelLwCondWork> pWork, SceUInt
     if (!condvar)
         return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_LW_COND_ID);
     SceUInt32 time_left = pTimeout ? *pTimeout : 0;
-    const SceInt32 result = condvar->wait(emuenv.mem, emuenv.kernel.get_thread(thread_id), pTimeout ? &time_left : nullptr, true);
+    const SceInt32 result = condvar->wait(emuenv.mem, *emuenv.kernel.get_thread(thread_id), { .timeout = pTimeout ? &time_left : nullptr, .callbacks = true });
     if (pTimeout)
         *pTimeout = time_left;
     return result;
 }
 
+// Waits for any or all events in a list and writes a result for each event that ended. Returns the
+// number of ended events if there is a result list, else 0.
+static SceInt32 wait_multiple_events(EmuEnvState &emuenv, SceUID thread_id, const SceKernelWaitEvent *list, SceUInt32 count, SceUInt32 mode, SceKernelResultEvent *results, SceUInt32 *timeout, bool callbacks) {
+    if (!list)
+        return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
+    if (count > SCE_KERNEL_MULTIPLE_EVENTS_MAX)
+        return SCE_KERNEL_ERROR_ILLEGAL_SIZE;
+    if (mode & ~(SCE_KERNEL_EVENT_WAIT_MODE_OR | SCE_KERNEL_EVENT_WAIT_MODE_AND))
+        return SCE_KERNEL_ERROR_ILLEGAL_MODE;
+
+    // The wait uses copies of the list and the timeout, so callbacks that run during it can't
+    // change them. Only the OR bit matters, so a mode of 0 waits for all the events.
+    // Keep the thread alive for the whole call, since the wait holds a reference to it
+    const ThreadStatePtr thread = emuenv.kernel.get_thread(thread_id);
+    const auto wait_mode = (mode & SCE_KERNEL_EVENT_WAIT_MODE_OR) ? MultiEventWait::Mode::any : MultiEventWait::Mode::all;
+    SceUInt32 time_left = timeout ? *timeout : 0;
+    MultiEventWait wait(emuenv.kernel, *thread, std::span{ list, count }, wait_mode, { .timeout = timeout ? &time_left : nullptr, .callbacks = callbacks });
+    const WaitResult result = wait.run();
+
+    // Write the whole result list. Entries past the ended events are zeroed.
+    const std::span<const SceKernelResultEvent> ended = wait.results();
+    if (results) {
+        const std::span out{ results, count };
+        std::ranges::copy(ended, out.begin());
+        std::ranges::fill(out.subspan(ended.size()), SceKernelResultEvent{});
+    }
+    if (timeout)
+        *timeout = time_left;
+    if (!result || *result != SCE_KERNEL_OK)
+        return guest_result(result);
+    return results ? static_cast<SceInt32>(ended.size()) : 0;
+}
+
 EXPORT(SceInt32, _sceKernelWaitMultipleEvents, SceKernelWaitEvent *events, SceUInt32 count, SceUInt32 mode, SceKernelWaitMultipleEventsOpt *opt) {
     TRACY_FUNC(_sceKernelWaitMultipleEvents, events, count, mode, opt);
-    return UNIMPLEMENTED();
+    return wait_multiple_events(emuenv, thread_id, events, count, mode, opt->results.get(emuenv.mem), opt->timeout.get(emuenv.mem), false);
 }
 
 EXPORT(SceInt32, _sceKernelWaitMultipleEventsCB, SceKernelWaitEvent *events, SceUInt32 count, SceUInt32 mode, SceKernelWaitMultipleEventsOpt *opt) {
     TRACY_FUNC(_sceKernelWaitMultipleEventsCB, events, count, mode, opt);
-    return UNIMPLEMENTED();
+    return wait_multiple_events(emuenv, thread_id, events, count, mode, opt->results.get(emuenv.mem), opt->timeout.get(emuenv.mem), true);
 }
 
 EXPORT(SceInt32, _sceKernelWaitSema, SceUID semaId, SceInt32 needCount, SceUInt32 *pTimeout) {
@@ -1112,7 +1144,7 @@ EXPORT(SceInt32, _sceKernelWaitSema, SceUID semaId, SceInt32 needCount, SceUInt3
     if (!semaphore)
         return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_SEMA_ID);
     SceUInt32 time_left = pTimeout ? *pTimeout : 0;
-    const SceInt32 result = semaphore->wait(emuenv.kernel.get_thread(thread_id), needCount, pTimeout ? &time_left : nullptr, false);
+    const SceInt32 result = semaphore->wait(*emuenv.kernel.get_thread(thread_id), needCount, { .timeout = pTimeout ? &time_left : nullptr });
     if (pTimeout)
         *pTimeout = time_left;
     return result;
@@ -1124,29 +1156,46 @@ EXPORT(SceInt32, _sceKernelWaitSemaCB, SceUID semaId, SceInt32 needCount, SceUIn
     if (!semaphore)
         return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_SEMA_ID);
     SceUInt32 time_left = pTimeout ? *pTimeout : 0;
-    const SceInt32 result = semaphore->wait(emuenv.kernel.get_thread(thread_id), needCount, pTimeout ? &time_left : nullptr, true);
+    const SceInt32 result = semaphore->wait(*emuenv.kernel.get_thread(thread_id), needCount, { .timeout = pTimeout ? &time_left : nullptr, .callbacks = true });
     if (pTimeout)
         *pTimeout = time_left;
     return result;
 }
 
+// Waits for a signal to the thread and writes the time left back to timeout
+static int wait_signal(const ThreadStatePtr &thread, SceUInt32 *timeout, bool callbacks) {
+    // The wait writes to a local copy that goes to the guest when it returns, so callbacks that run
+    // during the wait still see the old value
+    SceUInt32 time_left = timeout ? *timeout : 0;
+    const WaitResult r = thread->wait_for_signal({ .timeout = timeout ? &time_left : nullptr, .callbacks = callbacks });
+    if (timeout)
+        *timeout = time_left;
+    return guest_result(r);
+}
+
 EXPORT(int, _sceKernelWaitSignal, uint32_t unknown, uint32_t delay, SceUInt32 *timeout) {
     TRACY_FUNC(_sceKernelWaitSignal, unknown, delay, timeout);
-    return guest_result(emuenv.kernel.get_thread(thread_id)->wait_for_signal(timeout, false));
+    return wait_signal(emuenv.kernel.get_thread(thread_id), timeout, false);
 }
 
 EXPORT(int, _sceKernelWaitSignalCB, uint32_t unknown, uint32_t delay, SceUInt32 *timeout) {
     TRACY_FUNC(_sceKernelWaitSignalCB, unknown, delay, timeout);
-    const ThreadStatePtr thread = emuenv.kernel.get_thread(thread_id);
-    thread->process_callbacks();
-    return guest_result(thread->wait_for_signal(timeout, true));
+    return wait_signal(emuenv.kernel.get_thread(thread_id), timeout, true);
 }
 
-// Waits for target to end, writing the time left back to timeout
+// Waits for the target thread to end. Writes its exit status to stat and the time left to timeout.
 static int wait_thread_end(const ThreadStatePtr &waiter, const ThreadStatePtr &target, int *stat, SceUInt *timeout, bool callbacks) {
-    const Deadline deadline = deadline_from(timeout);
-    const WaitResult r = target->wait_for_thread_end(waiter, stat, deadline, callbacks);
-    writeback_timeout(timeout, deadline);
+    // The wait writes to local copies that go to the guest when it returns, so callbacks that run
+    // during the wait and other threads still see the old values. The status is written only on
+    // success.
+    SceInt32 status = 0;
+    SceUInt32 time_left = timeout ? *timeout : 0;
+    const WaitResult r = target->wait_for_thread_end(*waiter, status, { .timeout = timeout ? &time_left : nullptr, .callbacks = callbacks });
+    // Write the status first, so the time left wins if stat and timeout point to the same address
+    if (stat && r && *r == SCE_KERNEL_OK)
+        *stat = status;
+    if (timeout)
+        *timeout = time_left;
     return guest_result(r);
 }
 
@@ -1169,7 +1218,6 @@ EXPORT(int, _sceKernelWaitThreadEndCB, SceUID thid, int *stat, SceUInt *timeout)
         return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_THREAD_ID);
     if (target == waiter)
         return RET_ERROR(SCE_KERNEL_ERROR_ILLEGAL_THREAD_ID);
-    waiter->process_callbacks();
     return wait_thread_end(waiter, target, stat, timeout, true);
 }
 
@@ -1259,7 +1307,7 @@ EXPORT(int, sceKernelCheckWaitableStatus) {
 
 EXPORT(SceInt32, sceKernelClearEvent, SceUID event_id, SceUInt32 clear_pattern) {
     TRACY_FUNC(sceKernelClearEvent, event_id, clear_pattern);
-    if (const EventPtr event = find_event(emuenv, event_id))
+    if (const EventPtr event = find_event(emuenv.kernel.objects, event_id))
         return event->clear(clear_pattern);
     return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_EVENT_ID);
 }
@@ -1586,7 +1634,7 @@ EXPORT(SceInt32, sceKernelNotifyCallback, SceUID callbackId, SceInt32 notifyArg)
     if (!cb)
         return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_CALLBACK_ID);
 
-    cb->direct_notify(notifyArg);
+    cb->notify(SCE_UID_INVALID_UID, notifyArg);
 
     return SCE_KERNEL_OK;
 }
@@ -1621,6 +1669,9 @@ EXPORT(SceUID, sceKernelOpenMsgPipe, const char *pName) {
     if (!found)
         return RET_ERROR(SCE_KERNEL_ERROR_UID_CANNOT_FIND_BY_NAME);
 
+    // If the pipe was deleted after the lookup, fail as if the name wasn't found
+    if (found->set_system_event(SCE_KERNEL_EVENT_OPEN, system_event_user_data(thread_id)) != SCE_KERNEL_OK)
+        return RET_ERROR(SCE_KERNEL_ERROR_UID_CANNOT_FIND_BY_NAME);
     return found->uid;
 }
 
@@ -1702,7 +1753,7 @@ EXPORT(int, sceKernelPollSema, SceUID semaid, int32_t needCount) {
     if (!semaphore) {
         return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_SEMA_ID);
     }
-    return semaphore->poll(emuenv.kernel.get_thread(thread_id), needCount);
+    return semaphore->poll(*emuenv.kernel.get_thread(thread_id), needCount);
 }
 
 EXPORT(SceInt32, sceKernelPulseEvent, SceUID event_id, SceUInt32 set_pattern, SceUInt64 user_data) {
@@ -1710,7 +1761,7 @@ EXPORT(SceInt32, sceKernelPulseEvent, SceUID event_id, SceUInt32 set_pattern, Sc
     const SimpleEventPtr event = emuenv.kernel.objects.find<SimpleEvent>(event_id);
     if (!event)
         return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_EVENT_ID);
-    return event->set_or_pulse(set_pattern, user_data, false);
+    return event->set(set_pattern, user_data, false);
 }
 
 EXPORT(int, sceKernelRegisterCallbackToEvent) {
@@ -1742,7 +1793,7 @@ EXPORT(SceInt32, sceKernelSetEvent, SceUID event_id, SceUInt32 set_pattern, SceU
     const SimpleEventPtr event = emuenv.kernel.objects.find<SimpleEvent>(event_id);
     if (!event)
         return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_EVENT_ID);
-    return event->set_or_pulse(set_pattern, user_data, true);
+    return event->set(set_pattern, user_data, true);
 }
 
 EXPORT(SceInt32, sceKernelSetEventFlag, SceUID evfId, SceUInt32 bitPattern) {
@@ -1772,7 +1823,7 @@ EXPORT(int, sceKernelSignalCond, SceUID condid) {
     const CondvarPtr condvar = emuenv.kernel.objects.find<HeavyCond>(condid);
     if (!condvar)
         return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_COND_ID);
-    return condvar->signal(Condvar::SignalTarget(Condvar::SignalTarget::Type::Any));
+    return condvar->signal();
 }
 
 EXPORT(int, sceKernelSignalCondAll, SceUID condid) {
@@ -1780,7 +1831,7 @@ EXPORT(int, sceKernelSignalCondAll, SceUID condid) {
     const CondvarPtr condvar = emuenv.kernel.objects.find<HeavyCond>(condid);
     if (!condvar)
         return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_COND_ID);
-    return condvar->signal(Condvar::SignalTarget(Condvar::SignalTarget::Type::All));
+    return condvar->signal_all();
 }
 
 EXPORT(int, sceKernelSignalCondTo, SceUID condid, SceUID thread_target) {
@@ -1790,7 +1841,7 @@ EXPORT(int, sceKernelSignalCondTo, SceUID condid, SceUID thread_target) {
         return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_COND_ID);
     if (!emuenv.kernel.get_thread(thread_target))
         return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_THREAD_ID);
-    return condvar->signal(Condvar::SignalTarget(Condvar::SignalTarget::Type::Specific, thread_target));
+    return condvar->signal_to(thread_target);
 }
 
 EXPORT(int, sceKernelSignalSema, SceUID semaid, int signal) {
@@ -1831,7 +1882,7 @@ EXPORT(int, sceKernelTryLockMutex, SceUID mutexid, int lock_count) {
     const MutexPtr mutex = emuenv.kernel.objects.find<HeavyMutex>(mutexid);
     if (!mutex)
         return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_MUTEX_ID);
-    return mutex->try_acquire(emuenv.mem, emuenv.kernel.get_thread(thread_id), lock_count);
+    return mutex->try_acquire(emuenv.mem, *emuenv.kernel.get_thread(thread_id), lock_count);
 }
 
 EXPORT(SceInt32, sceKernelTryLockReadRWLock, SceUID lock_id) {
@@ -1839,7 +1890,7 @@ EXPORT(SceInt32, sceKernelTryLockReadRWLock, SceUID lock_id) {
     const RWLockPtr rwlock = emuenv.kernel.objects.find<RWLock>(lock_id);
     if (!rwlock)
         return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_RW_LOCK_ID);
-    return rwlock->try_acquire_read(emuenv.kernel.get_thread(thread_id));
+    return rwlock->try_acquire(*emuenv.kernel.get_thread(thread_id), false);
 }
 
 EXPORT(SceInt32, sceKernelTryLockWriteRWLock, SceUID lock_id) {
@@ -1847,7 +1898,7 @@ EXPORT(SceInt32, sceKernelTryLockWriteRWLock, SceUID lock_id) {
     const RWLockPtr rwlock = emuenv.kernel.objects.find<RWLock>(lock_id);
     if (!rwlock)
         return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_RW_LOCK_ID);
-    return rwlock->try_acquire_write(emuenv.kernel.get_thread(thread_id));
+    return rwlock->try_acquire(*emuenv.kernel.get_thread(thread_id), true);
 }
 
 EXPORT(int, sceKernelUnlockMutex, SceUID mutexid, int unlock_count) {
@@ -1855,7 +1906,7 @@ EXPORT(int, sceKernelUnlockMutex, SceUID mutexid, int unlock_count) {
     const MutexPtr mutex = emuenv.kernel.objects.find<HeavyMutex>(mutexid);
     if (!mutex)
         return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_MUTEX_ID);
-    return mutex->release(emuenv.mem, emuenv.kernel.get_thread(thread_id), unlock_count);
+    return mutex->release(emuenv.mem, *emuenv.kernel.get_thread(thread_id), unlock_count);
 }
 
 EXPORT(int, sceKernelUnlockReadRWLock, SceUID lock_id) {
@@ -1863,7 +1914,7 @@ EXPORT(int, sceKernelUnlockReadRWLock, SceUID lock_id) {
     const RWLockPtr rwlock = emuenv.kernel.objects.find<RWLock>(lock_id);
     if (!rwlock)
         return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_RW_LOCK_ID);
-    return rwlock->release_read(emuenv.kernel.get_thread(thread_id));
+    return rwlock->release(*emuenv.kernel.get_thread(thread_id), false);
 }
 
 EXPORT(int, sceKernelUnlockWriteRWLock, SceUID lock_id) {
@@ -1871,7 +1922,7 @@ EXPORT(int, sceKernelUnlockWriteRWLock, SceUID lock_id) {
     const RWLockPtr rwlock = emuenv.kernel.objects.find<RWLock>(lock_id);
     if (!rwlock)
         return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_RW_LOCK_ID);
-    return rwlock->release_write(emuenv.kernel.get_thread(thread_id));
+    return rwlock->release(*emuenv.kernel.get_thread(thread_id), true);
 }
 
 EXPORT(int, sceKernelUnregisterCallbackFromEvent) {

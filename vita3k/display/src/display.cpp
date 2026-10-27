@@ -25,6 +25,7 @@
 
 #include <chrono>
 #include <motion/functions.h>
+#include <optional>
 #include <touch/functions.h>
 
 // Code heavily influenced by PPSSSPP's SceDisplay.cpp
@@ -34,6 +35,36 @@ static constexpr int64_t TARGET_MICRO_PER_FRAME = 1000000LL / TARGET_FPS;
 // how many cycles do we need to see before we start predicting the next frame
 static constexpr int predict_threshold = 3;
 static constexpr int max_expected_swapchain_size = 6;
+
+// Notifies the vblank callbacks in ascending UID order. Each callback is looked up under the
+// display lock and notified without it, because a notify may take the lock of the object its thread
+// waits on. The pass stops at the highest UID registered when it starts. A callback registered
+// during the pass is notified if its UID is above the current one and within that limit. A callback
+// unregistered before the pass reaches it is skipped. One unregistered after it was looked up still
+// gets its notify.
+static void notify_vblank_callbacks(DisplayState &display) {
+    // The highest UID this pass notifies, and the UID of the last callback looked up
+    std::optional<SceUID> end;
+    std::optional<SceUID> last;
+    while (true) {
+        CallbackPtr cb;
+        {
+            const std::lock_guard<std::mutex> guard(display.mutex);
+            const auto &callbacks = display.vblank_callbacks;
+            if (!end) {
+                if (callbacks.empty())
+                    return;
+                end = callbacks.rbegin()->first;
+            }
+            const auto it = last ? callbacks.upper_bound(*last) : callbacks.begin();
+            if (it == callbacks.end() || it->first > *end)
+                return;
+            last = it->first;
+            cb = it->second;
+        }
+        cb->notify(cb->get_notifier_id(), 0);
+    }
+}
 
 static void vblank_sync_thread(EmuEnvState &emuenv) {
     DisplayState &display = emuenv.display;
@@ -58,14 +89,18 @@ static void vblank_sync_thread(EmuEnvState &emuenv) {
             // maybe we should also use a mutex for this part, but it shouldn't be an issue
             touch_vsync_update(emuenv);
             refresh_motion(emuenv.motion, emuenv.ctrl);
-
-            // Notify Vblank callback in each VBLANK start
-            for (auto &[_, cb] : display.vblank_callbacks)
-                cb->event_notify(cb->get_notifier_id());
-
-            display.vblank_waiters.wake_if([&](auto &waiter) {
-                return waiter.entry.target_vcount <= display.vblank_count;
-            });
+        }
+        // Notify the callbacks before ending the vblank waits
+        notify_vblank_callbacks(display);
+        {
+            const std::lock_guard<std::mutex> guard(display.mutex);
+            // End the waits whose vblank came
+            auto &waiters = display.vblank_waiters;
+            for (auto it = waiters.begin(); it != waiters.end();) {
+                auto &node = *it++;
+                if (*node.request.target <= display.vblank_count)
+                    waiters.complete(node);
+            }
         }
         const auto time_ms = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
         const auto time_left = TARGET_MICRO_PER_FRAME - (time_ms % TARGET_MICRO_PER_FRAME);
@@ -77,18 +112,32 @@ void start_sync_thread(EmuEnvState &emuenv) {
     emuenv.display.vblank_thread = std::make_unique<std::thread>(vblank_sync_thread, std::ref(emuenv));
 }
 
-void wait_vblank(DisplayState &display, const ThreadStatePtr &wait_thread, const uint64_t target_vcount, const bool is_cb) {
-    if (!wait_thread) {
-        return;
-    }
+// Waits for the vblank the request asks for. Nothing runs after the wait, so a thread exiting during it
+// needs no handling here.
+static void wait_for_vblank(DisplayState &display, ThreadState &thread, VBlankRequest request, bool is_cb) {
+    // A vblank wait shows in thread info as an event wait with no object
+    QueuedThreadWait wait(display, display.vblank_waiters, std::unique_lock{ display.mutex }, thread, { .type = SCE_KERNEL_WAITTYPE_EVENT }, request, { .callbacks = is_cb });
+    VBlankRequest &vblank = wait.node.request;
+    // The display is never deleted
+    std::ignore = wait.run(FinalCallbackCheck::after_wait, [&]() -> std::optional<SceInt32> {
+        // A since_setbuf wait counts from the last sceDisplaySetFrameBuf. Other waits count from the
+        // vblank where the thread's last display wait ended, and wait for at least one vblank.
+        if (!vblank.target)
+            vblank.target = vblank.since_setbuf ? display.last_setframe_vblank_count + vblank.vcount : thread.next_display_wait(display.vblank_count + 1, vblank.vcount);
+        if (*vblank.target > display.vblank_count)
+            return std::nullopt;
+        return SCE_KERNEL_OK;
+    });
+}
 
-    std::unique_lock<std::mutex> lock(display.mutex);
+void wait_vblank(DisplayState &display, const ThreadStatePtr &wait_thread, uint64_t target_vcount, bool is_cb) {
+    if (wait_thread)
+        wait_for_vblank(display, *wait_thread, VBlankRequest{ .target = target_vcount }, is_cb);
+}
 
-    if (target_vcount <= display.vblank_count)
-        return;
-
-    // Nothing runs after the wait, so a thread exiting during it needs no handling here
-    (void)display.vblank_waiters.wait(lock, wait_thread, { .type = SCE_KERNEL_WAITTYPE_EVENT, .callbacks = is_cb }, { target_vcount }, Deadline::max());
+void wait_display_vblank(DisplayState &display, const ThreadStatePtr &wait_thread, int vcount, bool since_setbuf, bool is_cb) {
+    if (wait_thread)
+        wait_for_vblank(display, *wait_thread, VBlankRequest{ .vcount = vcount, .since_setbuf = since_setbuf }, is_cb);
 }
 
 static void reset_swapchain_cycle(DisplayState &display, Address sync_object) {
