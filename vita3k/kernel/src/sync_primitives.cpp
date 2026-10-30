@@ -85,7 +85,7 @@ MultiEventWait::MultiEventWait(KernelState &kernel, ThreadState &thread, std::sp
 Deadline MultiEventWait::recheck(Deadline until) {
     fire_due(until);
     // Timer events only fire when someone checks the timer. Look again at the next event of each
-    // timer where this thread is the first waiter.
+    // timer this thread is still queued on.
     Deadline look = Deadline::max();
     for (SceUInt32 i = 0; i < count; i++) {
         if (queued.test(i))
@@ -127,6 +127,11 @@ WaitResult MultiEventWait::run() {
         }
         return ended;
     }
+}
+
+bool MultiEventWait::running() {
+    const std::lock_guard<std::mutex> lock(thread.mutex);
+    return scanning || thread.still_waits();
 }
 
 bool MultiEventWait::accept(SceUInt32 index, SceInt32 result, SceUInt32 bits, SceUInt64 user_data) {
@@ -316,7 +321,7 @@ Deadline Event::next_fire() {
 
 Deadline Event::watch_until(const WaitNode<Request> &token) {
     const auto guard = lock();
-    if (!guard || waiters.front() != &token)
+    if (!guard || !waiters.contains(token))
         return Deadline::max();
     return event_deadline();
 }
@@ -334,24 +339,19 @@ Deadline Event::event_deadline() const {
     return timer ? timer->event_deadline() : Deadline::max();
 }
 
-void Event::wake_first() {
-    if (const auto *const first = waiters.front())
-        first->wait.thread.wake();
-}
-
 SceInt32 Event::wait(ThreadState &thread, SceUInt32 wait_pattern, SceUInt32 *result_pattern, SceUInt64 *user_data, WaitOptions options) {
     auto guard = lock();
     if (!guard)
         return SCE_KERNEL_ERROR_UNKNOWN_EVENT_ID;
 
-    // The event's wait also fires the timer events that come due while it waits. Only the first
-    // waiter watches the clock, and serve_locked() wakes whoever becomes the new first.
+    // The event's wait also fires the timer events that come due while it waits. Every waiter
+    // watches the clock.
     struct EventWait final : QueuedThreadWait<Event, Request> {
         using QueuedThreadWait::QueuedThreadWait;
         Deadline recheck(Deadline until) override {
             while (owner.event_deadline() <= until && owner.catch_up()) {
             }
-            return queue.front() == &node ? owner.event_deadline() : Deadline::max();
+            return owner.event_deadline();
         }
     };
     // A wait for pattern 0 matches nothing, so it lasts until its timeout, a cancel or a delete
@@ -448,14 +448,14 @@ SceInt32 Event::set_system_event(SceUInt32 event, SceUInt64 user_data) {
     return SCE_KERNEL_OK;
 }
 
-void Event::fire(SceUInt32 set_pattern, SceUInt64 user_data, bool is_set) {
+void Event::fire(SceUInt32 set_pattern, SceUInt64 user_data, bool is_set, Deadline due) {
     // A set or pulse of no bits changes nothing, not even the user data
     if (set_pattern == 0)
         return;
 
     pattern |= set_pattern;
     last_user_data = user_data;
-    serve_locked();
+    serve_locked(due);
 
     // A pulse clears its bits once the waiters had them, also the ones set before it, and keeps its
     // user data
@@ -463,10 +463,14 @@ void Event::fire(SceUInt32 set_pattern, SceUInt64 user_data, bool is_set) {
         pattern &= ~set_pattern;
 }
 
-void Event::serve_locked() {
+void Event::serve_locked(Deadline due) {
     for (auto it = waiters.begin(); it != waiters.end();) {
         auto &node = *it++;
         const Request &request = node.request;
+        // A running wait whose deadline came before the timer event times out first. The token of a
+        // multiple event wait that already ended still goes to take(), which unlinks it.
+        if (node.wait.deadline < due && (!request.multi || request.multi->running()))
+            continue;
         if (!take(request))
             continue;
         if (request.multi)
@@ -474,9 +478,6 @@ void Event::serve_locked() {
         else
             waiters.complete(node, SCE_KERNEL_OK);
     }
-    // The timer may have a new first waiter now. Wake it so it watches for the next event.
-    if (timer)
-        wake_first();
 }
 
 SceInt32 Event::clear(SceUInt32 clear_pattern) {
@@ -549,7 +550,7 @@ bool Timer::catch_up() {
     const uint64_t now = get_current_time();
     if (next_event > now)
         return false;
-    fire(SCE_KERNEL_EVENT_TIMER, 0, !is_pulse);
+    fire(SCE_KERNEL_EVENT_TIMER, 0, !is_pulse, event_deadline());
     // A one shot event leaves the queue but stays armed, so a start or a set time can queue it again
     if (!is_repeat) {
         next_event = std::numeric_limits<uint64_t>::max();
@@ -568,8 +569,9 @@ bool Timer::catch_up() {
 
 void Timer::queue_event(uint64_t deadline) {
     next_event = std::max(deadline, get_current_time() + TIMER_EVENT_FLOOR);
-    // The first waiter sleeps until the old event time, so wake it to see the new one
-    wake_first();
+    // The waiters sleep until the old event time, so wake them to see the new one
+    for (const auto &waiter : waiters)
+        waiter.wait.thread.wake();
 }
 
 Deadline Timer::event_deadline() const {

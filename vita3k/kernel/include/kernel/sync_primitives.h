@@ -89,8 +89,9 @@ protected:
     };
 
     friend class QueuedThreadWait<Event, Request>;
-    // Hands the bits to the waiters they match, then wakes a timer's first remaining waiter
-    void serve_locked();
+    // Hands the bits to the waiters they match. For a timer event due at due, a waiter whose
+    // deadline came before it is skipped, since it times out first.
+    void serve_locked(Deadline due = Deadline::min());
 
     // Queues, watches and removes the nodes of its entries
     friend class MultiEventWait;
@@ -105,15 +106,16 @@ protected:
     // Returns when the timer event fires next, or the maximum if it never will (not a timer, not
     // armed or deleted)
     Deadline next_fire();
-    // Returns when this entry must check the timer again. Only the first waiter watches the timer,
-    // so the others get the maximum. The timer wakes whichever waiter becomes first.
+    // Returns when this entry must check the timer again, the maximum once it left the queue. Every
+    // queued waiter watches the timer, and the timer wakes them all when its next event changes.
     Deadline watch_until(const WaitNode<Request> &token);
     // Fires the timer event if it is due by the given time, and returns whether it fired
     bool update(Deadline until);
 
     // Object operations. The lock must be held.
-    // Sets or pulses the bits and the user data, and wakes the waiters they match
-    void fire(SceUInt32 set_pattern, SceUInt64 user_data, bool is_set);
+    // Sets or pulses the bits and the user data, and wakes the waiters they match. due is when a
+    // timer event was due, see serve_locked().
+    void fire(SceUInt32 set_pattern, SceUInt64 user_data, bool is_set, Deadline due = Deadline::min());
     // Fires the delete event, then wakes the remaining waiters with WAIT_DELETE
     void on_delete(SceUID deleter) override;
     // Hands the matching bits to the request if any are set, and clears them on an auto reset
@@ -127,8 +129,6 @@ protected:
     // Returns when the timer event is due, even if that time already passed. Returns the maximum if
     // this event isn't a timer or the timer isn't armed.
     Deadline event_deadline() const;
-    // Wakes the first waiter so it checks the timer again
-    void wake_first();
 
     // Guarded by the lock
     WaitQueue<Request> waiters;
@@ -186,8 +186,8 @@ private:
     // Fires the event if it is due: sets or pulses SCE_KERNEL_EVENT_TIMER, and queues a repeating
     // event again an interval after it was due. Returns whether it fired. The lock must be held.
     bool catch_up();
-    // Queues the event to be due at the clock time deadline, and wakes the first waiter so it sees
-    // the new time. The lock must be held.
+    // Queues the event to be due at the clock time deadline, and wakes the waiters so they see the
+    // new time. The lock must be held.
     void queue_event(uint64_t deadline);
     // Returns when the next event is due, on the clock of wait deadlines. The lock must be held.
     Deadline event_deadline() const;
@@ -259,6 +259,8 @@ private:
     // false if the entry already ended or the wait takes no more results, so the event keeps its
     // bits. Called by the event with its lock held, and by scan(). Takes the thread's mutex.
     bool accept(SceUInt32 index, SceInt32 result, SceUInt32 bits, SceUInt64 user_data = 0);
+    // Whether the wait still takes results. Takes the thread's mutex.
+    bool running();
 
     // Fires the due timer events of the entries queued in the current pass
     Deadline recheck(Deadline until) override;
