@@ -116,7 +116,8 @@ void start_sync_thread(EmuEnvState &emuenv) {
 // needs no handling here.
 static void wait_for_vblank(DisplayState &display, ThreadState &thread, VBlankRequest request, bool is_cb) {
     // A vblank wait shows in thread info as an event wait with no object
-    QueuedThreadWait wait(display, display.vblank_waiters, std::unique_lock{ display.mutex }, thread, { .type = SCE_KERNEL_WAITTYPE_EVENT }, request, { .callbacks = is_cb });
+    WaitOptions options(nullptr, is_cb);
+    QueuedThreadWait wait(display, display.vblank_waiters, std::unique_lock{ display.mutex }, thread, { .type = SCE_KERNEL_WAITTYPE_EVENT }, request, options);
     VBlankRequest &vblank = wait.node.request;
     // The display is never deleted
     std::ignore = wait.run(FinalCallbackCheck::after_wait, [&]() -> std::optional<SceInt32> {

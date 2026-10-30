@@ -45,14 +45,36 @@ struct WaitTarget {
     SceUID id = -1;
 };
 
-// Options for one wait call: the timeout and whether it runs callbacks
+// Options for one call that may wait: its timeout and whether it runs callbacks. The export makes
+// them where the call reads its timeout, and they write the time left back when the export returns,
+// after the call's other outputs.
 struct WaitOptions {
-    // Points to the timeout in microseconds. The wait writes the time left back to it. Null waits
-    // forever.
-    SceUInt32 *timeout = nullptr;
+    WaitOptions(SceUInt32 *timeout = nullptr, bool callbacks = false, bool timeout_in_place = false)
+        : timeout(timeout)
+        , callbacks(callbacks)
+        , timeout_in_place(timeout_in_place)
+        , timeout_value(timeout ? *timeout : 0)
+        , left(timeout_value) {}
+    WaitOptions(const WaitOptions &) = delete;
+    WaitOptions &operator=(const WaitOptions &) = delete;
+    ~WaitOptions() {
+        if (timeout && !timeout_in_place)
+            *timeout = left;
+    }
+
+    // The caller's timeout in microseconds. Null waits forever.
+    SceUInt32 *const timeout;
     // Whether this is the callback variant of the call. It runs notified callbacks, and thread info
     // shows its wait type with the callback bit.
-    bool callbacks = false;
+    const bool callbacks;
+    // A message pipe writes the time left to timeout each time its wait ends, and nothing when it
+    // returns
+    const bool timeout_in_place;
+    // The timeout when the call began
+    const SceUInt32 timeout_value;
+    // The time left, set by whoever ends a wait of the call and when a timeout refuses one, under
+    // the waiting thread's lock
+    SceUInt32 left;
 };
 
 // One wait of a thread, on the waiting call's stack. The thread points to it from begin() until
@@ -63,12 +85,13 @@ class ThreadWait {
 public:
     // object_lock is the call's hold of the object's lock for a queued wait, empty for a wait in no
     // queue
-    ThreadWait(ThreadState &thread, WaitTarget target, WaitOptions options, Deadline deadline, std::unique_lock<std::mutex> object_lock = {})
+    ThreadWait(ThreadState &thread, WaitTarget target, WaitOptions &options, Deadline deadline, std::unique_lock<std::mutex> object_lock = {})
         : thread(thread)
         , target(target)
         , callbacks(options.callbacks)
         , deadline(deadline)
-        , time_left(options.timeout)
+        , queued(object_lock.mutex() != nullptr)
+        , options(options)
         , object_lock(std::move(object_lock)) {}
     ThreadWait(const ThreadWait &) = delete;
     ThreadWait &operator=(const ThreadWait &) = delete;
@@ -83,21 +106,28 @@ public:
     // Callback variant: a callback notify ends the wait, and thread info shows the callback bit
     const bool callbacks;
     const Deadline deadline;
-    // Where whoever ends the wait writes the time left, or null
-    SceUInt32 *const time_left;
+    // Whether the wait is in one object's queue, which only its object lock holder can end. A delay,
+    // a signal wait and a multiple event wait are in no queue. Set before object_lock is taken over.
+    const bool queued;
 
 protected:
     ~ThreadWait() = default;
 
     // Makes this the thread's current wait, or returns what it ends with instead
     [[nodiscard]] std::optional<WaitResult> begin();
-    // Sleeps until the wait ends, with the object lock released only while asleep, then drops the
-    // wait and returns how it ended
-    [[nodiscard]] WaitResult sleep();
+    // Sleeps until the wait ends, with the object lock released only while asleep. The waiter ends
+    // the wait itself for its timeout, its exit or, if it is queued, a notified callback, and then
+    // returns how it ended. It returns nothing if another party ended it.
+    [[nodiscard]] std::optional<WaitResult> sleep();
+    // Drops the ended wait and returns how it ended, ThreadExiting if the thread is exiting
+    [[nodiscard]] WaitResult retire();
     // Ends the running wait with result, writes its time left and wakes the thread. end() takes the
     // thread lock, end_locked() needs it held.
     void end(WaitResult result);
     void end_locked(WaitResult result);
+    // Fires the timer events due by until and returns when sleep() looks at the clock again. A wait
+    // without timer events never needs to look.
+    virtual Deadline watch(Deadline) { return Deadline::max(); }
 
     // The thread's priority when the wait began, which a queued wait is queued at
     int priority = 0;
@@ -107,25 +137,19 @@ private:
     template <typename R>
     friend class WaitQueue;
 
-    // Ends the running wait with result: a timeout, the thread exiting, or for a queued wait a
-    // notified callback. Called with the thread lock unlocked. A queued wait is called with its
-    // object lock held, and leaves its queue and serves the waiters behind it. The default ends the
-    // wait under the thread lock, unless a signal or a callback notify ended it first.
-    virtual void claim(WaitResult result);
-    // Fires the timer events due by until, and returns when to look at the clock again
-    virtual Deadline recheck(Deadline) { return Deadline::max(); }
-
+    // The call's options, which keep its time left
+    WaitOptions &options;
     // Set once by whoever ends the wait, under the thread lock
     std::optional<WaitResult> result;
     // Only the waiting call uses it, a notify never does
     std::unique_lock<std::mutex> object_lock;
 };
 
-// Converts a guest timeout in microseconds into a deadline. A null timeout waits forever.
-inline Deadline deadline_from(const SceUInt32 *timeout) {
-    if (!timeout)
+// Converts the timeout of a call in microseconds into a deadline. No timeout waits forever.
+inline Deadline deadline_from(const WaitOptions &options) {
+    if (!options.timeout)
         return Deadline::max();
-    return std::chrono::steady_clock::now() + std::chrono::microseconds(*timeout);
+    return std::chrono::steady_clock::now() + std::chrono::microseconds(options.timeout_value);
 }
 
 // Returns the microseconds left before the deadline, 0 once it passed.
@@ -233,10 +257,13 @@ enum class FinalCallbackCheck {
 // alive for the whole call.
 template <typename Owner, typename R>
 class QueuedThreadWait : public ThreadWait {
+    // An event flag runs the steps of block() itself, to write its outputs before it serves
+    friend Owner;
+
 public:
     // Takes over guard, the caller's hold of the object's lock
-    QueuedThreadWait(Owner &owner, WaitQueue<R> &queue, std::unique_lock<std::mutex> guard, ThreadState &thread, WaitTarget target, R request, WaitOptions options)
-        : ThreadWait(thread, target, options, deadline_from(options.timeout), std::move(guard))
+    QueuedThreadWait(Owner &owner, WaitQueue<R> &queue, std::unique_lock<std::mutex> guard, ThreadState &thread, WaitTarget target, R request, WaitOptions &options)
+        : ThreadWait(thread, target, options, deadline_from(options), std::move(guard))
         , node{ *this, std::move(request) }
         , owner(owner)
         , queue(queue) {}
@@ -247,8 +274,13 @@ public:
         if (const std::optional<WaitResult> refused = begin())
             return *refused;
         queue.push(node, priority, behind_head);
-        // Whoever ends the wait takes the node off, under the queue's lock
-        return sleep();
+        // A waker takes the node off. A waiter that ended the wait itself takes it off and serves the
+        // waiters behind before it retires, all under the object lock.
+        if (sleep()) {
+            queue.remove(node);
+            owner.serve_locked();
+        }
+        return retire();
     }
 
     // Runs the passes of the call: the notified callbacks, then try_now(), which returns the call's
@@ -278,12 +310,6 @@ public:
     WaitNode<R> node;
 
 protected:
-    // Takes the node off and ends the wait with result, then serves the remaining waiters
-    void claim(WaitResult result) override {
-        queue.complete(node, result);
-        owner.serve_locked();
-    }
-
     Owner &owner;
     WaitQueue<R> &queue;
 };

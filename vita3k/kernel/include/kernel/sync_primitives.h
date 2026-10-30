@@ -65,7 +65,7 @@ public:
 
     // Waits until any bit of wait_pattern is set. Writes the matched bits to result_pattern, the
     // user data to user_data and the remaining time back to the timeout.
-    SceInt32 wait(ThreadState &thread, SceUInt32 wait_pattern, SceUInt32 *result_pattern, SceUInt64 *user_data, WaitOptions options);
+    SceInt32 wait(ThreadState &thread, SceUInt32 wait_pattern, SceUInt32 *result_pattern, SceUInt64 *user_data, WaitOptions &options);
     SceInt32 poll(SceUInt32 wait_pattern, SceUInt32 *result_pattern, SceUInt64 *user_data);
     SceInt32 clear(SceUInt32 clear_pattern);
     // Wakes every waiter with WAIT_CANCEL. A timer also disarms its pending event.
@@ -89,6 +89,8 @@ protected:
     };
 
     friend class QueuedThreadWait<Event, Request>;
+    // A single event wait, which fires the timer events due while it sleeps
+    class Wait;
     // Hands the bits to the waiters they match. For a timer event due at due, a waiter whose
     // deadline came before it is skipped, since it times out first.
     void serve_locked(Deadline due = Deadline::min());
@@ -226,8 +228,8 @@ public:
         all,
     };
 
-    // Writes the time left back through options.timeout if it is set
-    MultiEventWait(KernelState &kernel, ThreadState &thread, std::span<const SceKernelWaitEvent> list, Mode mode, WaitOptions options);
+    // Keeps the time left in options, which outlive it
+    MultiEventWait(KernelState &kernel, ThreadState &thread, std::span<const SceKernelWaitEvent> list, Mode mode, WaitOptions &options);
 
     // Waits for any or all of the events
     WaitResult run();
@@ -262,8 +264,9 @@ private:
     // Whether the wait still takes results. Takes the thread's mutex.
     bool running();
 
-    // Fires the due timer events of the entries queued in the current pass
-    Deadline recheck(Deadline until) override;
+    // Fires the due timer events of the entries queued in the current pass, and returns when to
+    // look at the clock again
+    Deadline watch(Deadline until) override;
     // Completes the entries whose event is set or deleted, and queues the nodes of the others. In
     // Mode::any it stops queueing once an entry completes. Sets queued.
     void scan();
@@ -277,11 +280,6 @@ private:
 
     const Mode mode;
     const SceUInt32 count;
-    // Where run() writes the time left, or null
-    SceUInt32 *const guest_left;
-    // Whoever ends a sleep writes the time left here, and run() copies it out only after a sleep
-    // that didn't end for an exit
-    SceUInt32 sleep_left = 0;
     // The constructor builds the first count entries in place, since a node can't be copied and
     // needs its thread
     std::array<std::optional<Entry>, SCE_KERNEL_MULTIPLE_EVENTS_MAX> entries;
@@ -312,7 +310,7 @@ public:
     // Returns the error a create with these arguments gets, or SCE_KERNEL_OK
     static SceInt32 check_create(const char *name, SceUInt32 attr, SceInt32 init_val, SceInt32 max_val);
 
-    SceInt32 wait(ThreadState &thread, SceInt32 need_count, WaitOptions options);
+    SceInt32 wait(ThreadState &thread, SceInt32 need_count, WaitOptions &options);
     SceInt32 poll(ThreadState &thread, SceInt32 need_count);
     SceInt32 signal(SceInt32 count);
     SceInt32 cancel(SceInt32 set_count, SceUInt32 *num_wait_threads);
@@ -356,7 +354,7 @@ public:
     // the unknown mutex error if the mutex was deleted. Call once after construction.
     SceInt32 attach();
 
-    SceInt32 wait(MemState &mem, ThreadState &thread, WaitOptions options);
+    SceInt32 wait(MemState &mem, ThreadState &thread, WaitOptions &options);
     // Wakes the first waiter in queue order, if any
     SceInt32 signal();
     // Wakes every waiter
@@ -402,7 +400,7 @@ public:
 
     // Locks the mutex. A relock is the mutex wait at the end of a condition wait, which runs the
     // callbacks notified during it only if a delete ends it.
-    SceInt32 acquire(MemState &mem, ThreadState &thread, SceInt32 count, WaitOptions options, bool relock = false);
+    SceInt32 acquire(MemState &mem, ThreadState &thread, SceInt32 count, WaitOptions &options, bool relock = false);
     SceInt32 try_acquire(MemState &mem, ThreadState &thread, SceInt32 count);
     SceInt32 release(MemState &mem, ThreadState &thread, SceInt32 unlock_count);
     SceInt32 cancel(ThreadState &thread, SceInt32 new_count, SceUInt32 *num_wait_threads);
@@ -475,7 +473,7 @@ public:
     static SceInt32 check_create(const char *name, SceUInt32 attr);
 
     // is_write picks the write lock over a read lock
-    SceInt32 acquire(ThreadState &thread, bool is_write, WaitOptions options);
+    SceInt32 acquire(ThreadState &thread, bool is_write, WaitOptions &options);
     SceInt32 try_acquire(ThreadState &thread, bool is_write);
     SceInt32 release(ThreadState &thread, bool is_write);
     SceInt32 cancel(ThreadState &thread, SceUInt32 *num_read_wait_threads, SceUInt32 *num_write_wait_threads, SceInt32 flag);
@@ -527,7 +525,7 @@ public:
     // Returns the error a poll or wait for pattern with wait_mode gets, or SCE_KERNEL_OK
     static SceInt32 check_wait(SceUInt32 pattern, SceUInt32 wait_mode);
 
-    SceInt32 wait(ThreadState &thread, SceUInt32 pattern, SceUInt32 wait_mode, SceUInt32 *out_bits, WaitOptions options);
+    SceInt32 wait(ThreadState &thread, SceUInt32 pattern, SceUInt32 wait_mode, SceUInt32 *out_bits, WaitOptions &options);
     SceInt32 poll(SceUID thread_id, SceUInt32 pattern, SceUInt32 wait_mode, SceUInt32 *out_bits);
     SceInt32 set(SceUInt32 pattern);
     SceInt32 clear(SceUInt32 pattern);
@@ -608,8 +606,8 @@ public:
 
     // Both move the bytes of the pieces in order, waiting until a FULL call moved all of them or an
     // ASAP call any. The size moved so far is kept in size, which may be null.
-    SceInt32 receive(ThreadState &thread, MemState &mem, SceUInt32 wait_mode, std::span<const MsgPipeVector> pieces, SceSize *size, WaitOptions options);
-    SceInt32 send(ThreadState &thread, MemState &mem, SceUInt32 wait_mode, std::span<const MsgPipeVector> pieces, SceSize *size, WaitOptions options);
+    SceInt32 receive(ThreadState &thread, MemState &mem, SceUInt32 wait_mode, std::span<const MsgPipeVector> pieces, SceSize *size, WaitOptions &options);
+    SceInt32 send(ThreadState &thread, MemState &mem, SceUInt32 wait_mode, std::span<const MsgPipeVector> pieces, SceSize *size, WaitOptions &options);
     // Both move what they can at once, without waiting
     SceInt32 try_receive(ThreadState &thread, MemState &mem, SceUInt32 wait_mode, std::span<const MsgPipeVector> pieces, SceSize *size);
     SceInt32 try_send(ThreadState &thread, MemState &mem, SceUInt32 wait_mode, std::span<const MsgPipeVector> pieces, SceSize *size);
@@ -686,7 +684,7 @@ private:
     void post(SceUInt32 done_bit, SceInt32 result, SceSize moved);
     // The blocking part of a send or a receive: moves the bytes, waiting as needed, then posts the
     // pipe event
-    SceInt32 transfer(ThreadState &thread, bool sending, const Transfer &request, WaitOptions options);
+    SceInt32 transfer(ThreadState &thread, bool sending, const Transfer &request, WaitOptions &options);
 
     // Guarded by the lock. At most one side waits, except right after a waiter came back from its
     // callbacks.

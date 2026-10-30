@@ -27,22 +27,17 @@
 #include <algorithm>
 #include <condition_variable>
 #include <expected>
+#include <initializer_list>
 #include <list>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <span>
 #include <string>
-
-struct CPUContext;
 
 struct ThreadState;
 using ThreadStatePtr = std::shared_ptr<ThreadState>;
-struct ThreadParams;
 struct KernelState;
-
-using CPUStatePtr = std::unique_ptr<CPUState, std::function<void(CPUState *)>>;
-using CallImport = std::function<void(CPUState &, uint32_t, SceUID)>;
-using ResolveNIDName = std::function<std::string(Address)>;
 
 // The attribute of every user thread, which thread info always reports
 constexpr SceUInt32 THREAD_ATTR_USER = 0x80000000U;
@@ -108,7 +103,7 @@ struct ThreadState {
 
     ThreadState() = delete;
     // A dormant thread with its stack and TLS, which runs on cpu
-    ThreadState(SceUID id, KernelState &kernel, MemState &mem, CPUStatePtr cpu, const char *name, Address entry_point, int init_priority, SceInt32 affinity_mask, int stack_size, SceUInt32 attr, const SceKernelThreadOptParam *option);
+    ThreadState(SceUID id, KernelState &kernel, MemState &mem, CPUStatePtr cpu, const char *name, Address entry_point, int init_priority, SceInt32 affinity_mask, int stack_size, SceUInt32 attr);
 
     // Lifecycle
     int start(SceSize arglen, const Ptr<void> argp, bool run_entry_callback = false);
@@ -126,7 +121,7 @@ struct ThreadState {
     void run_loop(bool top_level = true);
     // this function must be called from the thread itself (inside a svc call)
     // With fresh_vfp_state, the call starts with the FPSCR and VFP exception setting of a new thread
-    uint32_t run_callback(Address callback_address, const std::vector<uint32_t> &args, bool fresh_vfp_state = false);
+    uint32_t run_callback(Address callback_address, std::initializer_list<uint32_t> args, bool fresh_vfp_state = false);
     // this function is called from another thread when this one is dormant
     // it is only used for module loading and gxm display queue right now
     // args and argp are passed to thread->start as is
@@ -134,15 +129,14 @@ struct ThreadState {
 
     // Status and info
     ThreadStatus get_status() const;
-    // Whether the thread is deleted, so guest calls can't find it
-    bool is_deleted();
     // The status a thread that ended exited with, or NOT_DORMANT or DORMANT if it hasn't ended
     std::expected<uint32_t, SceInt32> exit_status() const;
     // The thread's info, as sceKernelGetThreadInfo reports it
     SceKernelThreadInfo info();
     // The room left on the stack, all of it for a dormant thread
     int stack_free_size() const;
-    Address stack_top() const;
+    // The thread's VFP exception setting, a word of its TLS
+    int &vfp_exception() const { return tls_slot(TLS_VFP_EXCEPTION); }
     std::string log_stack_traceback() const;
 
     // Priority and affinity
@@ -159,12 +153,12 @@ struct ThreadState {
     // Blocks this thread until the deadline passes.
     [[nodiscard]] WaitResult delay_until(Deadline deadline, bool callbacks);
     // Blocks this thread until a signal is sent to it or the timeout passes, writing the time left back.
-    [[nodiscard]] WaitResult wait_for_signal(WaitOptions options);
+    [[nodiscard]] WaitResult wait_for_signal(WaitOptions &options);
     // Sends a signal to this thread. Fails if the previous one was not consumed yet.
     SceInt32 send_signal();
     // Blocks the waiting thread until this thread ends or the timeout passes. Writes back the exit
     // status and the time left.
-    [[nodiscard]] WaitResult wait_for_thread_end(ThreadState &waiter, SceInt32 &exit_status, WaitOptions options);
+    [[nodiscard]] WaitResult wait_for_thread_end(ThreadState &waiter, SceInt32 &exit_status, WaitOptions &options);
     // Makes the thread's parked wait check again. Used when a timer's next event changes.
     void wake();
     // Shows the thread WAITING while a host call blocks it, such as an audio output, and RUNNING after
@@ -290,7 +284,9 @@ private:
     // Waits, with mutex held through lock, until the thread no longer runs or vm_suspend no longer holds it
     void wait_for_vm_stop(std::unique_lock<std::mutex> &lock);
     // Called by the thread itself
-    void push_arguments(const std::vector<uint32_t> &args);
+    void push_arguments(std::span<const uint32_t> args);
+    // A word of the thread's TLS, by its TLS_* index
+    int &tls_slot(int index) const { return tls.get_ptr<int>().get(mem)[index]; }
     void dispatch_abort(CPUState &cpu);
 
     // Fixed when the thread is created
