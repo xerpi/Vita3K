@@ -181,6 +181,10 @@ ThreadStatePtr KernelState::create_thread(MemState &mem, const char *name, Ptr<c
     CPUStatePtr cpu = init_cpu(cpu_opt, id, static_cast<std::size_t>(core_num), mem);
     if (!cpu)
         return nullptr;
+    if (debugger.watch_code)
+        set_log_code(*cpu, true);
+    if (debugger.watch_memory)
+        set_log_mem(*cpu, true);
     ThreadStatePtr thread = std::make_shared<ThreadState>(id, *this, mem, std::move(cpu), name, entry_point.address(), init_priority, affinity_mask, stack_size, attr);
 
     {

@@ -63,7 +63,6 @@ static bool abort_aware_fault_callback(Address fault_addr, bool write, Address r
     CPUState *cpu = get_current_cpu_state();
     if (cpu) {
         cpu->abort_fault_addr.store(fault_addr);
-        cpu->abort_is_write.store(write);
         cpu->abort_pending.store(true);
         stop(*cpu); // HaltExecution — signal-safe (atomic only)
     }

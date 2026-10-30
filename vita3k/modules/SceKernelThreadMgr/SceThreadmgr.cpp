@@ -974,7 +974,7 @@ EXPORT(int, _sceKernelStartThread, SceUID thid, SceSize arglen, Ptr<void> argp) 
         return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_THREAD_ID);
     }
 
-    const int res = thread->start(arglen, argp, true);
+    const int res = thread->start(thread->entry_point, arglen, argp, true);
     if (res < 0) {
         return RET_ERROR(res);
     }

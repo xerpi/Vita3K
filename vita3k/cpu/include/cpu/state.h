@@ -33,12 +33,10 @@ struct CPUState {
 
     CPUInterfacePtr cpu;
     bool svc_called;
-    uint32_t svc;
 
     // Exception handler support (kubridge abort handlers)
     // These are set by the page fault callback (signal-safe atomics)
     // and consumed by run_loop after HaltExecution returns.
     std::atomic<bool> abort_pending{ false };
     std::atomic<uint32_t> abort_fault_addr{ 0 };
-    std::atomic<bool> abort_is_write{ false };
 };

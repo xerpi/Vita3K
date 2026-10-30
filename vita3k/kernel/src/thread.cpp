@@ -76,13 +76,6 @@ ThreadState::ThreadState(SceUID id, KernelState &kernel, MemState &mem, CPUState
     , mem(mem)
     , priority(this->init_priority)
     , affinity_mask(affinity_mask) {
-    if (kernel.debugger.watch_code) {
-        set_log_code(*this->cpu, true);
-    }
-    if (kernel.debugger.watch_memory) {
-        set_log_mem(*this->cpu, true);
-    }
-
     memset(stack.get_ptr<void>().get(mem), 0xcc, this->stack_size);
 
     const size_t tls_size = KERNEL_TLS_SIZE + kernel.tls_msize;
@@ -109,11 +102,7 @@ ThreadState::ThreadState(SceUID id, KernelState &kernel, MemState &mem, CPUState
     }
 }
 
-int ThreadState::start(SceSize arglen, const Ptr<void> argp, bool run_entry_callback) {
-    return start_at(entry_point, arglen, argp, run_entry_callback);
-}
-
-int ThreadState::start_at(Address entry, SceSize arglen, const Ptr<void> argp, bool run_entry_callback) {
+int ThreadState::start(Address entry, SceSize arglen, const Ptr<void> argp, bool run_entry_callback) {
     // Threads waiting for this one to end read its status under the end queue's lock, so hold it
     const std::lock_guard<std::mutex> end_lock(end.mutex);
     std::unique_lock<std::mutex> thread_lock(mutex);
@@ -423,7 +412,7 @@ void ThreadState::dispatch_abort(CPUState &cpu) {
 }
 
 uint32_t ThreadState::run_guest_function(Address callback_address, SceSize args, const Ptr<void> argp) {
-    start_at(callback_address, args, argp, false);
+    start(callback_address, args, argp, false);
     std::unique_lock<std::mutex> lock(mutex);
     cv.wait(lock, [&]() { return status == ThreadStatus::dormant || status == ThreadStatus::deleted; });
     return returned_value;
@@ -945,20 +934,4 @@ int ThreadState::vm_resume() {
     // The gate waits for this, and so may a suspend that waits for the thread to stop
     cv.notify_all();
     return 0;
-}
-
-std::string ThreadState::log_stack_traceback() const {
-    constexpr Address START_OFFSET = 0;
-    constexpr Address END_OFFSET = 1024;
-    std::string str;
-    const Address sp = read_sp(*cpu);
-    for (Address addr = sp - START_OFFSET; addr <= sp + END_OFFSET; addr += 4) {
-        if (Ptr<uint32_t>(addr).valid(mem)) {
-            const Address value = *Ptr<uint32_t>(addr).get(mem);
-            const auto mod = kernel.find_module_by_addr(value);
-            if (mod)
-                fmt::format_to(std::back_inserter(str), "0x{:X} (module: {})\n", value, mod->module_name);
-        }
-    }
-    return str;
 }

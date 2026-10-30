@@ -16,7 +16,6 @@
 // 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
 #pragma once
-#include <cpu/state.h>
 #include <mem/state.h>
 #include <mem/util.h>
 

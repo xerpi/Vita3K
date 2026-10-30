@@ -742,7 +742,7 @@ ExitCode run_app(EmuEnvState &emuenv, int32_t main_module_id, const AppLaunchReq
         param.size = static_cast<SceSize>(buf.size());
         param.attr = arr.address();
     }
-    if (main_thread->start(param.size, Ptr<void>(param.attr), true) < 0) {
+    if (main_thread->start(main_thread->entry_point, param.size, Ptr<void>(param.attr), true) < 0) {
         LOG_ERROR("Failed to run main thread.");
         return RunThreadFailed;
     }

@@ -367,9 +367,8 @@ public:
         }
     }
 
-    void CallSVC(uint32_t svc) override {
+    void CallSVC(uint32_t) override {
         parent->svc_called = true;
-        parent->svc = svc;
         cpu->jit->HaltExecution(Dynarmic::HaltReason::UserDefined8);
     }
 

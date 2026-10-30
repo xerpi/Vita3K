@@ -106,7 +106,8 @@ struct ThreadState {
     ThreadState(SceUID id, KernelState &kernel, MemState &mem, CPUStatePtr cpu, const char *name, Address entry_point, int init_priority, SceInt32 affinity_mask, int stack_size, SceUInt32 attr);
 
     // Lifecycle
-    int start(SceSize arglen, const Ptr<void> argp, bool run_entry_callback = false);
+    // Starts a dormant thread at entry, usually entry_point. Takes end's lock, then mutex.
+    int start(Address entry, SceSize arglen, Ptr<void> argp, bool run_entry_callback = false);
     // Ends the thread like sceKernelExitThread: the end handler runs, then it parks dormant
     void exit(SceInt32 status);
     // Ends the thread like sceKernelExitDeleteThread: the end handler runs, then it's deleted
@@ -137,7 +138,6 @@ struct ThreadState {
     int stack_free_size() const;
     // The thread's VFP exception setting, a word of its TLS
     int &vfp_exception() const { return tls_slot(TLS_VFP_EXCEPTION); }
-    std::string log_stack_traceback() const;
 
     // Priority and affinity
     // The priority the thread runs at
@@ -262,9 +262,6 @@ private:
     // Set the priority or the affinity mask and the TLS slot that shows it
     void set_priority(int new_priority);
     void set_affinity_mask(SceInt32 new_affinity_mask);
-    // Starts a dormant thread at entry, like start() does at its entry point. Takes end's lock, then
-    // mutex.
-    int start_at(Address entry, SceSize arglen, Ptr<void> argp, bool run_entry_callback);
     // Marks the thread DORMANT after an exit, else DELETED, and completes its end waiters with the
     // exit status. Called with the thread lock held in lock. Releases it to take end's lock first,
     // since end's lock comes before the thread lock, and takes it again before returning.

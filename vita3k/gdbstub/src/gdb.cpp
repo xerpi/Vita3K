@@ -416,6 +416,23 @@ static std::string cmd_write_binary(EmuEnvState &state, PacketCommand &command) 
 
 static std::string cmd_detach(EmuEnvState &state, PacketCommand &command) { return "OK"; }
 
+// The words in the 1 KiB above the stack pointer of cpu that point into a loaded module
+static std::string log_stack_traceback(EmuEnvState &state, CPUState &cpu) {
+    constexpr Address START_OFFSET = 0;
+    constexpr Address END_OFFSET = 1024;
+    std::string str;
+    const Address sp = read_sp(cpu);
+    for (Address addr = sp - START_OFFSET; addr <= sp + END_OFFSET; addr += 4) {
+        if (Ptr<uint32_t>(addr).valid(state.mem)) {
+            const Address value = *Ptr<uint32_t>(addr).get(state.mem);
+            const auto mod = state.kernel.find_module_by_addr(value);
+            if (mod)
+                fmt::format_to(std::back_inserter(str), "0x{:X} (module: {})\n", value, mod->module_name);
+        }
+    }
+    return str;
+}
+
 // The stop reply for a thread that stopped on a trap
 static std::string stop_reply(SceUID thread_id) {
     return "T05thread:" + to_hex(thread_id) + ";";
@@ -487,7 +504,7 @@ static std::string cmd_continue(EmuEnvState &state, PacketCommand &command) {
 
             LOG_INFO("GDB Breakpoint trigger (thread name: {}, thread_id: {})", stopped->name, stopped->id);
             LOG_INFO("PC: {} LR: {}", read_pc(*stopped->cpu), read_lr(*stopped->cpu));
-            LOG_INFO("{}", stopped->log_stack_traceback());
+            LOG_INFO("{}", log_stack_traceback(state, *stopped->cpu));
 
             // Stop the world. A thread inside a kernel call stops when the call returns.
             state.kernel.suspend_threads();
