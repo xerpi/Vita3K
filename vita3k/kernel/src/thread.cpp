@@ -16,6 +16,7 @@
 // 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
 #include <cpu/functions.h>
+#include <cpu/state.h>
 #include <kernel/thread/thread_state.h>
 
 #include <kernel/state.h>
@@ -117,18 +118,13 @@ int ThreadState::start(Address entry, SceSize arglen, const Ptr<void> argp, bool
     load_context(*cpu, init_cpu_ctx);
     // A thread starts with TPIDRURW at 0, also when it starts again
     write_tpidrurw(*cpu, 0);
-    write_pc(*cpu, entry);
-    write_lr(*cpu, kernel.halt_instruction_pc);
-    write_reg(*cpu, 0, arglen);
-
-    // Copy data to stack
+    // The entry gets the size of the argument data and its copy on the stack, or null for none
+    Address data_addr = 0;
     if (argp && arglen > 0) {
-        const Address data_addr = stack_alloc(*cpu, align(arglen, 8));
+        data_addr = stack_alloc(*cpu, align(arglen, 8));
         memcpy(Ptr<uint8_t>(data_addr).get(mem), argp.get(mem), arglen);
-        write_reg(*cpu, 1, data_addr);
-    } else {
-        write_reg(*cpu, 1, 0);
     }
+    place_call(*cpu, entry, { arglen, data_addr });
 
     update_status(ThreadStatus::running);
 
@@ -173,12 +169,12 @@ void ThreadState::request_removal() {
     cv.notify_all();
 }
 
-void ThreadState::run_loop(bool top_level) {
+void ThreadState::run_loop() {
     bool guest_returned = false;
 
-    // Set thread-local CPU state so signal handlers can access it. The guard puts back what was
-    // there before on any exit, so a nested run_loop for a callback leaves the outer one's state
-    // set, and a recycled host thread never sees a stale CPUState pointer.
+    // Set thread-local CPU state so signal handlers can access it, also while the thread ends. The
+    // guard puts back what was there before, so a recycled host thread never sees a stale CPUState
+    // pointer. execute() sets it for each run of guest code too.
     struct CpuStateGuard {
         CPUState *const previous = get_current_cpu_state();
         ~CpuStateGuard() { set_current_cpu_state(previous); }
@@ -232,11 +228,8 @@ void ThreadState::run_loop(bool top_level) {
     };
 
     while (true) {
-        // This level is done once its guest function returned or the thread is ending
+        // The run is done once its entry returned or the thread is ending
         if (exiting() || guest_returned) {
-            // A nested level returns to the one below it
-            if (!top_level)
-                break;
             // A thread that returns from its entry ends like one that exits, end handler included
             if (guest_returned)
                 request_ending(Ending::exit);
@@ -256,7 +249,17 @@ void ThreadState::run_loop(bool top_level) {
             // Status is now dormant: we'll park until the next start() or a delete
         }
 
-        // Park until we have something to do.
+        if (const std::optional<uint32_t> returned = run_guest(lock, StopPoint::guest_code)) {
+            returned_value = *returned;
+            guest_returned = true;
+        }
+    }
+}
+
+std::optional<uint32_t> ThreadState::run_guest(std::unique_lock<std::mutex> &lock, StopPoint first) {
+    while (!exiting()) {
+        // Park until the thread runs: dormant between starts, or busy elsewhere for a call that
+        // another host thread makes
         if (status != ThreadStatus::running) {
             cv.wait(lock, [&] { return status == ThreadStatus::running || exiting(); });
             continue;
@@ -275,64 +278,35 @@ void ThreadState::run_loop(bool top_level) {
             lock.lock();
         }
 
-        // Active JIT loop. Lock held on entry and exit; unlocked only around run/step. A nested
-        // level runs a callback or handler from inside a kernel call.
-        StopPoint last_stop = top_level ? StopPoint::guest_code : StopPoint::syscall;
-        while (!exiting() && !guest_returned && status == ThreadStatus::running) {
-            wait_while_held(lock, last_stop);
-            if (exiting())
-                break;
-            const bool do_step = std::exchange(step_requested, false);
-
-            lock.unlock();
-
-            // Single step or run
-            const int res = do_step ? step(*cpu) : run(*cpu);
-
-            // handle svc call if this was what stopped the cpu
-            const bool syscall = cpu->svc_called;
-            if (syscall) {
-                const uint32_t nid = *Ptr<uint32_t>(read_pc(*cpu) + 4).get(mem);
-                kernel.call_import(*cpu, nid, id);
-                clear_exclusive(*cpu);
-            }
-
-            // handle pending abort (exception handler from page fault)
-            if (cpu->abort_pending.exchange(false))
-                dispatch_abort(*cpu);
-
-            lock.lock();
-
-            last_stop = syscall ? StopPoint::syscall : StopPoint::guest_code;
-            // A finished step or a breakpoint holds the thread for the debugger
-            if (do_step || hit_breakpoint(*cpu))
-                holds.debugger = true;
-
-            // The guest function of this level returned to the halt sentinel
-            if (res != 0) {
-                returned_value = read_reg(*cpu, 0);
-                guest_returned = true;
-            }
-        }
+        // execute() leaves when the thread is ending or stops running, and the next pass parks
+        lock.unlock();
+        const std::optional<uint32_t> returned = execute(*cpu, *this, first);
+        lock.lock();
+        if (returned)
+            return returned;
     }
+    return std::nullopt;
+}
+
+GuestResume ThreadState::resume_guest(StopPoint where, bool debugger_stop, bool returned) {
+    std::unique_lock<std::mutex> lock(mutex);
+    // A finished step or a breakpoint holds the thread for the debugger
+    if (debugger_stop)
+        holds.debugger = true;
+    if (returned || exiting() || status != ThreadStatus::running)
+        return GuestResume::leave;
+    wait_while_held(lock, where);
+    if (exiting())
+        return GuestResume::leave;
+    return std::exchange(step_requested, false) ? GuestResume::step : GuestResume::run;
+}
+
+void ThreadState::kernel_call(uint32_t nid) {
+    kernel.call_import(*cpu, nid, id);
 }
 
 // What a ForVM resume returns for a thread no ForVM suspend holds, an error with no public name
 constexpr int VM_NOT_SUSPENDED = static_cast<int>(0x80028033);
-
-void ThreadState::push_arguments(std::span<const uint32_t> args) {
-    Address sp = read_sp(*cpu);
-    for (size_t i = 0; i < std::min(args.size(), static_cast<size_t>(4)); i++) {
-        write_reg(*cpu, i, args[i]);
-    }
-    if (args.size() > 4) {
-        // TODO align to 16 bytes
-        const size_t remain_size = args.size() - 4;
-        sp -= 4 * remain_size;
-        memcpy(Ptr<uint32_t>(sp).get(mem), &args[4], remain_size * 4);
-    }
-    write_sp(*cpu, sp);
-}
 
 uint32_t ThreadState::run_callback(Address callback_address, std::initializer_list<uint32_t> args, bool fresh_vfp_state) {
     std::unique_lock<std::mutex> thread_lock(mutex);
@@ -351,16 +325,12 @@ uint32_t ThreadState::run_callback(Address callback_address, std::initializer_li
     }
 
     // we shouldn't have to clean the context I believe
-    write_pc(*cpu, callback_address);
-    write_lr(*cpu, kernel.halt_instruction_pc);
-    push_arguments({ args.begin(), args.size() });
-    thread_lock.unlock();
+    place_call(*cpu, callback_address, args);
 
-    // unlock but then immediately lock back in the run_loop function
-    // shouldn't cause an issue, but maybe we could use a recursive mutex instead
-    run_loop(false);
-
-    thread_lock.lock();
+    // The callback runs inside a kernel call, so a hold before its first instruction finds the
+    // thread on its way back from one
+    if (const std::optional<uint32_t> returned = run_guest(thread_lock, StopPoint::syscall))
+        returned_value = *returned;
 
     // restore the previous context
     // actually, in most case I don't think this is necessary as the caller
@@ -379,7 +349,8 @@ uint32_t ThreadState::run_callback(Address callback_address, std::initializer_li
     return result;
 }
 
-void ThreadState::dispatch_abort(CPUState &cpu) {
+void ThreadState::guest_abort() {
+    CPUState &cpu = *this->cpu;
     const uint32_t fault_addr = cpu.abort_fault_addr.load();
     // DABT = type 0
     const Address handler = kernel.exception_handlers[0].load();

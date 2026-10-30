@@ -17,7 +17,8 @@
 
 #pragma once
 
-#include <cpu/state.h>
+#include <cpu/common.h>
+#include <cpu/guest_boundary.h>
 #include <kernel/callback.h>
 #include <kernel/thread/wait.h>
 #include <kernel/types.h>
@@ -32,7 +33,6 @@
 #include <memory>
 #include <mutex>
 #include <optional>
-#include <span>
 #include <string>
 
 struct ThreadState;
@@ -81,7 +81,7 @@ enum class ThreadStatus : SceUInt32 {
     suspended = SCE_KERNEL_THREAD_STATUS_SUSPENDED, // Suspended by debugger
 };
 
-struct ThreadState {
+struct ThreadState : private GuestBoundary {
     // Fixed when the thread is created
     const SceUID id;
     const std::string name;
@@ -116,12 +116,12 @@ struct ThreadState {
     SceInt32 remove_dormant();
     // Deletes a dormant thread, or one being torn down, without running its end handler
     void remove();
-    // Runs the thread's guest code. The host thread runs the top level, which parks the thread
-    // dormant between starts until it's deleted. A callback runs a nested level, which returns
-    // when the callback does or the thread ends.
-    void run_loop(bool top_level = true);
-    // this function must be called from the thread itself (inside a svc call)
-    // With fresh_vfp_state, the call starts with the FPSCR and VFP exception setting of a new thread
+    // Runs the thread on its host thread: parks it dormant between starts, runs its guest code and
+    // ends it, until it's deleted
+    void run_loop();
+    // Calls a guest function on the thread's CPU from inside a kernel call, usually one the thread
+    // itself made, and returns its r0, or the exit status if the thread ends during it. With
+    // fresh_vfp_state, the call starts with the FPSCR and VFP exception setting of a new thread.
     uint32_t run_callback(Address callback_address, std::initializer_list<uint32_t> args, bool fresh_vfp_state = false);
     // this function is called from another thread when this one is dormant
     // it is only used for module loading and gxm display queue right now
@@ -225,14 +225,6 @@ private:
         bool shown() const { return debugger || vm > 0; }
     };
 
-    // Where a held thread stopped
-    enum class StopPoint : uint8_t {
-        // In its own code
-        guest_code,
-        // On its way back from a call into the kernel
-        syscall,
-    };
-
     friend class ThreadWait;
     // Begins and ends multiple event waits with mutex held
     friend class MultiEventWait;
@@ -280,11 +272,17 @@ private:
     bool vm_suspended() const { return holds.vm > 0; }
     // Waits, with mutex held through lock, until the thread no longer runs or vm_suspend no longer holds it
     void wait_for_vm_stop(std::unique_lock<std::mutex> &lock);
-    // Called by the thread itself
-    void push_arguments(std::span<const uint32_t> args);
     // A word of the thread's TLS, by its TLS_* index
     int &tls_slot(int index) const { return tls.get_ptr<int>().get(mem)[index]; }
-    void dispatch_abort(CPUState &cpu);
+
+    // Runs guest code from first at one level, the thread's run or a call, with mutex held through
+    // lock. Returns r0 once the level's function returns, or nothing once the thread is ending.
+    std::optional<uint32_t> run_guest(std::unique_lock<std::mutex> &lock, StopPoint first);
+    // The kernel side of the thread's guest code, see GuestBoundary. Called with no lock held.
+    GuestResume resume_guest(StopPoint where, bool debugger_stop, bool returned) override;
+    void kernel_call(uint32_t nid) override;
+    // Calls the guest's data abort handler with the abort's context on the stack
+    void guest_abort() override;
 
     // Fixed when the thread is created
     KernelState &kernel;

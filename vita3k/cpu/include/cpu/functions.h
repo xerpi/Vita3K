@@ -21,14 +21,21 @@
 #include <util/types.h>
 
 #include <cpu/common.h>
+#include <cpu/guest_boundary.h>
 
 #include <cstdint>
+#include <initializer_list>
+#include <optional>
 
 struct MemState;
 
 CPUStatePtr init_cpu(bool cpu_opt, SceUID thread_id, std::size_t processor_id, MemState &mem);
-int run(CPUState &state);
-int step(CPUState &state);
+// Runs guest code on state from the current host thread, see CPUInterface::execute. Signal handlers
+// find state through the thread-local CPU state meanwhile.
+std::optional<uint32_t> execute(CPUState &state, GuestBoundary &boundary, StopPoint first);
+// Sets up a call of fn with args: the first four in r0 to r3, the rest on the stack, and the
+// return address in LR
+void place_call(CPUState &state, Address fn, std::initializer_list<uint32_t> args);
 void stop(CPUState &state);
 void set_thread_id(CPUState &state, SceUID thread_id);
 SceUID get_thread_id(CPUState &state);
@@ -59,8 +66,6 @@ void write_cpsr(CPUState &state, uint32_t value);
 
 uint32_t stack_alloc(CPUState &state, size_t size);
 uint32_t stack_free(CPUState &state, size_t size);
-
-void clear_exclusive(CPUState &state);
 
 // Debugging helpers
 std::string disassemble(CPUState &state, uint64_t at, bool thumb, uint16_t *insn_size = nullptr);

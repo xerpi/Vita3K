@@ -23,6 +23,8 @@
 #include <mem/ptr.h>
 #include <util/types.h>
 
+#include <algorithm>
+#include <cstring>
 #include <memory>
 #include <string>
 
@@ -52,12 +54,29 @@ CPUStatePtr init_cpu(bool cpu_opt, SceUID thread_id, std::size_t processor_id, M
     return state;
 }
 
-int run(CPUState &state) {
-    return state.cpu->run();
+std::optional<uint32_t> execute(CPUState &state, GuestBoundary &boundary, StopPoint first) {
+    // A nested call leaves the outer CPU state set, and a call of another thread's code points it
+    // at that thread's CPU while it runs
+    CPUState *const previous = get_current_cpu_state();
+    set_current_cpu_state(&state);
+    const std::optional<uint32_t> returned = state.cpu->execute(boundary, first);
+    set_current_cpu_state(previous);
+    return returned;
 }
 
-int step(CPUState &state) {
-    return state.cpu->step();
+void place_call(CPUState &state, Address fn, std::initializer_list<uint32_t> args) {
+    write_pc(state, fn);
+    write_lr(state, state.return_pc);
+    Address sp = read_sp(state);
+    for (size_t i = 0; i < std::min(args.size(), static_cast<size_t>(4)); i++)
+        write_reg(state, i, args.begin()[i]);
+    if (args.size() > 4) {
+        // TODO align to 16 bytes
+        const size_t remain_size = args.size() - 4;
+        sp -= 4 * remain_size;
+        memcpy(Ptr<uint32_t>(sp).get(*state.mem), args.begin() + 4, remain_size * 4);
+    }
+    write_sp(state, sp);
 }
 
 void stop(CPUState &state) {
@@ -162,10 +181,6 @@ bool get_log_code(CPUState &state) {
 
 bool get_log_mem(CPUState &state) {
     return state.cpu->get_log_mem();
-}
-
-void clear_exclusive(CPUState &state) {
-    state.cpu->clear_exclusive();
 }
 
 std::size_t get_processor_id(CPUState &state) {

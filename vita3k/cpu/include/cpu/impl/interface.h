@@ -18,14 +18,19 @@
 #pragma once
 
 #include <cpu/common.h>
+#include <cpu/guest_boundary.h>
 
 #include <cstdint>
+#include <optional>
 
 /*! \brief Base class for all CPU backend implementation */
 struct CPUInterface {
     virtual ~CPUInterface() = default;
 
-    virtual int run() = 0;
+    // Runs guest code from the PC, asking boundary before each run or step whether it may go on.
+    // first is where the code starts from. Returns r0 once the guest function returns to the
+    // return address, or nothing if boundary says to leave first.
+    virtual std::optional<uint32_t> execute(GuestBoundary &boundary, StopPoint first) = 0;
     virtual void stop() = 0;
 
     virtual uint32_t get_reg(uint8_t idx) = 0;
@@ -60,7 +65,6 @@ struct CPUInterface {
     virtual void invalidate_jit_cache(Address start, size_t length) = 0;
 
     virtual bool is_thumb_mode() = 0;
-    virtual int step() = 0;
 
     virtual bool hit_breakpoint() = 0;
     virtual void trigger_breakpoint() = 0;
@@ -68,8 +72,6 @@ struct CPUInterface {
     virtual void set_log_mem(bool log) = 0;
     virtual bool get_log_code() = 0;
     virtual bool get_log_mem() = 0;
-
-    virtual void clear_exclusive() = 0;
 
     virtual std::size_t processor_id() const {
         return 0;

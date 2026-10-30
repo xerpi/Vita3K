@@ -368,7 +368,7 @@ public:
     }
 
     void CallSVC(uint32_t) override {
-        parent->svc_called = true;
+        cpu->svc_called = true;
         cpu->jit->HaltExecution(Dynarmic::HaltReason::UserDefined8);
     }
 
@@ -412,10 +412,34 @@ DynarmicCPU::DynarmicCPU(CPUState *state, std::size_t processor_id, bool cpu_opt
 
 DynarmicCPU::~DynarmicCPU() = default;
 
-int DynarmicCPU::run() {
+std::optional<uint32_t> DynarmicCPU::execute(GuestBoundary &boundary, StopPoint first) {
+    GuestResume go = boundary.resume_guest(first, false, false);
+    while (go != GuestResume::leave) {
+        const bool stepped = go == GuestResume::step;
+        bool returned = false;
+        if (stepped)
+            step();
+        else
+            returned = run();
+        // An import can run guest code, which clears the flag, so it is read once here
+        const bool imported = svc_called;
+        if (imported) {
+            boundary.kernel_call(*Ptr<uint32_t>(get_pc() + 4).get(*parent->mem));
+            clear_exclusive();
+        }
+        if (parent->abort_pending.exchange(false))
+            boundary.guest_abort();
+        go = boundary.resume_guest(imported ? StopPoint::syscall : StopPoint::guest_code, stepped || break_, returned);
+        if (returned)
+            return get_reg(0);
+    }
+    return std::nullopt;
+}
+
+bool DynarmicCPU::run() {
     halted = false;
     break_ = false;
-    parent->svc_called = false;
+    svc_called = false;
     Dynarmic::HaltReason halt_reason;
     do {
         halt_reason = jit->Run();
@@ -424,10 +448,9 @@ int DynarmicCPU::run() {
     return halted;
 }
 
-int DynarmicCPU::step() {
-    parent->svc_called = false;
+void DynarmicCPU::step() {
+    svc_called = false;
     jit->Step();
-    return 0;
 }
 
 bool DynarmicCPU::hit_breakpoint() {

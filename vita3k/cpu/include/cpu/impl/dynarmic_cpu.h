@@ -40,17 +40,24 @@ class DynarmicCPU : public CPUInterface {
 
     bool halted = false;
     bool break_ = false;
+    // The last run or step stopped at an SVC
+    bool svc_called = false;
 
     bool log_mem = false;
     bool log_code = false;
     bool cpu_opt;
 
     std::unique_ptr<Dynarmic::A32::Jit> make_jit();
+    // Runs until the JIT stops, and returns whether it stopped at the return address
+    bool run();
+    // Runs one instruction
+    void step();
+    void clear_exclusive();
 
 public:
     DynarmicCPU(CPUState *state, std::size_t processor_id, bool cpu_opt);
     ~DynarmicCPU() override;
-    int run() override;
+    std::optional<uint32_t> execute(GuestBoundary &boundary, StopPoint first) override;
     void stop() override;
 
     uint32_t get_reg(uint8_t idx) override;
@@ -84,7 +91,6 @@ public:
     void load_context(const CPUContext &ctx) override;
 
     bool is_thumb_mode() override;
-    int step() override;
 
     bool hit_breakpoint() override;
     void trigger_breakpoint() override;
@@ -93,7 +99,6 @@ public:
     bool get_log_code() override;
     bool get_log_mem() override;
 
-    void clear_exclusive() override;
     std::size_t processor_id() const override;
     void invalidate_jit_cache(Address start, size_t length) override;
 

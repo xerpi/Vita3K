@@ -32,7 +32,8 @@ struct CPUState {
     DisasmState disasm;
 
     CPUInterfacePtr cpu;
-    bool svc_called;
+    // Where a call place_call() sets up returns to. Execution stops there.
+    Address return_pc = 0;
 
     // Exception handler support (kubridge abort handlers)
     // These are set by the page fault callback (signal-safe atomics)

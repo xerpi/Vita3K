@@ -26,6 +26,7 @@
 #include <module/module.h>
 
 #include <cpu/functions.h>
+#include <cpu/state.h>
 #include <kernel/state.h>
 #include <mem/functions.h>
 #include <modules/sysmem_state.h>
