@@ -18,8 +18,6 @@
 #include <kernel/callback.h>
 #include <kernel/thread/thread_state.h>
 
-#include <mutex>
-
 Callback::Callback(const ThreadStatePtr &owner, const std::string &name, Ptr<SceKernelCallbackFunction> cb_func, Ptr<void> pCommon)
     : thread_id(owner->id)
     , name(name)
@@ -28,67 +26,61 @@ Callback::Callback(const ThreadStatePtr &owner, const std::string &name, Ptr<Sce
     , owner(owner) {}
 
 void Callback::notify(SceUID notifier_id, SceInt32 notify_arg) {
-    const auto guard = lock();
-    if (!guard)
-        return;
-    this->notifier_id = notifier_id;
-    this->notification_arg = notify_arg;
-    // The owner already counts a callback with notifications, and only the first one wakes it
-    if (this->num_notifications++ == 0) {
-        if (const ThreadStatePtr thread = owner.lock())
-            thread->add_notified_callback();
+    ThreadStatePtr thread;
+    {
+        const auto guard = lock();
+        if (!guard)
+            return;
+        this->notifier_id = notifier_id;
+        this->notification_arg = notify_arg;
+        ++this->num_notifications;
+        thread = owner.lock();
+        if (!thread)
+            return;
+        // Tell the owner on every notify, not only the first. A notify ends a wait with callbacks
+        // even if this callback was already pending.
+        thread->notify_callback();
     }
-}
-
-void Callback::event_notify(SceUID notifier_id) {
-    this->notify(notifier_id, 0);
-}
-
-void Callback::direct_notify(SceInt32 notify_arg) {
-    this->notify(SCE_UID_INVALID_UID, notify_arg);
+    // A queued waiter leaves its queue under the queue's lock, which must not wait on a callback lock
+    thread->wait_for_departure();
 }
 
 void Callback::cancel() {
     const auto guard = lock();
     if (guard)
-        this->reset();
+        reset();
 }
 
 void Callback::on_delete(SceUID) {
-    this->reset();
+    reset();
 }
 
 SceUID Callback::get_notifier_id() {
     const auto guard = lock();
-    return guard ? this->notifier_id : SCE_UID_INVALID_UID;
+    return guard ? notifier_id : SCE_UID_INVALID_UID;
 }
 
 SceInt32 Callback::get_notify_arg() {
     const auto guard = lock();
-    return guard ? this->notification_arg : 0;
+    return guard ? notification_arg : 0;
 }
 
 uint32_t Callback::get_num_notifications() {
     const auto guard = lock();
-    return guard ? this->num_notifications : 0;
+    return guard ? num_notifications : 0;
 }
 
 std::optional<Callback::Notification> Callback::take_notification() {
     const auto guard = lock();
-    if (!guard || this->num_notifications == 0)
+    if (!guard || num_notifications == 0)
         return std::nullopt;
-
-    const Notification notification{ this->notifier_id, this->num_notifications, this->notification_arg };
-    this->reset();
+    const Notification notification{ notifier_id, num_notifications, notification_arg };
+    reset();
     return notification;
 }
 
 void Callback::reset() {
-    if (this->num_notifications != 0) {
-        if (const ThreadStatePtr thread = owner.lock())
-            thread->remove_notified_callback();
-    }
-    this->num_notifications = 0;
-    this->notification_arg = 0;
-    this->notifier_id = SCE_UID_INVALID_UID;
+    num_notifications = 0;
+    notification_arg = 0;
+    notifier_id = SCE_UID_INVALID_UID;
 }

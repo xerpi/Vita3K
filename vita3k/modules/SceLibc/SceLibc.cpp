@@ -19,6 +19,7 @@
 
 #include <io/functions.h>
 #include <kernel/state.h>
+#include <kernel/thread/thread_state.h>
 #include <util/lock_and_find.h>
 #include <util/log.h>
 #include <util/tracy.h>
@@ -253,7 +254,7 @@ EXPORT(int, _sceLdTlsUnregisterModuleInfo) {
 EXPORT(Ptr<int>, _sceLibcErrnoLoc) {
     TRACY_FUNC(_sceLibcErrnoLoc);
     // tls key from disasmed source
-    auto res = emuenv.kernel.get_thread_tls_addr(emuenv.mem, thread_id, TLS_LIBC_ERRNO);
+    auto res = emuenv.kernel.get_thread_tls_addr(thread_id, TLS_LIBC_ERRNO);
     return res.cast<int>();
 }
 

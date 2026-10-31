@@ -26,6 +26,7 @@
 #include <module/module.h>
 
 #include <cpu/functions.h>
+#include <cpu/state.h>
 #include <kernel/state.h>
 #include <mem/functions.h>
 #include <modules/sysmem_state.h>
@@ -55,17 +56,14 @@ struct KuKernelExceptionHandlerOpt {
     uint32_t size;
 };
 
-// Page fault callback that triggers an abort handler if one is registered.
-// Called from signal handler context — must be signal-safe.
-// Sets abort_pending on the current thread's CPU and halts execution so
-// run_loop can invoke the ARM exception handler.
+// Page fault callback, called from a signal handler. It notes the abort on this host thread's CPU and
+// halts it, so the thread runs the registered abort handler, if any.
 static bool abort_aware_fault_callback(Address fault_addr, bool write, Address range_start, uint32_t range_size) {
     CPUState *cpu = get_current_cpu_state();
     if (cpu) {
         cpu->abort_fault_addr.store(fault_addr);
-        cpu->abort_is_write.store(write);
         cpu->abort_pending.store(true);
-        stop(*cpu); // HaltExecution — signal-safe (atomic only)
+        stop(*cpu); // Only sets an atomic, so it is signal safe
     }
     return true;
 }

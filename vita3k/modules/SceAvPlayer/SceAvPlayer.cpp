@@ -20,6 +20,7 @@
 #include <codec/state.h>
 #include <io/functions.h>
 #include <kernel/state.h>
+#include <kernel/thread/thread_state.h>
 
 #include <util/lock_and_find.h>
 #include <util/log.h>

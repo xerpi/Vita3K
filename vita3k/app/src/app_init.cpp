@@ -523,7 +523,7 @@ void shutdown_app_runtime(EmuEnvState &state) {
     state.regmgr.reg_category_template.clear();
     state.regmgr.reg_template.clear();
 
-    state.kernel.deinit(state.mem);
+    state.kernel.deinit();
 
     state.renderer->cleanup();
     state.renderer.reset();

@@ -119,7 +119,7 @@ std::string to_debug_str<SceNetSocketOption>(const MemState &mem, SceNetSocketOp
 
 static int ret_net_errno(EmuEnvState &emuenv, int thread_id, int ret) {
     if (ret < 0) {
-        auto addr = emuenv.kernel.get_thread_tls_addr(emuenv.mem, thread_id, TLS_NET_ERRNO);
+        auto addr = emuenv.kernel.get_thread_tls_addr(thread_id, TLS_NET_ERRNO);
         if (addr) {
             auto inner_ptr = addr.get(emuenv.mem);
             if (inner_ptr)
@@ -262,7 +262,7 @@ EXPORT(int, sceNetEpollWaitCB) {
 EXPORT(Ptr<int>, sceNetErrnoLoc) {
     TRACY_FUNC(sceNetErrnoLoc);
     // TLS id was taken from disasm source
-    auto addr = emuenv.kernel.get_thread_tls_addr(emuenv.mem, thread_id, TLS_NET_ERRNO);
+    auto addr = emuenv.kernel.get_thread_tls_addr(thread_id, TLS_NET_ERRNO);
     return addr.cast<int>();
 }
 

@@ -42,10 +42,6 @@ public:
     static inline uint32_t get_index() {
         return registered<T>::index;
     }
-
-    static inline uint32_t get_count() {
-        return add_type(0);
-    }
 };
 
 template <typename T>
@@ -53,10 +49,6 @@ const uint32_t TypeInfo::registered<T>::index = TypeInfo::add_type(1);
 
 class ObjectStore {
 public:
-    ObjectStore() = default;
-
-    ~ObjectStore() = default;
-
     template <typename T>
     T *get() {
         std::lock_guard<std::mutex> lock(mutex);
@@ -66,11 +58,9 @@ public:
     }
 
     template <typename T, typename... Args>
-    bool create(Args &&...args) {
+    void create(Args &&...args) {
         std::lock_guard<std::mutex> lock(mutex);
-        auto ptr = std::make_shared<T>(std::forward<Args>(args)...);
-        objs.emplace(TypeInfo::registered<T>::index, ptr);
-        return true;
+        objs.emplace(TypeInfo::registered<T>::index, std::make_shared<T>(std::forward<Args>(args)...));
     }
 
     template <typename T>

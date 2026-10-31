@@ -663,7 +663,7 @@ ExitCode load_app(int32_t &main_module_id, EmuEnvState &emuenv, const AppLaunchR
 
     if (emuenv.cfg.gdbstub) {
         // The threads wait for the debugger's first continue
-        emuenv.kernel.suspend_threads();
+        emuenv.kernel.set_threads_suspended(true);
         server_open(emuenv);
     }
 
@@ -697,25 +697,17 @@ ExitCode run_app(EmuEnvState &emuenv, int32_t main_module_id, const AppLaunchReq
     SceInt32 stack_size = SCE_KERNEL_STACK_SIZE_USER_MAIN;
     SceInt32 affinity = SCE_KERNEL_THREAD_CPU_AFFINITY_MASK_DEFAULT;
     if (process_param) {
-        auto priority_ptr = Ptr<int32_t>(process_param->main_thread_priority);
-        if (priority_ptr) {
-            priority = *priority_ptr.get(emuenv.mem);
-        }
-
-        auto stack_size_ptr = Ptr<int32_t>(process_param->main_thread_stacksize);
-        if (stack_size_ptr) {
-            stack_size = *stack_size_ptr.get(emuenv.mem);
-        }
-
-        auto affinity_ptr = Ptr<SceInt32>(process_param->main_thread_cpu_affinity_mask);
-        if (affinity_ptr) {
-            affinity = *affinity_ptr.get(emuenv.mem);
-        }
+        if (const auto ptr = Ptr<int32_t>(process_param->main_thread_priority))
+            priority = *ptr.get(emuenv.mem);
+        if (const auto ptr = Ptr<int32_t>(process_param->main_thread_stacksize))
+            stack_size = *ptr.get(emuenv.mem);
+        if (const auto ptr = Ptr<SceInt32>(process_param->main_thread_cpu_affinity_mask))
+            affinity = *ptr.get(emuenv.mem);
     }
     // A main thread without its own affinity runs on every user core and reports them all
     if (affinity == SCE_KERNEL_THREAD_CPU_AFFINITY_MASK_DEFAULT)
         affinity = SCE_KERNEL_CPU_MASK_USER_ALL;
-    const ThreadStatePtr main_thread = emuenv.kernel.create_thread(emuenv.mem, emuenv.io.title_id.c_str(), entry_point, priority, affinity, stack_size, 0, nullptr);
+    const ThreadStatePtr main_thread = emuenv.kernel.create_thread(emuenv.mem, emuenv.io.title_id.c_str(), entry_point, priority, affinity, stack_size, 0);
     if (!main_thread) {
         LOG_ERROR("Failed to init main thread.");
         return InitThreadFailed;
@@ -731,7 +723,8 @@ ExitCode run_app(EmuEnvState &emuenv, int32_t main_module_id, const AppLaunchReq
             start_module(emuenv, module->info);
     }
 
-    SceKernelThreadOptParam param{ 0, 0 };
+    SceSize arglen = 0;
+    Ptr<void> argp;
     std::vector<std::string> cfg_args;
     const auto *args = &launch_request.argv;
     if (args->empty() && !emuenv.cfg.app_args.empty()) {
@@ -745,10 +738,10 @@ ExitCode run_app(EmuEnvState &emuenv, int32_t main_module_id, const AppLaunchReq
             buf.insert(buf.end(), arg.c_str(), arg.c_str() + arg.size() + 1);
         auto arr = Ptr<uint8_t>(alloc(emuenv.mem, static_cast<uint32_t>(buf.size()), "arg"));
         memcpy(arr.get(emuenv.mem), buf.data(), buf.size());
-        param.size = static_cast<SceSize>(buf.size());
-        param.attr = arr.address();
+        arglen = static_cast<SceSize>(buf.size());
+        argp = arr;
     }
-    if (main_thread->start(param.size, Ptr<void>(param.attr), true) < 0) {
+    if (main_thread->start(arglen, argp, true) < 0) {
         LOG_ERROR("Failed to run main thread.");
         return RunThreadFailed;
     }

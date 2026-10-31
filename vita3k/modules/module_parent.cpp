@@ -27,6 +27,7 @@
 #include <io/vfs.h>
 #include <kernel/load_self.h>
 #include <kernel/state.h>
+#include <kernel/thread/thread_state.h>
 #include <module/load_module.h>
 #include <nids/functions.h>
 #include <packages/license.h>
@@ -314,10 +315,8 @@ int unload_module(EmuEnvState &emuenv, SceUID module_id) {
     LOG_INFO("Unloading module {} ({})", module_id, module->info.module_name);
     if (module->info.segments[0].memsz == 0) {
         LOG_WARN("Module {} has no segments, skipping unload", module->info.module_name);
-        {
-            const std::lock_guard<std::mutex> lock(emuenv.kernel.mutex);
-            emuenv.kernel.loaded_modules.erase(module->info.modid);
-        }
+        const std::lock_guard<std::mutex> lock(emuenv.kernel.mutex);
+        emuenv.kernel.loaded_modules.erase(module->info.modid);
         return 0;
     }
     return unload_self(emuenv.kernel, emuenv.mem, *module);
@@ -325,49 +324,38 @@ int unload_module(EmuEnvState &emuenv, SceUID module_id) {
 
 uint32_t start_module(EmuEnvState &emuenv, const SceKernelModuleInfo &module, SceSize args, Ptr<const void> argp) {
     const auto module_start = module.start_entry;
-    if (module_start) {
-        const auto module_name = module.module_name;
+    if (!module_start)
+        return 0;
+    const auto module_name = module.module_name;
 
-        LOG_DEBUG("Running module_start of library: {} at address {}", module_name, log_hex(module_start.address()));
-        SceInt32 priority = SCE_KERNEL_DEFAULT_PRIORITY_USER;
-        SceInt32 stack_size = SCE_KERNEL_STACK_SIZE_USER_MAIN;
-        SceInt32 affinity = SCE_KERNEL_THREAD_CPU_AFFINITY_MASK_DEFAULT;
-        // module_start is always called from new thread
-        const ThreadStatePtr module_thread = emuenv.kernel.create_thread(emuenv.mem, module_name, module_start, priority, affinity, stack_size, 0, nullptr);
+    LOG_DEBUG("Running module_start of library: {} at address {}", module_name, log_hex(module_start.address()));
+    // module_start is always called from new thread
+    const ThreadStatePtr module_thread = emuenv.kernel.create_thread(emuenv.mem, module_name, module_start, SCE_KERNEL_DEFAULT_PRIORITY_USER, SCE_KERNEL_THREAD_CPU_AFFINITY_MASK_DEFAULT, SCE_KERNEL_STACK_SIZE_USER_MAIN, 0);
+    const uint32_t ret = module_thread->run_guest_function(args, argp.cast<void>());
+    module_thread->remove();
 
-        const uint32_t ret = module_thread->run_guest_function(module_start.address(), args, argp.cast<void>());
-        module_thread->remove();
-
-        LOG_INFO("Module {} (at \"{}\") module_start returned {}", module_name, module.path, log_hex(ret));
-        if (ret != SCE_KERNEL_START_SUCCESS)
-            LOG_ERROR("Module {} did not return successfully!", module_name);
-
-        return ret;
-    }
-    return 0;
+    LOG_INFO("Module {} (at \"{}\") module_start returned {}", module_name, module.path, log_hex(ret));
+    if (ret != SCE_KERNEL_START_SUCCESS)
+        LOG_ERROR("Module {} did not return successfully!", module_name);
+    return ret;
 }
 
 uint32_t stop_module(EmuEnvState &emuenv, const SceKernelModuleInfo &module, SceSize args, Ptr<const void> argp) {
     const auto module_stop = module.stop_entry;
-    if (module_stop) {
-        const auto module_name = module.module_name;
+    if (!module_stop)
+        return 0;
+    const auto module_name = module.module_name;
 
-        LOG_DEBUG("Running module_stop of library: {} at address {}", module_name, log_hex(module_stop.address()));
-        SceInt32 priority = SCE_KERNEL_DEFAULT_PRIORITY_USER;
-        SceInt32 stack_size = SCE_KERNEL_STACK_SIZE_USER_MAIN;
-        SceInt32 affinity = SCE_KERNEL_THREAD_CPU_AFFINITY_MASK_DEFAULT;
-        // module_stop is always called from new thread
-        const ThreadStatePtr module_thread = emuenv.kernel.create_thread(emuenv.mem, module_name, module_stop, priority, affinity, stack_size, 0, nullptr);
+    LOG_DEBUG("Running module_stop of library: {} at address {}", module_name, log_hex(module_stop.address()));
+    // module_stop is always called from new thread
+    const ThreadStatePtr module_thread = emuenv.kernel.create_thread(emuenv.mem, module_name, module_stop, SCE_KERNEL_DEFAULT_PRIORITY_USER, SCE_KERNEL_THREAD_CPU_AFFINITY_MASK_DEFAULT, SCE_KERNEL_STACK_SIZE_USER_MAIN, 0);
+    const uint32_t ret = module_thread->run_guest_function(args, argp.cast<void>());
+    module_thread->remove();
 
-        const uint32_t ret = module_thread->run_guest_function(module_stop.address(), args, argp.cast<void>());
-        module_thread->remove();
-
-        LOG_INFO("Module {} (at \"{}\") module_stop returned {}", module_name, module.path, log_hex(ret));
-        if (ret != SCE_KERNEL_STOP_SUCCESS)
-            LOG_ERROR("Module {} did not stop successfully!", module_name);
-        return ret;
-    }
-    return 0;
+    LOG_INFO("Module {} (at \"{}\") module_stop returned {}", module_name, module.path, log_hex(ret));
+    if (ret != SCE_KERNEL_STOP_SUCCESS)
+        LOG_ERROR("Module {} did not stop successfully!", module_name);
+    return ret;
 }
 
 /**

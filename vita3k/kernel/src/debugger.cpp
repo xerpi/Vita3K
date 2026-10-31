@@ -23,15 +23,11 @@ constexpr unsigned char ARM_BREAKPOINT[4] = { 0x70, 0x00, 0x20, 0xE1 };
 
 void Debugger::add_breakpoint(MemState &mem, uint32_t addr, bool thumb_mode) {
     const auto lock = std::lock_guard(mutex);
-    Breakpoint bk;
-    bk.thumb_mode = thumb_mode;
-    if (thumb_mode) {
-        std::memcpy(&bk.data, Ptr<uint8_t>(addr).get(mem), sizeof(THUMB_BREAKPOINT));
-        std::memcpy(Ptr<uint8_t>(addr).get(mem), THUMB_BREAKPOINT, sizeof(THUMB_BREAKPOINT));
-    } else {
-        std::memcpy(&bk.data, Ptr<uint8_t>(addr).get(mem), sizeof(ARM_BREAKPOINT));
-        std::memcpy(Ptr<uint8_t>(addr).get(mem), ARM_BREAKPOINT, sizeof(ARM_BREAKPOINT));
-    }
+    uint8_t *const code = Ptr<uint8_t>(addr).get(mem);
+    const size_t size = thumb_mode ? sizeof(THUMB_BREAKPOINT) : sizeof(ARM_BREAKPOINT);
+    Breakpoint bk{ thumb_mode };
+    std::memcpy(bk.data, code, size);
+    std::memcpy(code, thumb_mode ? THUMB_BREAKPOINT : ARM_BREAKPOINT, size);
     breakpoints.emplace(addr, bk);
     parent.invalidate_jit_cache(addr, 4);
 }
@@ -50,27 +46,6 @@ Debugger::Debugger(KernelState &kernel)
     : parent(kernel) {
 }
 
-void Debugger::add_watch_memory_addr(Address addr, size_t size) {
-    std::lock_guard<std::mutex> lock(mutex);
-    watch_memory_addrs.emplace(addr, WatchMemory{ addr, size });
-}
-
-void Debugger::remove_watch_memory_addr(KernelState &state, Address addr) {
-    std::lock_guard<std::mutex> lock(mutex);
-    watch_memory_addrs.erase(addr);
-}
-
-// TODO use boost icl or interval tree instead if this turns out to be a significant bottleneck
-Address Debugger::get_watch_memory_addr(Address addr) {
-    std::lock_guard<std::mutex> lock(mutex);
-    for (const auto &item : watch_memory_addrs) {
-        if (item.second.start <= addr && addr < item.second.start + item.second.size) {
-            return item.second.start;
-        }
-    }
-    return 0;
-}
-
 void Debugger::update_watches() {
     parent.set_memory_watch(watch_memory);
 }
@@ -78,5 +53,4 @@ void Debugger::update_watches() {
 void Debugger::deinit() {
     std::lock_guard<std::mutex> lock(mutex);
     breakpoints.clear();
-    watch_memory_addrs.clear();
 }

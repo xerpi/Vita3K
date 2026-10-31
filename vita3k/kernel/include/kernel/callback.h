@@ -40,10 +40,6 @@ public:
     Callback(const ThreadStatePtr &owner, const std::string &name, Ptr<SceKernelCallbackFunction> cb_func, Ptr<void> pCommon);
 
     void notify(SceUID notifier_id, SceInt32 notify_arg);
-    // Notifies from an event, without notification argument
-    void event_notify(SceUID notifier_id);
-    // Notifies directly, not from an event
-    void direct_notify(SceInt32 notify_arg);
     // Cancels every notification sent to this callback
     void cancel();
 
@@ -54,18 +50,18 @@ public:
     // Number of times the callback has been notified since it last ran
     uint32_t get_num_notifications();
 
-    // Takes the pending notifications, so new ones are kept for the next run. Returns nothing if the callback was not notified.
+    // Takes the pending notifications, later ones wait for the next run. Returns nothing if there are none.
     std::optional<Notification> take_notification();
 
-    const SceUID thread_id; // UID of the thread that created this callback
+    const SceUID thread_id; // UID of the thread that created the callback
     const std::string name;
-    const Ptr<SceKernelCallbackFunction> cb_func; // Function to execute when the callback should run
-    const Ptr<void> userdata; // User-provided data - passed as pCommon
+    const Ptr<SceKernelCallbackFunction> cb_func; // The guest function the callback runs
+    const Ptr<void> userdata; // pCommon given at creation, passed as the function's last argument
 
 private:
     // Drops the pending notifications, so the callback never runs again
     void on_delete(SceUID deleter) override;
-    // Clears the notifications and tells the owner if there were any. The lock must be held.
+    // Clears the notifications
     void reset();
 
     const std::weak_ptr<ThreadState> owner; // Thread that created this callback, woken when it is notified

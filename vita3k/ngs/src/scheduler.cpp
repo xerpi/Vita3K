@@ -19,6 +19,7 @@
 #include <ngs/system.h>
 
 #include <kernel/state.h>
+#include <kernel/thread/thread_state.h>
 
 #include <algorithm>
 #include <cstring>

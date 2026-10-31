@@ -23,6 +23,7 @@
 
 #include <dialog/state.h>
 #include <kernel/state.h>
+#include <kernel/thread/thread_state.h>
 #include <net/state.h>
 #include <net/types.h>
 #include <packages/sfo.h>

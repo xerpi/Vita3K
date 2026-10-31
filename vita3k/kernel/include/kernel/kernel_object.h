@@ -42,7 +42,8 @@ enum class UidClass : SceUInt32 {
     simple_event = 13,
 };
 
-// A kernel object that guest code refers to by UID.
+// A kernel object that guest code refers to by UID. Public methods take the object lock, and the
+// other methods expect it held unless their comment says they take it.
 class KernelObject {
 public:
     virtual ~KernelObject() = default;
@@ -52,27 +53,27 @@ public:
     SceUID uid{};
 
 protected:
-    // Locks the object, which guards its fields. The lock is empty if the object was deleted. Only
-    // the object's own methods take it.
+    // Locks the object. The lock is empty if the object was deleted. Only the object's own methods
+    // take it.
     [[nodiscard]] std::unique_lock<std::mutex> lock() const {
-        std::unique_lock<std::mutex> guard(mutex);
+        std::unique_lock<std::mutex> guard(object_mutex());
         if (deleted)
             guard.unlock();
         return guard;
     }
-
-    // Ends what the object is doing when the thread deleter deletes it. Runs once, with the lock held.
-    virtual void on_delete(SceUID deleter) {}
-
-    // Whether the object was deleted. With the lock held.
+    // The mutex that guards the object
+    virtual std::mutex &object_mutex() const { return mutex; }
+    // Whether the object was deleted
     bool was_deleted() const { return deleted; }
+    // Ends what the object is doing when the thread deleter deletes it. Runs once.
+    virtual void on_delete(SceUID deleter) {}
 
 private:
     friend class KernelObjects;
 
-    // Marks the object deleted by the thread deleter and runs on_delete().
+    // Takes the lock, marks the object deleted by the thread deleter and runs on_delete().
     void mark_deleted(SceUID deleter) {
-        const std::lock_guard<std::mutex> guard(mutex);
+        const std::lock_guard<std::mutex> guard(object_mutex());
         assert(!deleted);
         deleted = true;
         on_delete(deleter);
@@ -141,15 +142,13 @@ public:
         return true;
     }
 
-    // Returns the first T, in UID order, that pick accepts, or null. pick runs with the table and the object locked.
+    // Returns the first T, in UID order, that pick accepts, or null. pick runs with the table
+    // locked and reads only fields fixed at creation, like the name.
     template <KernelObjectClass T>
     [[nodiscard]] std::shared_ptr<T> find_if(std::predicate<const T &> auto pick) const {
         const std::lock_guard<std::mutex> lock(mutex);
         for (const auto &[_, obj] : objects) {
-            if (obj->get_uid_class() != T::uid_class)
-                continue;
-            const std::lock_guard<std::mutex> obj_lock(obj->mutex);
-            if (pick(static_cast<const T &>(*obj)))
+            if (obj->get_uid_class() == T::uid_class && pick(static_cast<const T &>(*obj)))
                 return std::static_pointer_cast<T>(obj);
         }
         return nullptr;
@@ -175,7 +174,7 @@ public:
 private:
     using Map = std::map<SceUID, std::shared_ptr<KernelObject>>;
 
-    // Returns the entry of the T with this UID, or end(). mutex must be held.
+    // Returns the entry of the T with this UID, or end()
     template <KernelObjectClass T>
     Map::const_iterator lookup(SceUID uid) const {
         const auto it = objects.find(uid);

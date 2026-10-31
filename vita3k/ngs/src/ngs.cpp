@@ -17,6 +17,7 @@
 
 #include <cpu/functions.h>
 #include <kernel/state.h>
+#include <kernel/thread/thread_state.h>
 
 #include <ngs/modules/atrac9.h>
 #include <ngs/state.h>

@@ -16,7 +16,6 @@
 // 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
 #pragma once
-#include <cpu/state.h>
 #include <mem/state.h>
 #include <mem/util.h>
 
@@ -29,16 +28,7 @@ struct Breakpoint {
     unsigned char data[4];
 };
 
-struct WatchMemory {
-    Address start;
-    size_t size;
-};
-
-using WatchMemoryAddrs = std::map<Address, WatchMemory>;
-using Breakpoints = std::map<Address, Breakpoint>;
-
 struct Debugger {
-    Debugger() = delete;
     explicit Debugger(KernelState &kernel);
 
     bool watch_import_calls = false;
@@ -49,17 +39,14 @@ struct Debugger {
     bool log_exports = false;
     bool dump_elfs = false;
 
-    void add_watch_memory_addr(Address addr, size_t size);
-    void remove_watch_memory_addr(KernelState &state, Address addr);
     void add_breakpoint(MemState &mem, uint32_t addr, bool thumb_mode);
     void remove_breakpoint(MemState &mem, uint32_t addr);
-    Address get_watch_memory_addr(Address addr);
+    // Applies watch_memory to every thread
     void update_watches();
     void deinit();
 
 private:
     std::mutex mutex;
     KernelState &parent;
-    WatchMemoryAddrs watch_memory_addrs;
-    Breakpoints breakpoints;
+    std::map<Address, Breakpoint> breakpoints;
 };

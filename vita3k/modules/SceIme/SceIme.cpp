@@ -20,6 +20,7 @@
 #include <ime/functions.h>
 #include <ime/types.h>
 #include <kernel/state.h>
+#include <kernel/thread/thread_state.h>
 
 #include <mutex>
 

@@ -288,24 +288,30 @@ void DebugWidget::refresh_lw_mutexes() {
 void DebugWidget::refresh_condvars() {
     m_condvars_tree->clear();
 
-    emuenv.kernel.objects.for_each<HeavyCond>([&](const Condvar &cv) {
+    emuenv.kernel.objects.for_each<HeavyCond>([&](const HeavyCond &cv) {
+        SceKernelCondInfo info;
+        if (cv.info(info) != SCE_KERNEL_OK)
+            return;
         auto *item = new QTreeWidgetItem(m_condvars_tree);
         item->setText(0, QStringLiteral("0x%1").arg(cv.uid, 8, 16, QLatin1Char('0')).toUpper());
         item->setText(1, QString::fromStdString(cv.name));
         item->setText(2, QString::number(cv.attr));
-        item->setText(3, QString::number(cv.num_waiters()));
+        item->setText(3, QString::number(info.numWaitThreads));
     });
 }
 
 void DebugWidget::refresh_lw_condvars() {
     m_lw_condvars_tree->clear();
 
-    emuenv.kernel.objects.for_each<LwCond>([&](const Condvar &cv) {
+    emuenv.kernel.objects.for_each<LwCond>([&](const LwCond &cv) {
+        SceKernelLwCondInfo info;
+        if (cv.info(info) != SCE_KERNEL_OK)
+            return;
         auto *item = new QTreeWidgetItem(m_lw_condvars_tree);
         item->setText(0, QStringLiteral("0x%1").arg(cv.uid, 8, 16, QLatin1Char('0')).toUpper());
         item->setText(1, QString::fromStdString(cv.name));
         item->setText(2, QString::number(cv.attr));
-        item->setText(3, QString::number(cv.num_waiters()));
+        item->setText(3, QString::number(info.numWaitThreads));
     });
 }
 

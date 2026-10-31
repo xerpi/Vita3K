@@ -33,6 +33,7 @@
 #endif
 
 #include <kernel/state.h>
+#include <kernel/thread/thread_state.h>
 #include <net/state.h>
 #include <openssl/err.h>
 #include <openssl/ssl.h>

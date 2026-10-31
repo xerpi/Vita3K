@@ -21,6 +21,7 @@
 
 #include <io/state.h>
 #include <kernel/state.h>
+#include <kernel/thread/thread_state.h>
 #include <np/state.h>
 #include <util/log.h>
 

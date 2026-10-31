@@ -17,6 +17,7 @@
 
 #include "kernel/state.h"
 
+#include <kernel/thread/thread_state.h>
 #include <module/module.h>
 #include <util/tracy.h>
 

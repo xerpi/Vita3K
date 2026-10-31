@@ -18,6 +18,7 @@
 #include <module/module.h>
 
 #include <kernel/state.h>
+#include <kernel/thread/thread_state.h>
 #include <util/lock_and_find.h>
 #include <v3kprintf.h>
 

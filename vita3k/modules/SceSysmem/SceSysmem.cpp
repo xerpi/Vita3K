@@ -20,6 +20,7 @@
 
 #include <emuenv/state.h>
 #include <kernel/state.h>
+#include <kernel/thread/thread_state.h>
 #include <kernel/types.h>
 #include <mem/functions.h>
 #include <modules/sysmem_state.h>
