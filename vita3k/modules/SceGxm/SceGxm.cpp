@@ -1663,8 +1663,9 @@ EXPORT(int, sceGxmBeginCommandList, SceGxmContext *deferredContext) {
     KernelState *kernel = &emuenv.kernel;
     MemState *mem = &emuenv.mem;
 
-    deferredContext->renderer->alloc_func = [deferredContext, kernel, mem, thread_id]() {
-        return deferredContext->allocate_new_command(*kernel, *mem, thread_id);
+    // The thread that records a command runs the memory callback it needs
+    deferredContext->renderer->alloc_func = [deferredContext, kernel, mem]() {
+        return deferredContext->allocate_new_command(*kernel, *mem, get_current_cpu_state()->thread_id);
     };
 
     deferredContext->renderer->free_func = [](renderer::Command *cmd) {

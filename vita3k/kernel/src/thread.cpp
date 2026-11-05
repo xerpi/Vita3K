@@ -287,6 +287,8 @@ std::optional<uint32_t> ThreadState::run_guest(std::unique_lock<std::mutex> &loc
 }
 
 uint32_t ThreadState::call_guest(Address fn, std::initializer_list<uint32_t> args, bool fresh_vfp_state) {
+    // Only the thread's own host thread runs its guest code
+    assert(get_current_cpu_state() == cpu.get());
     std::unique_lock<std::mutex> thread_lock(mutex);
 
     // Save the thread's context before the call overwrites PC and LR
@@ -454,6 +456,8 @@ int ThreadState::stack_free_size() const {
 
 ThreadState::HostWait::HostWait(ThreadState &thread, std::optional<WaitTarget> shown)
     : thread(thread) {
+    // Only the thread's own host thread blocks it in a host wait
+    assert(get_current_cpu_state() == thread.cpu.get());
     const std::lock_guard<std::mutex> lock(thread.mutex);
     thread.host_waiting = true;
     if (shown) {

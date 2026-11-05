@@ -209,7 +209,7 @@ forvm_suspend_core_handover     fail     # the ForVM suspend hands the core over
 forvm_suspend_preempt_count     fail     # the interrupt preempt count of thread info stays 0, a ForVM suspend doesn't grow it
 fpscr_flags_across_calls        fail     # the start handler sees an inexact flag (0x10) in FPSCR that the Vita does not set
 gxm_context_memory              fail     # sceGxmCreateContext checks no buffer size, alignment, mapping or NULL pointer
-gxm_deferred_callback_recorder  timeout  # a VDM memory callback during B's draws runs as a call on A, the thread that began the command list, while A waits for B, and B hangs
+gxm_deferred_callback_recorder  fail     # B's draws need no vertex or fragment ring refill, only a VDM one
 gxm_deferred_callback_threads   fail     # one lock serializes the deferred memory callbacks of all contexts, so B's begin waits for A's callback, and the begin calls the vertex and fragment callbacks too
 gxm_deferred_ring_usage         fail     # the command list words are a host pointer, the deferred buffer getters return the buffer's start, a draw without the default uniform reserve succeeds, and 1 KiB of VDM holds 13 empty lists or 79 draws, not 96 or 23
 gxm_display_queue_finish_wait   fail     # a thread in sceGxmDisplayQueueFinish waits with no wait type or ID, the Vita shows an event flag wait
