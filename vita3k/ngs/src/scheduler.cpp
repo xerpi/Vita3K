@@ -19,6 +19,7 @@
 #include <ngs/system.h>
 
 #include <kernel/state.h>
+#include <kernel/thread/thread_state.h>
 
 #include <algorithm>
 #include <cstring>
@@ -190,6 +191,19 @@ void VoiceScheduler::update(KernelState &kern, const MemState &mem, const SceUID
 
     is_updating = false;
     condvar.notify_all();
+}
+
+void VoiceScheduler::wait_update_end(ThreadState &thread, std::unique_lock<std::recursive_mutex> &lock) {
+    while (is_updating) {
+        // The thread holds no scheduler lock while it counts as stopped
+        lock.unlock();
+        {
+            const ThreadState::HostWait waiting(thread, std::nullopt);
+            std::unique_lock<std::recursive_mutex> wait_lock(mutex);
+            condvar.wait(wait_lock, [&] { return !is_updating; });
+        }
+        lock.lock();
+    }
 }
 
 int32_t VoiceScheduler::get_position(Voice *v) {

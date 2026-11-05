@@ -19,6 +19,7 @@
 
 #include "../SceProcessmgr/SceProcessmgr.h"
 
+#include <kernel/state.h>
 #include <ngs/state.h>
 #include <ngs/system.h>
 #include <util/log.h>
@@ -367,7 +368,7 @@ EXPORT(SceInt32, sceNgsRackRelease, ngs::Rack *rack, Ptr<void> callback) {
         // but I don't think this is allowed (and if it is I don't know how to prevent this)
         LOG_WARN_ONCE("sceNgsRackRelease called in a synchronous way during a ngs update, contact devs if your game softlocks now.");
 
-        rack->system->voice_scheduler.condvar.wait(lock);
+        rack->system->voice_scheduler.wait_update_end(*emuenv.kernel.get_thread(thread_id), lock);
         ngs::release_rack(emuenv.ngs, emuenv.mem, rack->system, rack);
     } else {
         // destroy rack asynchronously
@@ -433,7 +434,7 @@ EXPORT(SceInt32, sceNgsSystemRelease, ngs::System *system) {
         if (system->voice_scheduler.is_updating) {
             LOG_WARN_ONCE("sceNgsSystemRelease called during a ngs update, contact devs if your game softlocks now.");
 
-            system->voice_scheduler.condvar.wait(lock);
+            system->voice_scheduler.wait_update_end(*emuenv.kernel.get_thread(thread_id), lock);
         }
     }
 
