@@ -142,20 +142,24 @@ EXPORT(SceInt32, sceImeUpdate) {
     if (!emuenv.ime.state)
         return RET_ERROR(SCE_IME_ERROR_NOT_OPENED);
 
-    std::lock_guard lock(emuenv.ime.mutex);
+    Ptr<SceImeEvent> event;
+    {
+        const std::lock_guard lock(emuenv.ime.mutex);
+        if (emuenv.ime.event_id == SCE_IME_EVENT_OPEN)
+            return 0;
 
-    if (emuenv.ime.event_id == SCE_IME_EVENT_OPEN)
-        return 0;
-
-    Ptr<SceImeEvent> event = Ptr<SceImeEvent>(alloc(emuenv.mem, sizeof(SceImeEvent), "ime_event"));
-    SceImeEvent *e = event.get(emuenv.mem);
-    e->id = emuenv.ime.event_id;
-    memcpy(emuenv.ime.edit_text.str.get(emuenv.mem), emuenv.ime.str.c_str(), (emuenv.ime.str.length() + 1) * sizeof(SceWChar16));
-    e->param.text = emuenv.ime.edit_text;
-    e->param.caretIndex = emuenv.ime.caretIndex;
-    CALL_EXPORT(SceImeEventHandler, emuenv.ime.param.arg, e);
+        event = Ptr<SceImeEvent>(alloc(emuenv.mem, sizeof(SceImeEvent), "ime_event"));
+        SceImeEvent *e = event.get(emuenv.mem);
+        e->id = emuenv.ime.event_id;
+        memcpy(emuenv.ime.edit_text.str.get(emuenv.mem), emuenv.ime.str.c_str(), (emuenv.ime.str.length() + 1) * sizeof(SceWChar16));
+        e->param.text = emuenv.ime.edit_text;
+        e->param.caretIndex = emuenv.ime.caretIndex;
+        // Taken now, so an event the frontend posts while the handler runs waits for the next update
+        emuenv.ime.event_id = SCE_IME_EVENT_OPEN;
+    }
+    // The handler runs without the lock, so another thread's IME call doesn't wait for guest code
+    CALL_EXPORT(SceImeEventHandler, emuenv.ime.param.arg, event.get(emuenv.mem));
     free(emuenv.mem, event.address());
-    emuenv.ime.event_id = SCE_IME_EVENT_OPEN;
 
     return 0;
 }
