@@ -611,8 +611,14 @@ EXPORT(int, _sceKernelGetThreadContextForVM, SceUID threadId, Ptr<SceKernelThrea
     CPUContext context;
     uint32_t tpidrurw = 0;
     bool in_kernel_call = false;
-    if (const SceInt32 error = thread->get_vm_context(context, tpidrurw, in_kernel_call))
-        return RET_ERROR(error);
+    SceInt32 read_error;
+    {
+        // The read can wait for the target to stop, meanwhile the reader counts as stopped
+        const ThreadState::HostWait waiting(*emuenv.kernel.get_thread(thread_id), std::nullopt);
+        read_error = thread->get_vm_context(context, tpidrurw, in_kernel_call);
+    }
+    if (read_error)
+        return RET_ERROR(read_error);
 
     if (infoCpu) {
         // A thread a guest can suspend runs in user mode
