@@ -1257,7 +1257,10 @@ static int destroy_gxm_context(EmuEnvState &emuenv, SceGxmContext *context, cons
         if (force_backend_destroy) {
             renderer::destroy_context_during_shutdown(*emuenv.renderer, context->renderer);
         } else {
-            renderer::destroy_context(*emuenv.renderer, context->renderer);
+            // Taken out first, so the guest memory the context is in doesn't change during the wait
+            std::unique_ptr<renderer::Context> renderer_context = std::move(context->renderer);
+            const ThreadState::HostWait waiting(*emuenv.kernel.get_thread(get_current_cpu_state()->thread_id), std::nullopt);
+            renderer::destroy_context(*emuenv.renderer, renderer_context);
         }
 
         if (emuenv.gxm.last_immediate_context == immediate_context->second) {
@@ -1362,7 +1365,10 @@ static int destroy_gxm_render_target(EmuEnvState &emuenv, SceGxmRenderTarget *re
     if (force_backend_destroy) {
         renderer::destroy_render_target_during_shutdown(*emuenv.renderer, render_target->renderer);
     } else {
-        renderer::destroy_render_target(*emuenv.renderer, render_target->renderer);
+        // Taken out first, so the guest memory the render target is in doesn't change during the wait
+        std::unique_ptr<renderer::RenderTarget> renderer_target = std::move(render_target->renderer);
+        const ThreadState::HostWait waiting(*emuenv.kernel.get_thread(get_current_cpu_state()->thread_id), std::nullopt);
+        renderer::destroy_render_target(*emuenv.renderer, renderer_target);
     }
 
     emuenv.gxm.render_targets.erase(tracked_render_target);
@@ -1983,11 +1989,19 @@ EXPORT(int, sceGxmCreateContext, const SceGxmContextParams *params, Ptr<SceGxmCo
 
     ctx->state.type = SCE_GXM_CONTEXT_TYPE_IMMEDIATE;
 
-    if (!renderer::create_context(*emuenv.renderer, ctx->renderer)) {
+    // Made in a local and stored after the wait, so the guest memory doesn't change during it
+    std::unique_ptr<renderer::Context> renderer_context;
+    bool created;
+    {
+        const ThreadState::HostWait waiting(*emuenv.kernel.get_thread(thread_id), std::nullopt);
+        created = renderer::create_context(*emuenv.renderer, renderer_context);
+    }
+    if (!created) {
         ctx->~SceGxmContext();
         context->reset();
         return RET_ERROR(SCE_GXM_ERROR_DRIVER);
     }
+    ctx->renderer = std::move(renderer_context);
 
     // Set VDM buffer space
     ctx->state.vdm_buffer = params->vdmRingBufferMem;
@@ -2061,10 +2075,18 @@ EXPORT(int, sceGxmCreateRenderTarget, const SceGxmRenderTargetParams *params, Pt
     }
 
     SceGxmRenderTarget *const rt = renderTarget->get(emuenv.mem);
-    if (!renderer::create_render_target(*emuenv.renderer, rt->renderer, params)) {
+    // Made in a local and stored after the wait, so the guest memory doesn't change during it
+    std::unique_ptr<renderer::RenderTarget> renderer_target;
+    bool created;
+    {
+        const ThreadState::HostWait waiting(*emuenv.kernel.get_thread(thread_id), std::nullopt);
+        created = renderer::create_render_target(*emuenv.renderer, renderer_target, params);
+    }
+    if (!created) {
         free(emuenv.mem, *renderTarget);
         return RET_ERROR(SCE_GXM_ERROR_DRIVER);
     }
+    rt->renderer = std::move(renderer_target);
 
     rt->width = params->width;
     rt->height = params->height;
@@ -2718,9 +2740,10 @@ EXPORT(int, sceGxmFinish, SceGxmContext *context) {
     if (!renderer_context)
         return RET_ERROR(SCE_GXM_ERROR_INVALID_POINTER);
 
-    // Wait on this context's rendering finish code.
+    // Wait for this context's rendering. The finish command comes from the host heap, not from the
+    // context's ring in guest memory, so the guest memory doesn't change during the wait.
     const ThreadState::HostWait waiting(*emuenv.kernel.get_thread(thread_id));
-    renderer::finish(*emuenv.renderer, renderer_context);
+    renderer::finish(*emuenv.renderer, nullptr);
 
     return 0;
 }
@@ -2958,8 +2981,10 @@ EXPORT(int, sceGxmMapMemory, Ptr<void> base, uint32_t size, uint32_t attribs) {
         gxm.memory_mapped_regions.emplace(aligned_base, MemoryMapInfo{ aligned_base, size, attribs });
 
         // little big planet maps regions of size 0
-        if (emuenv.renderer->features.enable_memory_mapping && size > 0)
+        if (emuenv.renderer->features.enable_memory_mapping && size > 0) {
+            const ThreadState::HostWait waiting(*emuenv.kernel.get_thread(thread_id), std::nullopt);
             renderer::send_single_command(*emuenv.renderer, nullptr, renderer::CommandOpcode::MemoryMap, true, aligned_base, size);
+        }
 
         return 0;
     }
@@ -5687,7 +5712,8 @@ EXPORT(int, sceGxmTransferFill, uint32_t fillColor, SceGxmTransferFormat destFor
 
 EXPORT(int, sceGxmTransferFinish) {
     TRACY_FUNC(sceGxmTransferFinish);
-    // same as sceGxmFinish
+    // same as sceGxmFinish, but the thread shows no wait
+    const ThreadState::HostWait waiting(*emuenv.kernel.get_thread(thread_id), std::nullopt);
     renderer::finish(*emuenv.renderer, nullptr);
 
     return 0;
@@ -5728,8 +5754,10 @@ EXPORT(int, sceGxmUnmapMemory, Ptr<void> base) {
         *addr = *addr;
     }
 
-    if (emuenv.renderer->features.enable_memory_mapping && ite->second.size > 0)
+    if (emuenv.renderer->features.enable_memory_mapping && ite->second.size > 0) {
+        const ThreadState::HostWait waiting(*emuenv.kernel.get_thread(thread_id), std::nullopt);
         renderer::send_single_command(*emuenv.renderer, nullptr, renderer::CommandOpcode::MemoryUnmap, true, aligned_base);
+    }
 
     emuenv.gxm.memory_mapped_regions.erase(ite);
     return 0;
