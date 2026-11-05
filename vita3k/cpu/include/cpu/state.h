@@ -118,7 +118,6 @@ struct CPUState {
     // Debugging helpers
     virtual void set_log_code(bool log) = 0;
     virtual void set_log_mem(bool log) = 0;
-    virtual bool get_log_mem() = 0;
     std::string disassemble(uint64_t at, bool thumb, uint16_t *insn_size = nullptr);
     std::string disassemble(uint64_t at, uint16_t *insn_size = nullptr);
 

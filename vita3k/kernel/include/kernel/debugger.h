@@ -42,6 +42,7 @@ struct Debugger {
     explicit Debugger(KernelState &kernel);
 
     bool watch_import_calls = false;
+    // Read when a thread is created
     bool watch_code = false;
     bool watch_memory = false;
 
@@ -54,7 +55,6 @@ struct Debugger {
     void add_breakpoint(MemState &mem, uint32_t addr, bool thumb_mode);
     void remove_breakpoint(MemState &mem, uint32_t addr);
     Address get_watch_memory_addr(Address addr);
-    void update_watches();
     void deinit();
 
 private:

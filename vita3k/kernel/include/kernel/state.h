@@ -199,7 +199,6 @@ struct KernelState {
     // The registered process_exit_callback is invoked to notify the host layer.
     void request_process_exit(int res, std::optional<AppLaunchRequest> relaunch = std::nullopt);
 
-    void set_memory_watch(bool enabled);
     void invalidate_jit_cache(Address start, size_t length);
     SceKernelModuleInfo *find_module_by_addr(Address address);
 

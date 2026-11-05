@@ -1160,17 +1160,14 @@ void SettingsDialog::setup_connections() {
 
     connect(m_ui->watch_code, &QPushButton::clicked, this, [this] {
         emuenv.kernel.debugger.watch_code = !emuenv.kernel.debugger.watch_code;
-        emuenv.kernel.debugger.update_watches();
         m_ui->watch_code->setText(emuenv.kernel.debugger.watch_code ? tr("Unwatch Code") : tr("Watch Code"));
     });
     connect(m_ui->watch_memory, &QPushButton::clicked, this, [this] {
         emuenv.kernel.debugger.watch_memory = !emuenv.kernel.debugger.watch_memory;
-        emuenv.kernel.debugger.update_watches();
         m_ui->watch_memory->setText(emuenv.kernel.debugger.watch_memory ? tr("Unwatch Memory") : tr("Watch Memory"));
     });
     connect(m_ui->watch_import_calls, &QPushButton::clicked, this, [this] {
         emuenv.kernel.debugger.watch_import_calls = !emuenv.kernel.debugger.watch_import_calls;
-        emuenv.kernel.debugger.update_watches();
         m_ui->watch_import_calls->setText(emuenv.kernel.debugger.watch_import_calls ? tr("Unwatch Import Calls") : tr("Watch Import Calls"));
     });
 

@@ -69,6 +69,5 @@ public:
 
     void set_log_code(bool log) override;
     void set_log_mem(bool log) override;
-    bool get_log_mem() override;
     void invalidate_jit_cache(Address start, size_t length) override;
 };

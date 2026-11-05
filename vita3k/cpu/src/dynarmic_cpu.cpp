@@ -352,10 +352,6 @@ void DynarmicCPU::set_log_mem(bool log) {
     jit = make_jit();
 }
 
-bool DynarmicCPU::get_log_mem() {
-    return log_mem;
-}
-
 void DynarmicCPU::request_stop() {
     jit->HaltExecution(HALT_STOP);
 }

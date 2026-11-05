@@ -122,19 +122,6 @@ void KernelState::load_process_param(MemState &mem, Ptr<uint32_t> ptr) {
     export_nids[0xDF084DFA] = process_param.get(mem)->sce_libc_param.address();
 }
 
-void KernelState::set_memory_watch(bool enabled) {
-    std::lock_guard<std::mutex> lock(mutex);
-    for (const auto &thread : threads) {
-        auto &cpu = *thread.second->cpu;
-        if (enabled != cpu.get_log_mem()) {
-            if (enabled)
-                cpu.set_log_mem(true);
-            else
-                cpu.set_log_mem(false);
-        }
-    }
-}
-
 void KernelState::invalidate_jit_cache(Address start, size_t length) {
     std::lock_guard<std::mutex> lock(mutex);
     for (const auto &[_, thread] : threads) {
