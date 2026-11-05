@@ -944,10 +944,8 @@ static void display_entry_thread(EmuEnvState &emuenv) {
     }
 }
 
-static Ptr<void> gxmRunDeferredMemoryCallback(KernelState &kernel, const MemState &mem, std::mutex &global_lock, std::uint32_t &return_size, Ptr<SceGxmDeferredContextCallback> callback, Ptr<void> userdata,
+static Ptr<void> gxmRunDeferredMemoryCallback(KernelState &kernel, const MemState &mem, std::uint32_t &return_size, Ptr<SceGxmDeferredContextCallback> callback, Ptr<void> userdata,
     const std::uint32_t size, const SceUID thread_id) {
-    const std::lock_guard<std::mutex> guard(global_lock);
-
     const ThreadStatePtr thread = kernel.get_thread(thread_id);
     const Address final_size_addr = thread->cpu->stack_alloc(4);
 
@@ -992,8 +990,6 @@ struct SceGxmContext {
 
     std::unique_ptr<renderer::Context> renderer;
 
-    std::mutex &callback_lock;
-
     Ptr<uint8_t> alloc_space{};
     Ptr<uint8_t> alloc_space_end{};
 
@@ -1019,10 +1015,6 @@ struct SceGxmContext {
 
     bool was_vert_default_uniform_reserved = false;
     bool was_frag_default_uniform_reserved = false;
-
-    explicit SceGxmContext(std::mutex &callback_lock_)
-        : callback_lock(callback_lock_) {
-    }
 
     void reset_recording() {
         last_precomputed = false;
@@ -1120,7 +1112,7 @@ struct SceGxmContext {
         } else {
             constexpr uint32_t DEFAULT_SIZE = 1024;
 
-            Ptr<void> space = gxmRunDeferredMemoryCallback(kern, mem, callback_lock, actual_size, state.vdm_memory_callback,
+            Ptr<void> space = gxmRunDeferredMemoryCallback(kern, mem, actual_size, state.vdm_memory_callback,
                 state.memory_callback_userdata, DEFAULT_SIZE, thread_id);
 
             if (!space) {
@@ -1345,9 +1337,6 @@ void shutdown(EmuEnvState &emuenv) {
     emuenv.renderer->render_abort = true;
     invalidate_sync_objects(emuenv.gxm);
     emuenv.renderer->command_finish_one.notify_all();
-
-    // wait for any deferred GXM callback to finish before continuing shutdown
-    const std::lock_guard<std::mutex> callback_guard(emuenv.gxm.callback_lock);
 }
 
 } // namespace gxm
@@ -1642,7 +1631,7 @@ EXPORT(int, sceGxmBeginCommandList, SceGxmContext *deferredContext) {
     deferredContext->alloc_space_start = deferredContext->alloc_space;
 
     if (!deferredContext->state.vertex_ring_buffer) {
-        deferredContext->state.vertex_ring_buffer = gxmRunDeferredMemoryCallback(emuenv.kernel, emuenv.mem, emuenv.gxm.callback_lock, deferredContext->state.vertex_ring_buffer_size,
+        deferredContext->state.vertex_ring_buffer = gxmRunDeferredMemoryCallback(emuenv.kernel, emuenv.mem, deferredContext->state.vertex_ring_buffer_size,
             deferredContext->state.vertex_memory_callback, deferredContext->state.memory_callback_userdata, DEFAULT_RING_SIZE, thread_id);
 
         if (!deferredContext->state.vertex_ring_buffer) {
@@ -1651,7 +1640,7 @@ EXPORT(int, sceGxmBeginCommandList, SceGxmContext *deferredContext) {
     }
 
     if (!deferredContext->state.fragment_ring_buffer) {
-        deferredContext->state.fragment_ring_buffer = gxmRunDeferredMemoryCallback(emuenv.kernel, emuenv.mem, emuenv.gxm.callback_lock, deferredContext->state.fragment_ring_buffer_size,
+        deferredContext->state.fragment_ring_buffer = gxmRunDeferredMemoryCallback(emuenv.kernel, emuenv.mem, deferredContext->state.fragment_ring_buffer_size,
             deferredContext->state.fragment_memory_callback, deferredContext->state.memory_callback_userdata, DEFAULT_RING_SIZE, thread_id);
 
         if (!deferredContext->state.fragment_ring_buffer) {
@@ -1985,7 +1974,7 @@ EXPORT(int, sceGxmCreateContext, const SceGxmContextParams *params, Ptr<SceGxmCo
     *context = Ptr<SceGxmContext>(align(params->hostMem.address(), 8));
 
     SceGxmContext *ctx = context->get(emuenv.mem);
-    new (ctx) SceGxmContext(emuenv.gxm.callback_lock);
+    new (ctx) SceGxmContext;
 
     ctx->state.fragment_ring_buffer = params->fragmentRingBufferMem;
     ctx->state.vertex_ring_buffer = params->vertexRingBufferMem;
@@ -2036,7 +2025,7 @@ EXPORT(int, sceGxmCreateDeferredContext, SceGxmDeferredContextParams *params, Pt
 
     *deferredContext = Ptr<SceGxmContext>(align(params->hostMem.address(), 8));
     SceGxmContext *ctx = deferredContext->get(emuenv.mem);
-    new (ctx) SceGxmContext(emuenv.gxm.callback_lock);
+    new (ctx) SceGxmContext;
 
     ctx->state.vertex_memory_callback = params->vertexCallback;
     ctx->state.fragment_memory_callback = params->fragmentCallback;
@@ -3684,7 +3673,7 @@ EXPORT(int, sceGxmReserveFragmentDefaultUniformBuffer, SceGxmContext *context, P
 
     if (next_used > context->state.fragment_ring_buffer_size) {
         if (context->state.type != SCE_GXM_CONTEXT_TYPE_IMMEDIATE) {
-            context->state.fragment_ring_buffer = gxmRunDeferredMemoryCallback(emuenv.kernel, emuenv.mem, emuenv.gxm.callback_lock, context->state.fragment_ring_buffer_size,
+            context->state.fragment_ring_buffer = gxmRunDeferredMemoryCallback(emuenv.kernel, emuenv.mem, context->state.fragment_ring_buffer_size,
                 context->state.fragment_memory_callback, context->state.memory_callback_userdata, DEFAULT_RING_SIZE, thread_id);
 
             if (!context->state.fragment_ring_buffer) {
@@ -3729,7 +3718,7 @@ EXPORT(int, sceGxmReserveVertexDefaultUniformBuffer, SceGxmContext *context, Ptr
 
     if (next_used > context->state.vertex_ring_buffer_size) {
         if (context->state.type != SCE_GXM_CONTEXT_TYPE_IMMEDIATE) {
-            context->state.vertex_ring_buffer = gxmRunDeferredMemoryCallback(emuenv.kernel, emuenv.mem, emuenv.gxm.callback_lock, context->state.vertex_ring_buffer_size,
+            context->state.vertex_ring_buffer = gxmRunDeferredMemoryCallback(emuenv.kernel, emuenv.mem, context->state.vertex_ring_buffer_size,
                 context->state.vertex_memory_callback, context->state.memory_callback_userdata, DEFAULT_RING_SIZE, thread_id);
 
             if (!context->state.vertex_ring_buffer) {

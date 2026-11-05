@@ -74,7 +74,6 @@ struct GxmState {
     std::unordered_set<SceGxmSyncObject *> sync_objects;
 
     std::map<Address, MemoryMapInfo> memory_mapped_regions;
-    std::mutex callback_lock;
     std::unordered_map<SceGxmContext *, Address> immediate_contexts;
     Address last_immediate_context = 0;
     std::unordered_map<SceGxmContext *, Address> deferred_contexts;
