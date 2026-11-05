@@ -4943,12 +4943,22 @@ EXPORT(int, sceGxmSyncObjectDestroy, Ptr<SceGxmSyncObject> syncObject) {
 
 EXPORT(int, sceGxmTerminate) {
     TRACY_FUNC(sceGxmTerminate);
+    ThreadState &thread = *emuenv.kernel.get_thread(thread_id);
+    // The thread waits for the display queue thread's end, which runs every queued callback first
+    const WaitTarget worker_end{ .type = SCE_KERNEL_WAITTYPE_WAITTHEND, .id = emuenv.gxm.display_queue_thread };
+    std::unique_lock<std::mutex> add_lock(emuenv.gxm.display_queue_add_mutex, std::defer_lock);
     {
-        const std::lock_guard<std::mutex> add_guard(emuenv.gxm.display_queue_add_mutex);
-        emuenv.gxm.display_queue_closed = true;
+        // An AddEntry waiting for a free slot keeps the add lock
+        const ThreadState::HostWait waiting(thread, worker_end);
+        add_lock.lock();
     }
-    // Make sure everything is done in SDL side before killing Vita thread
-    emuenv.gxm.display_queue.wait_empty();
+    emuenv.gxm.display_queue_closed = true;
+    add_lock.unlock();
+    {
+        // Make sure everything is done in SDL side before killing Vita thread
+        const ThreadState::HostWait waiting(thread, worker_end);
+        emuenv.gxm.display_queue.wait_empty();
+    }
     gxm::destroy_all_contexts(emuenv, false);
     gxm::destroy_all_render_targets(emuenv, false);
     emuenv.gxm.display_queue.abort();

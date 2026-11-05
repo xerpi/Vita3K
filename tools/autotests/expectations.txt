@@ -230,8 +230,8 @@ gxm_render_target_memory        crash    # render target sizes and driver memory
 gxm_shader_patcher_memory       fail     # patcher create doesn't check its buffer regions or host allocation callbacks
 gxm_surface_memory              fail     # surface data alignment checks
 gxm_sync_objects                fail     # sync objects before sceGxmInitialize and their limit
-gxm_terminate_wait              fail     # a thread in sceGxmTerminate shows RUNNING with no wait, the Vita shows it waiting for the display queue thread's end
-gxm_terminate_wait_between      fail     # the idle display queue thread is DORMANT instead of waiting on an event flag, and a thread in sceGxmTerminate shows RUNNING with no wait
+gxm_terminate_wait              pass
+gxm_terminate_wait_between      fail     # the idle display queue thread is DORMANT instead of waiting on an event flag
 gxm_texture_memory              fail     # texture data, stride and palette alignment checks
 gxm_usse_map                    fail     # USSE map size, alignment and overlap checks
 gxm_wait_errors                 fail     # no notification region or display queue thread checks, a finish of a deferred context gives 0x805B0004
