@@ -350,6 +350,14 @@ void ThreadState::dispatch_abort(Address fault_addr) {
 
 uint32_t ThreadState::start_and_wait(SceSize args, const Ptr<void> argp) {
     start(args, argp);
+    // A guest thread that waits here, in a module start or stop, counts as stopped until the module
+    // thread ends. The boot and host threads have no CPU of their own.
+    const CPUState *const current = get_current_cpu_state();
+    const ThreadStatePtr caller = current ? kernel.get_thread(current->thread_id) : nullptr;
+    std::optional<HostWait> waiting;
+    if (caller)
+        waiting.emplace(*caller, std::nullopt);
+    // Released before the host wait ends, so the end never holds this thread's mutex
     std::unique_lock<std::mutex> lock(mutex);
     cv.wait(lock, [&] { return status == ThreadStatus::dormant || status == ThreadStatus::deleted; });
     return returned_value;
