@@ -174,17 +174,18 @@ void VoiceScheduler::update(KernelState &kern, const MemState &mem, const SceUID
     }
 
     while (!operations_pending.empty()) {
-        OperationPending &op = operations_pending.front();
+        const OperationPending op = operations_pending.front();
+        operations_pending.pop();
 
         switch (op.type) {
         case PendingType::ReleaseRack:
             release_rack(*op.release_data.state, mem, op.system, op.release_data.rack);
-            // run callback (we know it is defined)
+            // Without the lock, so another thread can use the scheduler during the callback
+            scheduler_lock.unlock();
             kern.get_thread(thread_id)->call_guest(op.release_data.callback, { Ptr<void>(op.release_data.rack, mem).address() });
+            scheduler_lock.lock();
             break;
         }
-
-        operations_pending.pop();
     }
 
     is_updating = false;
