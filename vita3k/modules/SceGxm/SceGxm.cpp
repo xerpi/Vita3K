@@ -894,7 +894,7 @@ std::string to_debug_str<SceGxmTransferFlags>(const MemState &mem, SceGxmTransfe
 
 static void display_entry_thread(EmuEnvState &emuenv) {
     auto &display_queue = emuenv.gxm.display_queue;
-    const ThreadStatePtr display_thread = emuenv.kernel.get_thread(emuenv.gxm.display_queue_thread);
+    const GuestThreadPtr display_thread = emuenv.kernel.get_thread(emuenv.gxm.display_queue_thread);
     if (!display_thread) {
         LOG_CRITICAL("display_thread not found. thid:{}", emuenv.gxm.display_queue_thread);
         return;
@@ -946,13 +946,13 @@ static void display_entry_thread(EmuEnvState &emuenv) {
 
 static Ptr<void> gxmRunDeferredMemoryCallback(KernelState &kernel, const MemState &mem, std::uint32_t &return_size, Ptr<SceGxmDeferredContextCallback> callback, Ptr<void> userdata,
     const std::uint32_t size, const SceUID thread_id) {
-    const ThreadStatePtr thread = kernel.get_thread(thread_id);
-    const Address final_size_addr = thread->cpu->stack_alloc(4);
+    const GuestThreadPtr thread = kernel.get_thread(thread_id);
+    const Address final_size_addr = thread->stack_alloc(4);
 
     Ptr<void> result(thread->call_guest(callback.address(), { userdata.address(), size, final_size_addr }));
 
     return_size = *Ptr<std::uint32_t>(final_size_addr).get(mem);
-    thread->cpu->stack_free(4);
+    thread->stack_free(4);
 
     return result;
 }
@@ -1259,7 +1259,7 @@ static int destroy_gxm_context(EmuEnvState &emuenv, SceGxmContext *context, cons
         } else {
             // Taken out first, so the guest memory the context is in doesn't change during the wait
             std::unique_ptr<renderer::Context> renderer_context = std::move(context->renderer);
-            const ThreadState::HostWait waiting(*emuenv.kernel.get_thread(get_current_cpu_state()->thread_id), std::nullopt);
+            const GuestThread::HostWait waiting(*current_thread(), std::nullopt);
             renderer::destroy_context(*emuenv.renderer, renderer_context);
         }
 
@@ -1367,7 +1367,7 @@ static int destroy_gxm_render_target(EmuEnvState &emuenv, SceGxmRenderTarget *re
     } else {
         // Taken out first, so the guest memory the render target is in doesn't change during the wait
         std::unique_ptr<renderer::RenderTarget> renderer_target = std::move(render_target->renderer);
-        const ThreadState::HostWait waiting(*emuenv.kernel.get_thread(get_current_cpu_state()->thread_id), std::nullopt);
+        const GuestThread::HostWait waiting(*current_thread(), std::nullopt);
         renderer::destroy_render_target(*emuenv.renderer, renderer_target);
     }
 
@@ -1660,7 +1660,7 @@ EXPORT(int, sceGxmBeginCommandList, SceGxmContext *deferredContext) {
 
     // The thread that records a command runs the memory callback it needs
     deferredContext->renderer->alloc_func = [deferredContext, kernel, mem]() {
-        return deferredContext->allocate_new_command(*kernel, *mem, get_current_cpu_state()->thread_id);
+        return deferredContext->allocate_new_command(*kernel, *mem, current_thread()->state.id);
     };
 
     deferredContext->renderer->free_func = [](renderer::Command *cmd) {
@@ -1993,7 +1993,7 @@ EXPORT(int, sceGxmCreateContext, const SceGxmContextParams *params, Ptr<SceGxmCo
     std::unique_ptr<renderer::Context> renderer_context;
     bool created;
     {
-        const ThreadState::HostWait waiting(*emuenv.kernel.get_thread(thread_id), std::nullopt);
+        const GuestThread::HostWait waiting(*emuenv.kernel.get_thread(thread_id), std::nullopt);
         created = renderer::create_context(*emuenv.renderer, renderer_context);
     }
     if (!created) {
@@ -2079,7 +2079,7 @@ EXPORT(int, sceGxmCreateRenderTarget, const SceGxmRenderTargetParams *params, Pt
     std::unique_ptr<renderer::RenderTarget> renderer_target;
     bool created;
     {
-        const ThreadState::HostWait waiting(*emuenv.kernel.get_thread(thread_id), std::nullopt);
+        const GuestThread::HostWait waiting(*emuenv.kernel.get_thread(thread_id), std::nullopt);
         created = renderer::create_render_target(*emuenv.renderer, renderer_target, params);
     }
     if (!created) {
@@ -2261,7 +2261,7 @@ EXPORT(int, sceGxmDisplayQueueAddEntry, Ptr<SceGxmSyncObject> oldBuffer, Ptr<Sce
     // for another thread's addition and for the slot, and the debugger can stop the process meanwhile.
     std::unique_lock<std::mutex> add_lock(emuenv.gxm.display_queue_add_mutex, std::defer_lock);
     {
-        const ThreadState::HostWait waiting(*emuenv.kernel.get_thread(thread_id));
+        const GuestThread::HostWait waiting(*emuenv.kernel.get_thread(thread_id));
         add_lock.lock();
         if (emuenv.gxm.display_queue_closed)
             return RET_ERROR(SCE_GXM_ERROR_UNINITIALIZED);
@@ -2319,7 +2319,7 @@ EXPORT(int, sceGxmDisplayQueueFinish) {
     TRACY_FUNC(sceGxmDisplayQueueFinish);
     if (!emuenv.gxm.params.displayQueueCallback)
         return RET_ERROR(SCE_GXM_ERROR_UNINITIALIZED);
-    const ThreadState::HostWait waiting(*emuenv.kernel.get_thread(thread_id));
+    const GuestThread::HostWait waiting(*emuenv.kernel.get_thread(thread_id));
     emuenv.gxm.display_queue.wait_empty();
 
     return 0;
@@ -2742,7 +2742,7 @@ EXPORT(int, sceGxmFinish, SceGxmContext *context) {
 
     // Wait for this context's rendering. The finish command comes from the host heap, not from the
     // context's ring in guest memory, so the guest memory doesn't change during the wait.
-    const ThreadState::HostWait waiting(*emuenv.kernel.get_thread(thread_id));
+    const GuestThread::HostWait waiting(*emuenv.kernel.get_thread(thread_id));
     renderer::finish(*emuenv.renderer, nullptr);
 
     return 0;
@@ -2917,12 +2917,12 @@ EXPORT(int, sceGxmInitialize, const SceGxmInitializeParams *params) {
     // A slot stays occupied until its callback returns, like the firmware
     emuenv.gxm.display_queue.maxPendingCount_ = params->displayQueueMaxPendingCount;
 
-    const ThreadStatePtr main_thread = emuenv.kernel.get_thread(thread_id);
-    const ThreadStatePtr display_queue_thread = emuenv.kernel.create_thread(emuenv.mem, "SceGxmDisplayQueue", emuenv.gxm.params.displayQueueCallback, SCE_KERNEL_HIGHEST_PRIORITY_USER, SCE_KERNEL_THREAD_CPU_AFFINITY_MASK_DEFAULT, SCE_KERNEL_STACK_SIZE_USER_DEFAULT, 0);
+    const GuestThreadPtr main_thread = emuenv.kernel.get_thread(thread_id);
+    const GuestThreadPtr display_queue_thread = emuenv.kernel.create_thread(emuenv.mem, "SceGxmDisplayQueue", emuenv.gxm.params.displayQueueCallback, SCE_KERNEL_HIGHEST_PRIORITY_USER, SCE_KERNEL_THREAD_CPU_AFFINITY_MASK_DEFAULT, SCE_KERNEL_STACK_SIZE_USER_DEFAULT, 0);
     if (!display_queue_thread) {
         return RET_ERROR(SCE_GXM_ERROR_DRIVER);
     }
-    emuenv.gxm.display_queue_thread = display_queue_thread->id;
+    emuenv.gxm.display_queue_thread = display_queue_thread->state.id;
 
     // Reset the queue in case sceGxmTerminate was called earlier
     emuenv.gxm.display_queue.reset();
@@ -2982,7 +2982,7 @@ EXPORT(int, sceGxmMapMemory, Ptr<void> base, uint32_t size, uint32_t attribs) {
 
         // little big planet maps regions of size 0
         if (emuenv.renderer->features.enable_memory_mapping && size > 0) {
-            const ThreadState::HostWait waiting(*emuenv.kernel.get_thread(thread_id), std::nullopt);
+            const GuestThread::HostWait waiting(*emuenv.kernel.get_thread(thread_id), std::nullopt);
             renderer::send_single_command(*emuenv.renderer, nullptr, renderer::CommandOpcode::MemoryMap, true, aligned_base, size);
         }
 
@@ -3049,7 +3049,7 @@ EXPORT(int, sceGxmNotificationWait, const SceGxmNotification *notification) {
     std::uint32_t volatile *value = notification->address.get(emuenv.mem);
     const std::uint32_t target_value = notification->value;
 
-    const ThreadState::HostWait waiting(*emuenv.kernel.get_thread(thread_id));
+    const GuestThread::HostWait waiting(*emuenv.kernel.get_thread(thread_id));
     std::unique_lock<std::mutex> lock(emuenv.renderer->notification_mutex);
     if (*value != target_value) {
         emuenv.renderer->notification_ready.wait(lock, [&]() { return *value == target_value || emuenv.display.abort.load(); });
@@ -4943,20 +4943,20 @@ EXPORT(int, sceGxmSyncObjectDestroy, Ptr<SceGxmSyncObject> syncObject) {
 
 EXPORT(int, sceGxmTerminate) {
     TRACY_FUNC(sceGxmTerminate);
-    ThreadState &thread = *emuenv.kernel.get_thread(thread_id);
+    GuestThread &thread = *emuenv.kernel.get_thread(thread_id);
     // The thread waits for the display queue thread's end, which runs every queued callback first
     const WaitTarget worker_end{ .type = SCE_KERNEL_WAITTYPE_WAITTHEND, .id = emuenv.gxm.display_queue_thread };
     std::unique_lock<std::mutex> add_lock(emuenv.gxm.display_queue_add_mutex, std::defer_lock);
     {
         // An AddEntry waiting for a free slot keeps the add lock
-        const ThreadState::HostWait waiting(thread, worker_end);
+        const GuestThread::HostWait waiting(thread, worker_end);
         add_lock.lock();
     }
     emuenv.gxm.display_queue_closed = true;
     add_lock.unlock();
     {
         // Make sure everything is done in SDL side before killing Vita thread
-        const ThreadState::HostWait waiting(thread, worker_end);
+        const GuestThread::HostWait waiting(thread, worker_end);
         emuenv.gxm.display_queue.wait_empty();
     }
     gxm::destroy_all_contexts(emuenv, false);
@@ -5723,7 +5723,7 @@ EXPORT(int, sceGxmTransferFill, uint32_t fillColor, SceGxmTransferFormat destFor
 EXPORT(int, sceGxmTransferFinish) {
     TRACY_FUNC(sceGxmTransferFinish);
     // same as sceGxmFinish, but the thread shows no wait
-    const ThreadState::HostWait waiting(*emuenv.kernel.get_thread(thread_id), std::nullopt);
+    const GuestThread::HostWait waiting(*emuenv.kernel.get_thread(thread_id), std::nullopt);
     renderer::finish(*emuenv.renderer, nullptr);
 
     return 0;
@@ -5765,7 +5765,7 @@ EXPORT(int, sceGxmUnmapMemory, Ptr<void> base) {
     }
 
     if (emuenv.renderer->features.enable_memory_mapping && ite->second.size > 0) {
-        const ThreadState::HostWait waiting(*emuenv.kernel.get_thread(thread_id), std::nullopt);
+        const GuestThread::HostWait waiting(*emuenv.kernel.get_thread(thread_id), std::nullopt);
         renderer::send_single_command(*emuenv.renderer, nullptr, renderer::CommandOpcode::MemoryUnmap, true, aligned_base);
     }
 

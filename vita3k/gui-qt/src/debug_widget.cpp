@@ -20,7 +20,7 @@
 #include <cpu/state.h>
 #include <emuenv/state.h>
 #include <kernel/state.h>
-#include <kernel/thread/thread_state.h>
+#include <kernel/thread/guest_thread.h>
 #include <mem/functions.h>
 #include <mem/state.h>
 #include <mem/util.h>
@@ -232,8 +232,8 @@ static QString owner_string(KernelState &kernel, SceUID owner_id) {
     if (!owner_id)
         return DebugWidget::tr("not owned");
     const QString uid = QStringLiteral("0x%1").arg(owner_id, 8, 16, QLatin1Char('0')).toUpper();
-    const ThreadStatePtr owner = kernel.get_thread(owner_id);
-    return owner ? QStringLiteral("%1 (%2)").arg(QString::fromStdString(owner->name), uid) : uid;
+    const GuestThreadPtr owner = kernel.get_thread(owner_id);
+    return owner ? QStringLiteral("%1 (%2)").arg(QString::fromStdString(owner->state.name), uid) : uid;
 }
 
 void DebugWidget::refresh_threads() {
@@ -245,9 +245,9 @@ void DebugWidget::refresh_threads() {
         auto *item = new QTreeWidgetItem(m_threads_tree);
         item->setData(0, Qt::UserRole, static_cast<uint>(id));
         item->setText(0, QStringLiteral("0x%1").arg(id, 8, 16, QLatin1Char('0')).toUpper());
-        item->setText(1, QString::fromStdString(th->name));
+        item->setText(1, QString::fromStdString(th->state.name));
         item->setText(2, thread_status_string(th->get_status()));
-        item->setText(3, QStringLiteral("0x%1").arg(th->stack.get(), 8, 16, QLatin1Char('0')).toUpper());
+        item->setText(3, QStringLiteral("0x%1").arg(th->state.stack.get(), 8, 16, QLatin1Char('0')).toUpper());
     }
 }
 
@@ -371,7 +371,7 @@ void DebugWidget::on_thread_double_clicked(QTreeWidgetItem *item, int /*column*/
         return;
 
     const SceUID thread_id = static_cast<SceUID>(item->data(0, Qt::UserRole).toUInt());
-    ThreadStatePtr thread = emuenv.kernel.get_thread(thread_id);
+    GuestThreadPtr thread = emuenv.kernel.get_thread(thread_id);
     if (!thread) {
         QMessageBox::warning(this, tr("Thread Not Found"),
             tr("Thread 0x%1 no longer exists.").arg(thread_id, 8, 16, QLatin1Char('0')));
@@ -386,7 +386,7 @@ void DebugWidget::on_thread_double_clicked(QTreeWidgetItem *item, int /*column*/
 
     auto *dlg = new QDialog(this);
     dlg->setWindowTitle(tr("Thread: %1 (0x%2)")
-            .arg(QString::fromStdString(thread->name))
+            .arg(QString::fromStdString(thread->state.name))
             .arg(thread_id, 8, 16, QLatin1Char('0')));
     dlg->setAttribute(Qt::WA_DeleteOnClose);
     dlg->setMinimumSize(420, 480);
@@ -400,7 +400,7 @@ void DebugWidget::on_thread_double_clicked(QTreeWidgetItem *item, int /*column*/
         return QStringLiteral("0x%1").arg(val, 8, 16, QLatin1Char('0')).toUpper();
     };
 
-    form->addRow(tr("Name:"), new QLabel(QString::fromStdString(thread->name), dlg));
+    form->addRow(tr("Name:"), new QLabel(QString::fromStdString(thread->state.name), dlg));
     form->addRow(tr("Status:"), new QLabel(thread_status_string(thread->get_status()), dlg));
     form->addRow(tr("PC:"), new QLabel(make_hex(pc), dlg));
     form->addRow(tr("SP:"), new QLabel(make_hex(sp), dlg));

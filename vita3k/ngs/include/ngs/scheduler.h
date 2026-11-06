@@ -28,7 +28,7 @@
 
 struct MemState;
 struct KernelState;
-struct ThreadState;
+struct GuestThread;
 
 struct SceNgsPatchSetupInfo;
 
@@ -84,7 +84,7 @@ public:
 
     void update(KernelState &kern, const MemState &mem, const SceUID thread_id);
     // Waits with lock held until no update runs. thread counts as stopped meanwhile.
-    void wait_update_end(ThreadState &thread, std::unique_lock<std::recursive_mutex> &lock);
+    void wait_update_end(GuestThread &thread, std::unique_lock<std::recursive_mutex> &lock);
 
     Ptr<Patch> patch(const MemState &mem, SceNgsPatchSetupInfo *info);
 };

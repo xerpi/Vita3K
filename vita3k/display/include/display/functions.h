@@ -17,7 +17,7 @@
 
 #pragma once
 
-#include <kernel/thread/thread_state.h>
+#include <kernel/thread/guest_thread.h>
 
 #include <cstdint>
 
@@ -26,7 +26,7 @@ struct EmuEnvState;
 struct DisplayFrameInfo;
 
 void start_sync_thread(EmuEnvState &emuenv);
-void wait_vblank(DisplayState &display, const ThreadStatePtr &wait_thread, const uint64_t target_vcount, const bool is_cb);
+void wait_vblank(DisplayState &display, const GuestThreadPtr &wait_thread, const uint64_t target_vcount, const bool is_cb);
 // if the result is not nullptr, contain the predicted frame (pointer needs to be freed later)
 DisplayFrameInfo *predict_next_image(EmuEnvState &emuenv, Address sync_object);
 void update_prediction(EmuEnvState &emuenv, DisplayFrameInfo &frame);

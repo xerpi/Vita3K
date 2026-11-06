@@ -18,7 +18,7 @@
 #pragma once
 
 #include <kernel/kernel_object.h>
-#include <kernel/thread/thread_state.h>
+#include <kernel/thread/guest_thread.h>
 #include <kernel/thread/wait_queue.h>
 #include <kernel/types.h>
 #include <util/byte_ring_buffer.h>
@@ -47,7 +47,7 @@ protected:
 
     // Ends a queued wait of thread that its deadline ended, while it is still queued and before the
     // waiters behind it are served. Not called if the deadline passed before the wait was queued.
-    virtual void timed_out(const ThreadStatePtr &) {}
+    virtual void timed_out(const GuestThreadPtr &) {}
 
     // When wait_loop() runs the callbacks notified during the wait, before it returns
     enum class CallbacksCheck {
@@ -61,7 +61,7 @@ protected:
 
     // Runs the thread's pending callbacks if callbacks is set, releasing the lock while they run.
     // Returns WAIT_DELETE if the object was deleted meanwhile.
-    [[nodiscard]] WaitResult run_pending_callbacks(std::unique_lock<std::mutex> &lock, const ThreadStatePtr &thread, bool callbacks) {
+    [[nodiscard]] WaitResult run_pending_callbacks(std::unique_lock<std::mutex> &lock, const GuestThreadPtr &thread, bool callbacks) {
         if (!callbacks || !thread->has_pending_callbacks())
             return SCE_KERNEL_OK;
         lock.unlock();
@@ -78,7 +78,7 @@ protected:
     // (SCE_KERNEL_OK the first time). timeout is updated after every sleep. callbacks_check decides
     // whether callbacks notified during the wait run before it returns.
     template <typename Entry, typename Attempt>
-    [[nodiscard]] WaitResult wait_loop(WaitQueue<Entry> &queue, std::unique_lock<std::mutex> &lock, const ThreadStatePtr &thread, WaitTarget target, Entry entry, SceUInt32 *timeout, CallbacksCheck callbacks_check, Attempt attempt) {
+    [[nodiscard]] WaitResult wait_loop(WaitQueue<Entry> &queue, std::unique_lock<std::mutex> &lock, const GuestThreadPtr &thread, WaitTarget target, Entry entry, SceUInt32 *timeout, CallbacksCheck callbacks_check, Attempt attempt) {
         typename WaitQueue<Entry>::Waiter waiter{ .thread = thread, .entry = std::move(entry) };
         const Deadline deadline = deadline_from(timeout);
         // The result of the last sleep, then the final result
@@ -197,7 +197,7 @@ public:
     // Returns the error a create with these arguments gets, or SCE_KERNEL_OK
     static SceInt32 check_create(const char *name, SceUInt32 attr, SceUInt32 init_pattern);
 
-    SceInt32 wait(const ThreadStatePtr &thread, SceUInt32 wait_pattern, SceUInt32 *result_pattern, SceUInt64 *user_data, SceUInt32 *timeout, bool callbacks);
+    SceInt32 wait(const GuestThreadPtr &thread, SceUInt32 wait_pattern, SceUInt32 *result_pattern, SceUInt64 *user_data, SceUInt32 *timeout, bool callbacks);
     SceInt32 set_or_pulse(SceUInt32 set_pattern, SceUInt64 user_data, bool is_set);
     // Sets one of the system events, like the open event, with user_data for its waiters, or returns
     // UNKNOWN_EVENT_ID if it was deleted.
@@ -213,7 +213,7 @@ public:
     Timer(SceUInt32 attr, const char *name, SceUID creator);
 
     SceInt32 set_event(SceUID type, SceKernelSysClock interval, SceInt32 repeats);
-    SceInt32 wait(const ThreadStatePtr &thread, SceUInt32 wait_pattern, SceUInt32 *result_pattern, SceUInt64 *user_data, SceUInt32 *timeout, bool callbacks);
+    SceInt32 wait(const GuestThreadPtr &thread, SceUInt32 wait_pattern, SceUInt32 *result_pattern, SceUInt64 *user_data, SceUInt32 *timeout, bool callbacks);
     SceInt32 start();
     SceInt32 stop();
     SceInt32 cancel(SceUInt32 *num_wait_threads) override;
@@ -274,8 +274,8 @@ public:
     // Returns the error a create with these arguments gets, or SCE_KERNEL_OK
     static SceInt32 check_create(const char *name, SceUInt32 attr, SceInt32 init_val, SceInt32 max_val);
 
-    SceInt32 wait(const ThreadStatePtr &thread, SceInt32 need_count, SceUInt32 *timeout, bool callbacks);
-    SceInt32 poll(const ThreadStatePtr &thread, SceInt32 need_count);
+    SceInt32 wait(const GuestThreadPtr &thread, SceInt32 need_count, SceUInt32 *timeout, bool callbacks);
+    SceInt32 poll(const GuestThreadPtr &thread, SceInt32 need_count);
     SceInt32 signal(SceInt32 count);
     SceInt32 cancel(SceInt32 set_count, SceUInt32 *num_wait_threads);
     // Fills info with what the semaphore's info reports, or returns UNKNOWN_SEMA_ID if it was deleted.
@@ -289,7 +289,7 @@ private:
     void on_delete(SceUID deleter) override;
     // Takes need_count if the count covers it and no waiter is queued ahead of thread. The lock
     // must be held.
-    bool try_take(const ThreadStatePtr &thread, SceInt32 need_count);
+    bool try_take(const GuestThreadPtr &thread, SceInt32 need_count);
     // Gives the count to the waits it covers, in queue order up to the first it doesn't.
     void serve() override;
 
@@ -305,17 +305,17 @@ public:
     const SceInt32 init_count;
     const Ptr<SceKernelLwMutexWork> workarea;
 
-    Mutex(SceUInt32 attr, const char *name, SceInt32 init_count, ThreadStatePtr thread, Ptr<SceKernelLwMutexWork> workarea = {});
+    Mutex(SceUInt32 attr, const char *name, SceInt32 init_count, GuestThreadPtr thread, Ptr<SceKernelLwMutexWork> workarea = {});
     // Returns the error for a name, attributes or count the caller can't use, or 0. Kernel callers may
     // use attributes games can't.
     static SceInt32 check_create(const char *name, SceUInt32 attr, SceInt32 init_count, bool kernel);
 
-    SceInt32 acquire(MemState &mem, const ThreadStatePtr &thread, SceInt32 count, SceUInt32 *timeout, bool callbacks);
+    SceInt32 acquire(MemState &mem, const GuestThreadPtr &thread, SceInt32 count, SceUInt32 *timeout, bool callbacks);
     // Relocks the mutex after a condition variable wait. No timeout, and target is the reported wait.
-    SceInt32 relock(MemState &mem, const ThreadStatePtr &thread, WaitTarget target);
-    SceInt32 try_acquire(MemState &mem, const ThreadStatePtr &thread, SceInt32 count);
-    SceInt32 release(MemState &mem, const ThreadStatePtr &thread, SceInt32 unlock_count);
-    SceInt32 cancel(const ThreadStatePtr &thread, SceInt32 new_count, SceUInt32 *num_wait_threads);
+    SceInt32 relock(MemState &mem, const GuestThreadPtr &thread, WaitTarget target);
+    SceInt32 try_acquire(MemState &mem, const GuestThreadPtr &thread, SceInt32 count);
+    SceInt32 release(MemState &mem, const GuestThreadPtr &thread, SceInt32 unlock_count);
+    SceInt32 cancel(const GuestThreadPtr &thread, SceInt32 new_count, SceUInt32 *num_wait_threads);
     // Gives the mutex to its next waiter if thread, which is ending, owns it.
     void release_ended_owner(const ThreadState &thread);
 
@@ -337,10 +337,10 @@ private:
     // Returns ILLEGAL_COUNT for a lock or unlock count the mutex can't take, or SCE_KERNEL_OK
     SceInt32 check_count(SceInt32 count) const;
     // Takes the mutex if it is free or owned by thread, or returns why it can't. The lock must be held.
-    SceInt32 try_take(MemState &mem, const ThreadStatePtr &thread, SceInt32 count);
+    SceInt32 try_take(MemState &mem, const GuestThreadPtr &thread, SceInt32 count);
     // Takes the mutex if nobody owns it and, for a heavy mutex, no waiter is ahead of thread, or
     // returns nothing. The lock must be held.
-    std::optional<SceInt32> take_if_free(MemState &mem, const ThreadStatePtr &thread, SceInt32 count);
+    std::optional<SceInt32> take_if_free(MemState &mem, const GuestThreadPtr &thread, SceInt32 count);
     // Gives a free mutex to the first waiter, if there is one.
     void serve() override;
     // Writes the owner and lock count to a lightweight mutex's work area, which the guest reads. The lock must be held.
@@ -373,13 +373,13 @@ public:
     // Returns the error a create with these arguments gets, or SCE_KERNEL_OK
     static SceInt32 check_create(const char *name, SceUInt32 attr);
 
-    SceInt32 acquire_read(const ThreadStatePtr &thread, SceUInt32 *timeout, bool callbacks);
-    SceInt32 acquire_write(const ThreadStatePtr &thread, SceUInt32 *timeout, bool callbacks);
-    SceInt32 try_acquire_read(const ThreadStatePtr &thread);
-    SceInt32 try_acquire_write(const ThreadStatePtr &thread);
-    SceInt32 release_read(const ThreadStatePtr &thread);
-    SceInt32 release_write(const ThreadStatePtr &thread);
-    SceInt32 cancel(const ThreadStatePtr &thread, SceUInt32 *num_read_wait_threads, SceUInt32 *num_write_wait_threads, SceInt32 flag);
+    SceInt32 acquire_read(const GuestThreadPtr &thread, SceUInt32 *timeout, bool callbacks);
+    SceInt32 acquire_write(const GuestThreadPtr &thread, SceUInt32 *timeout, bool callbacks);
+    SceInt32 try_acquire_read(const GuestThreadPtr &thread);
+    SceInt32 try_acquire_write(const GuestThreadPtr &thread);
+    SceInt32 release_read(const GuestThreadPtr &thread);
+    SceInt32 release_write(const GuestThreadPtr &thread);
+    SceInt32 cancel(const GuestThreadPtr &thread, SceUInt32 *num_read_wait_threads, SceUInt32 *num_write_wait_threads, SceInt32 flag);
     // Releases the write lock if thread, which is ending, holds it. A read lock stays held, like on
     // a Vita.
     void release_ended_writer(const ThreadState &thread);
@@ -392,11 +392,11 @@ private:
     };
 
     void on_delete(SceUID deleter) override;
-    SceInt32 acquire(const ThreadStatePtr &thread, bool is_write, SceUInt32 *timeout, bool callbacks);
-    SceInt32 try_acquire(const ThreadStatePtr &thread, bool is_write);
-    SceInt32 release(const ThreadStatePtr &thread, bool is_write);
+    SceInt32 acquire(const GuestThreadPtr &thread, bool is_write, SceUInt32 *timeout, bool callbacks);
+    SceInt32 try_acquire(const GuestThreadPtr &thread, bool is_write);
+    SceInt32 release(const GuestThreadPtr &thread, bool is_write);
     // Takes the lock if it is free for this kind of lock, or returns why it can't. The lock must be held.
-    SceInt32 try_take(const ThreadStatePtr &thread, bool is_write);
+    SceInt32 try_take(const GuestThreadPtr &thread, bool is_write);
     // Gives the lock to the waiters that get it next: every waiting reader while no writer holds or
     // waits for it, or else the first waiting writer once nobody holds it.
     void serve() override;
@@ -424,7 +424,7 @@ public:
     // Returns the error a poll or wait for pattern with wait_mode gets, or SCE_KERNEL_OK
     static SceInt32 check_wait(SceUInt32 pattern, SceUInt32 wait_mode);
 
-    SceInt32 wait(const ThreadStatePtr &thread, SceUInt32 pattern, SceUInt32 wait_mode, SceUInt32 *out_bits, SceUInt32 *timeout, bool callbacks);
+    SceInt32 wait(const GuestThreadPtr &thread, SceUInt32 pattern, SceUInt32 wait_mode, SceUInt32 *out_bits, SceUInt32 *timeout, bool callbacks);
     SceInt32 poll(SceUID thread_id, SceUInt32 pattern, SceUInt32 wait_mode, SceUInt32 *out_bits);
     SceInt32 set(SceUInt32 pattern);
     SceInt32 clear(SceUInt32 pattern);
@@ -453,7 +453,7 @@ private:
     // Gives the flags to the waits they match, in queue order.
     void serve() override;
     // Gives the wait that timed out the flag's bits and gives back its hold.
-    void timed_out(const ThreadStatePtr &thread) override;
+    void timed_out(const GuestThreadPtr &thread) override;
     // Gives back one hold of the holder, the wait that took it ended. The lock must be held.
     void drop_hold();
 
@@ -494,7 +494,7 @@ public:
 
     Condvar(SceUInt32 attr, const char *name, MutexPtr associated_mutex);
 
-    SceInt32 wait(MemState &mem, const ThreadStatePtr &thread, SceUInt32 *timeout, bool callbacks);
+    SceInt32 wait(MemState &mem, const GuestThreadPtr &thread, SceUInt32 *timeout, bool callbacks);
     SceInt32 signal(SignalTarget target);
     // Returns how many threads wait on the condition variable, 0 once it was deleted.
     SceUInt32 num_waiters() const;
@@ -545,11 +545,11 @@ public:
 
     // Both move the bytes of the pieces in order, waiting until a FULL call moved all of them or an
     // ASAP call any. The size moved so far is kept in size, which may be null.
-    SceInt32 receive(const ThreadStatePtr &thread, MemState &mem, SceUInt32 wait_mode, std::span<const MsgPipeVector> pieces, SceSize *size, SceUInt32 *timeout, bool callbacks);
-    SceInt32 send(const ThreadStatePtr &thread, MemState &mem, SceUInt32 wait_mode, std::span<const MsgPipeVector> pieces, SceSize *size, SceUInt32 *timeout, bool callbacks);
+    SceInt32 receive(const GuestThreadPtr &thread, MemState &mem, SceUInt32 wait_mode, std::span<const MsgPipeVector> pieces, SceSize *size, SceUInt32 *timeout, bool callbacks);
+    SceInt32 send(const GuestThreadPtr &thread, MemState &mem, SceUInt32 wait_mode, std::span<const MsgPipeVector> pieces, SceSize *size, SceUInt32 *timeout, bool callbacks);
     // Both move what they can at once, without waiting
-    SceInt32 try_receive(const ThreadStatePtr &thread, MemState &mem, SceUInt32 wait_mode, std::span<const MsgPipeVector> pieces, SceSize *size);
-    SceInt32 try_send(const ThreadStatePtr &thread, MemState &mem, SceUInt32 wait_mode, std::span<const MsgPipeVector> pieces, SceSize *size);
+    SceInt32 try_receive(const GuestThreadPtr &thread, MemState &mem, SceUInt32 wait_mode, std::span<const MsgPipeVector> pieces, SceSize *size);
+    SceInt32 try_send(const GuestThreadPtr &thread, MemState &mem, SceUInt32 wait_mode, std::span<const MsgPipeVector> pieces, SceSize *size);
     SceInt32 cancel(SceUInt32 *num_send_wait_threads, SceUInt32 *num_receive_wait_threads);
     // Fills info with what the message pipe's info reports, or returns UNKNOWN_MSG_PIPE_ID if it was
     // deleted.

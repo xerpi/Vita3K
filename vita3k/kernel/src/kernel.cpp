@@ -23,7 +23,7 @@
 #include <kernel/state.h>
 #include <mem/functions.h>
 
-#include <kernel/thread/thread_state.h>
+#include <kernel/thread/guest_thread.h>
 
 #include <cpu/state.h>
 #include <mem/ptr.h>
@@ -54,7 +54,8 @@ void CorenumAllocator::set_max_core_count(const std::size_t max) {
 struct ThreadParams {
     KernelState *kernel = nullptr;
     // Passed in rather than looked up, since the guest may delete the thread before it starts
-    ThreadStatePtr thread;
+    GuestThreadPtr thread;
+    int core_num = 0;
     SDL_Semaphore *host_may_destroy_params = nullptr;
 };
 
@@ -62,27 +63,26 @@ static int SDLCALL thread_function(void *data) {
     assert(data != nullptr);
     ThreadParams params = *static_cast<const ThreadParams *>(data);
     SDL_SignalSemaphore(params.host_may_destroy_params);
-    ThreadStatePtr thread = std::move(params.thread);
+    GuestThreadPtr thread = std::move(params.thread);
 #ifdef TRACY_ENABLE
-    if (!thread->name.empty()) {
-        tracy::SetThreadName(thread->name.c_str());
+    if (!thread->state.name.empty()) {
+        tracy::SetThreadName(thread->state.name.c_str());
     } else {
-        std::string th_name = "TID:" + std::to_string(thread->id);
+        std::string th_name = "TID:" + std::to_string(thread->state.id);
         tracy::SetThreadName(th_name.c_str());
     }
 #endif
 
     thread->run_loop();
     const uint32_t r0 = thread->cpu->get_reg(0);
-    const SceUID id = thread->id;
-    const int processor_id = thread->cpu->processor_id;
-    // release our reference first so the erase below destroys the ThreadState before process_exit() is woken
+    const SceUID id = thread->state.id;
+    // release our reference first so the erase below destroys the GuestThread before process_exit() is woken
     thread.reset();
 
     {
         std::lock_guard<std::mutex> lock(params.kernel->mutex);
         params.kernel->threads.erase(id);
-        params.kernel->corenum_allocator.free_corenum(processor_id);
+        params.kernel->corenum_allocator.free_corenum(params.core_num);
         params.kernel->thread_deleted_cond.notify_all();
     }
 
@@ -134,15 +134,15 @@ uint64_t KernelState::process_time_at(uint64_t clock_time) const {
     return clock_time - (start_tick - base_tick.tick);
 }
 
-ThreadStatePtr KernelState::get_thread(SceUID thread_id) {
-    const ThreadStatePtr thread = lock_and_find(thread_id, threads, mutex);
+GuestThreadPtr KernelState::get_thread(SceUID thread_id) {
+    const GuestThreadPtr thread = lock_and_find(thread_id, threads, mutex);
     // A deleted thread stays in threads until its host thread ends, but guest calls can't find it
     if (thread && thread->get_status() == ThreadStatus::deleted)
         return nullptr;
     return thread;
 }
 
-SceUID KernelState::create_callback(const ThreadStatePtr &thread, const char *name, Ptr<SceKernelCallbackFunction> func, Ptr<void> common) {
+SceUID KernelState::create_callback(const GuestThreadPtr &thread, const char *name, Ptr<SceKernelCallbackFunction> func, Ptr<void> common) {
     const CallbackPtr cb = std::make_shared<Callback>(thread, name, func, common);
     const SceUID uid = objects.add(cb, get_next_uid());
     thread->add_callback(cb);
@@ -153,25 +153,21 @@ bool KernelState::delete_callback(SceUID id, SceUID deleter) {
     return objects.remove<Callback>(id, deleter);
 }
 
-ThreadStatePtr KernelState::create_thread(MemState &mem, const char *name, Ptr<const void> entry_point, int init_priority, SceInt32 affinity_mask, int stack_size, SceUInt32 attr) {
+GuestThreadPtr KernelState::create_thread(MemState &mem, const char *name, Ptr<const void> entry_point, int init_priority, SceInt32 affinity_mask, int stack_size, SceUInt32 attr) {
     const SceUID id = get_next_uid();
     int core_num = corenum_allocator.new_corenum();
     if (core_num < 0) {
         LOG_ERROR("Out of core number to allocate, use 0");
         core_num = 0;
     }
-    CPUStatePtr cpu = init_cpu(cpu_opt, id, static_cast<std::size_t>(core_num), mem);
+    CPUStatePtr cpu = init_cpu(mem, id, static_cast<std::size_t>(core_num), { .optimize = cpu_opt, .log_code = debugger.watch_code, .log_mem = debugger.watch_memory });
     if (!cpu)
         return nullptr;
-    // A guest function the kernel calls returns to the halt instruction, in Thumb mode
-    cpu->return_pc = halt_instruction.get() | 1;
-    cpu->set_log_code(debugger.watch_code);
-    cpu->set_log_mem(debugger.watch_memory);
-    ThreadStatePtr thread = std::make_shared<ThreadState>(id, *this, mem, std::move(cpu), name, entry_point.address(), init_priority, affinity_mask, stack_size, attr);
+    GuestThreadPtr thread = std::make_shared<GuestThread>(id, *this, mem, std::move(cpu), name, entry_point.address(), init_priority, affinity_mask, stack_size, attr);
 
     {
         const std::lock_guard<std::mutex> lock(mutex);
-        threads.emplace(thread->id, thread);
+        threads.emplace(thread->state.id, thread);
         // A new thread starts with the debugger's hold every thread has, and sees the pause too
         thread->set_suspended(threads_suspended);
         if (process_exiting)
@@ -181,9 +177,10 @@ ThreadStatePtr KernelState::create_thread(MemState &mem, const char *name, Ptr<c
     ThreadParams params;
     params.kernel = this;
     params.thread = thread;
+    params.core_num = core_num;
 
     params.host_may_destroy_params = SDL_CreateSemaphore(0);
-    SDL_DetachThread(SDL_CreateThread(&thread_function, thread->name.c_str(), &params));
+    SDL_DetachThread(SDL_CreateThread(&thread_function, thread->state.name.c_str(), &params));
     SDL_WaitSemaphore(params.host_may_destroy_params);
     SDL_DestroySemaphore(params.host_may_destroy_params);
 
@@ -194,8 +191,8 @@ Ptr<Ptr<void>> KernelState::get_thread_tls_addr(MemState &mem, SceUID thread_id,
     Ptr<Ptr<void>> address(0);
     // magic numbers taken from decompiled source. There is 0x400 unused bytes of unknown usage
     if (key <= 0x100 && key >= 0) {
-        const ThreadStatePtr thread = get_thread(thread_id);
-        address = thread->tls.get_ptr<Ptr<void>>() + key;
+        const GuestThreadPtr thread = get_thread(thread_id);
+        address = thread->state.tls.get_ptr<Ptr<void>>() + key;
     } else {
         LOG_ERROR("Wrong tls slot index. TID:{} index:{}", thread_id, key);
     }

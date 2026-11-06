@@ -62,7 +62,7 @@ struct AudioInPort {
     int len_bytes = 0;
 };
 
-struct ThreadState;
+struct GuestThread;
 struct AudioState;
 
 // abstract class that need to be overloaded with an audio implementation

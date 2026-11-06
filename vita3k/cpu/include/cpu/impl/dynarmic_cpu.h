@@ -33,14 +33,14 @@ class DynarmicCPU : public CPUState {
     std::unique_ptr<ArmDynarmicCallback> cb;
     std::shared_ptr<ArmDynarmicCP15> cp15;
 
-    bool log_mem = false;
-    bool log_code = false;
-    bool cpu_opt;
+    const CPUOptions options;
+    // The exclusive monitor slot
+    const std::size_t processor_id;
 
     std::unique_ptr<Dynarmic::A32::Jit> make_jit();
 
 public:
-    DynarmicCPU(MemState &mem, SceUID thread_id, std::size_t processor_id, bool cpu_opt);
+    DynarmicCPU(MemState &mem, SceUID thread_id, std::size_t processor_id, CPUOptions options);
     ~DynarmicCPU() override;
     GuestExit run(RunMode mode) override;
     void request_stop() override;
@@ -67,7 +67,5 @@ public:
     CPUContext save_context() override;
     void load_context(const CPUContext &ctx) override;
 
-    void set_log_code(bool log) override;
-    void set_log_mem(bool log) override;
     void invalidate_jit_cache(Address start, size_t length) override;
 };

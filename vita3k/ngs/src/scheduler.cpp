@@ -19,7 +19,7 @@
 #include <ngs/system.h>
 
 #include <kernel/state.h>
-#include <kernel/thread/thread_state.h>
+#include <kernel/thread/guest_thread.h>
 
 #include <algorithm>
 #include <cstring>
@@ -193,12 +193,12 @@ void VoiceScheduler::update(KernelState &kern, const MemState &mem, const SceUID
     condvar.notify_all();
 }
 
-void VoiceScheduler::wait_update_end(ThreadState &thread, std::unique_lock<std::recursive_mutex> &lock) {
+void VoiceScheduler::wait_update_end(GuestThread &thread, std::unique_lock<std::recursive_mutex> &lock) {
     while (is_updating) {
         // The thread holds no scheduler lock while it counts as stopped
         lock.unlock();
         {
-            const ThreadState::HostWait waiting(thread, std::nullopt);
+            const GuestThread::HostWait waiting(thread, std::nullopt);
             std::unique_lock<std::recursive_mutex> wait_lock(mutex);
             condvar.wait(wait_lock, [&] { return !is_updating; });
         }

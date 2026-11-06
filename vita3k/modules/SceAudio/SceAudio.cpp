@@ -19,7 +19,7 @@
 
 #include <audio/state.h>
 #include <kernel/state.h>
-#include <kernel/thread/thread_state.h>
+#include <kernel/thread/guest_thread.h>
 #include <util/lock_and_find.h>
 #include <util/tracy.h>
 
@@ -201,10 +201,10 @@ EXPORT(int, sceAudioOutOutput, int port, const void *buf) {
     if (!buf)
         return 0;
 
-    const ThreadStatePtr thread = emuenv.kernel.get_thread(thread_id);
+    const GuestThreadPtr thread = emuenv.kernel.get_thread(thread_id);
     if (!thread)
         return RET_ERROR(SCE_AUDIO_OUT_ERROR_INVALID_PORT);
-    const ThreadState::HostWait waiting(*thread);
+    const GuestThread::HostWait waiting(*thread);
     emuenv.audio.audio_output(*prt, buf);
     return prt->len;
 }

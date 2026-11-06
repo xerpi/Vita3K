@@ -21,18 +21,15 @@
 #include <mem/ptr.h>
 #include <util/types.h>
 
-#include <algorithm>
-#include <bit>
 #include <memory>
 #include <string>
 
-CPUState::CPUState(MemState &mem, SceUID thread_id, std::size_t processor_id)
+CPUState::CPUState(MemState &mem, SceUID thread_id)
     : thread_id(thread_id)
-    , mem(mem)
-    , processor_id(processor_id) {}
+    , mem(mem) {}
 
-CPUStatePtr init_cpu(bool cpu_opt, SceUID thread_id, std::size_t processor_id, MemState &mem) {
-    CPUStatePtr cpu = std::make_unique<DynarmicCPU>(mem, thread_id, processor_id, cpu_opt);
+CPUStatePtr init_cpu(MemState &mem, SceUID thread_id, std::size_t processor_id, CPUOptions options) {
+    CPUStatePtr cpu = std::make_unique<DynarmicCPU>(mem, thread_id, processor_id, options);
     if (!init(cpu->disasm))
         return nullptr;
     return cpu;
@@ -49,43 +46,16 @@ void CPUState::set_pc(uint32_t val) {
     set_reg(15, val);
 }
 
+void CPUState::note_abort(Address addr) {
+    abort_fault_addr.store(addr);
+    abort_pending.store(true);
+    request_stop();
+}
+
 std::optional<Address> CPUState::take_abort() {
     if (!abort_pending.exchange(false))
         return std::nullopt;
     return abort_fault_addr.load();
-}
-
-void CPUState::place_call(Address fn, std::initializer_list<uint32_t> args) {
-    set_pc(fn);
-    set_lr(return_pc);
-    Address sp = get_sp();
-    for (size_t i = 0; i < std::min<size_t>(args.size(), 4); i++)
-        set_reg(i, args.begin()[i]);
-    if (args.size() > 4) {
-        // TODO align to 16 bytes
-        sp -= 4 * (args.size() - 4);
-        std::ranges::copy(args.begin() + 4, args.end(), Ptr<uint32_t>(sp).get(mem));
-    }
-    set_sp(sp);
-}
-
-void CPUState::write_call_result(const CallResult &result) {
-    if (result.in_s0) {
-        set_float_reg(0, std::bit_cast<float>(result.regs[0]));
-        return;
-    }
-    for (uint8_t i = 0; i < result.count; i++)
-        set_reg(i, result.regs[i]);
-}
-
-uint32_t CPUState::stack_alloc(size_t size) {
-    const uint32_t new_sp = get_sp() - size;
-    set_sp(new_sp);
-    return new_sp;
-}
-
-void CPUState::stack_free(size_t size) {
-    set_sp(get_sp() + size);
 }
 
 std::string CPUState::disassemble(uint64_t at, bool thumb, uint16_t *insn_size) {
@@ -96,14 +66,4 @@ std::string CPUState::disassemble(uint64_t at, bool thumb, uint16_t *insn_size) 
 
 std::string CPUState::disassemble(uint64_t at, uint16_t *insn_size) {
     return disassemble(at, is_thumb_mode(), insn_size);
-}
-
-static thread_local CPUState *current_cpu_state = nullptr;
-
-void set_current_cpu_state(CPUState *state) {
-    current_cpu_state = state;
-}
-
-CPUState *get_current_cpu_state() {
-    return current_cpu_state;
 }

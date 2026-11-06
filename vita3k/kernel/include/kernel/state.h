@@ -41,7 +41,7 @@
 #include <optional>
 #include <vector>
 
-struct ThreadState;
+struct GuestThread;
 struct MemState;
 
 struct CodecEngineBlock;
@@ -53,10 +53,10 @@ struct KernelModule {
 };
 using SceKernelModulePtr = std::shared_ptr<KernelModule>;
 
-using ThreadStatePtr = std::shared_ptr<ThreadState>;
+using GuestThreadPtr = std::shared_ptr<GuestThread>;
 using CodecEngineBlocks = std::map<SceUID, CodecEngineBlock>;
 using SlotToAddress = std::map<SceUID, Ptr<Ptr<void>>>;
-using ThreadStatePtrs = std::map<SceUID, ThreadStatePtr>;
+using GuestThreadPtrs = std::map<SceUID, GuestThreadPtr>;
 using SceKernelModuleInfoPtrs = std::map<SceUID, SceKernelModulePtr>;
 using ExportNids = unordered_map_fast<uint32_t, Address>;
 // A NID hashes the function name alone, so same-named exports from different libraries collide.
@@ -122,7 +122,7 @@ struct KernelState {
     // Thread manager objects other than threads, by UID
     KernelObjects objects;
 
-    ThreadStatePtrs threads;
+    GuestThreadPtrs threads;
     void *jni_env;
     void *jni_activity;
 
@@ -173,12 +173,12 @@ struct KernelState {
     void load_process_param(MemState &mem, Ptr<uint32_t> ptr);
     // Creates a dormant thread with these creation arguments, attr without
     // SCE_KERNEL_THREAD_ATTR_USER, or returns null
-    ThreadStatePtr create_thread(MemState &mem, const char *name, Ptr<const void> entry_point, int init_priority, SceInt32 affinity_mask, int stack_size, SceUInt32 attr);
+    GuestThreadPtr create_thread(MemState &mem, const char *name, Ptr<const void> entry_point, int init_priority, SceInt32 affinity_mask, int stack_size, SceUInt32 attr);
 
-    ThreadStatePtr get_thread(SceUID thread_id);
+    GuestThreadPtr get_thread(SceUID thread_id);
 
     // Creates a callback owned by thread and returns its UID.
-    SceUID create_callback(const ThreadStatePtr &thread, const char *name, Ptr<SceKernelCallbackFunction> func, Ptr<void> common);
+    SceUID create_callback(const GuestThreadPtr &thread, const char *name, Ptr<SceKernelCallbackFunction> func, Ptr<void> common);
     // Deletes the callback with this UID for the thread deleter, so it never runs again. Returns false
     // if there is none.
     bool delete_callback(SceUID id, SceUID deleter);

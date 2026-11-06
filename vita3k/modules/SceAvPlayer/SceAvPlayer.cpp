@@ -226,7 +226,7 @@ static Ptr<uint8_t> get_buffer(const PlayerPtr &player, MediaType media_type,
     return buffer;
 }
 
-static void run_event_callback(EmuEnvState &emuenv, const ThreadStatePtr &thread, const PlayerPtr &player_info, uint32_t event_id, uint32_t source_id, Ptr<void> event_data) {
+static void run_event_callback(EmuEnvState &emuenv, const GuestThreadPtr &thread, const PlayerPtr &player_info, uint32_t event_id, uint32_t source_id, Ptr<void> event_data) {
     if (player_info->event_manager.event_callback) {
         thread->call_guest(player_info->event_manager.event_callback.address(), { player_info->event_manager.user_data, event_id, source_id, event_data.address() });
     }

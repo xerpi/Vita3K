@@ -322,8 +322,8 @@ void Voice::invoke_callback(KernelState &kernel, const MemState &mem, const SceU
         return;
     }
 
-    const ThreadStatePtr thread = kernel.get_thread(thread_id);
-    const Address callback_info_addr = thread->cpu->stack_alloc(sizeof(SceNgsCallbackInfo));
+    const GuestThreadPtr thread = kernel.get_thread(thread_id);
+    const Address callback_info_addr = thread->stack_alloc(sizeof(SceNgsCallbackInfo));
 
     SceNgsCallbackInfo *info = Ptr<SceNgsCallbackInfo>(callback_info_addr).get(mem);
     info->rack_handle = Ptr<void>(rack, mem);
@@ -335,7 +335,7 @@ void Voice::invoke_callback(KernelState &kernel, const MemState &mem, const SceU
     info->userdata = user_data;
 
     thread->call_guest(callback.address(), { callback_info_addr });
-    thread->cpu->stack_free(sizeof(SceNgsCallbackInfo));
+    thread->stack_free(sizeof(SceNgsCallbackInfo));
 }
 
 uint32_t System::get_required_memspace_size(SceNgsSystemInitParams *parameters) {

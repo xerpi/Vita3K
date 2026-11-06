@@ -16,7 +16,7 @@
 // 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
 #include <cpu/state.h>
-#include <kernel/thread/thread_state.h>
+#include <kernel/thread/guest_thread.h>
 
 #include <kernel/state.h>
 #include <kernel/sync_primitives.h>
@@ -26,6 +26,7 @@
 #include <util/log.h>
 
 #include <algorithm>
+#include <bit>
 #include <cassert>
 #include <cstring>
 #include <memory>
@@ -50,23 +51,21 @@ static CPUContext initial_context(Address stack_top) {
     return ctx;
 }
 
-ThreadState::ThreadState(SceUID id, KernelState &kernel, MemState &mem, CPUStatePtr cpu, const char *name, Address entry_point, int init_priority, SceInt32 affinity_mask, int stack_size, SceUInt32 attr)
+ThreadState::ThreadState(SceUID id, MemState &mem, const char *name, Address entry_point, int init_priority, SceInt32 affinity_mask, int stack_size, SceUInt32 attr, SceSize user_tls_size)
     : id(id)
     , name(name)
     , entry_point(entry_point)
     , attr(attr | SCE_KERNEL_THREAD_ATTR_USER)
     , stack_size(align(stack_size, KiB(4)))
     , stack(alloc_block(mem, this->stack_size, fmt::format("Stack for thread {} (#{})", name, id).c_str()))
-    , tls(alloc_block(mem, SCE_KERNEL_TLS_SIZE + kernel.tls_msize, fmt::format("TLS for thread {} (#{})", name, id).c_str()))
-    , cpu(std::move(cpu))
+    , tls(alloc_block(mem, SCE_KERNEL_TLS_SIZE + user_tls_size, fmt::format("TLS for thread {} (#{})", name, id).c_str()))
     , init_priority(created_priority(init_priority))
     , init_affinity_mask(affinity_mask)
-    , kernel(kernel)
     , mem(mem)
     , priority(this->init_priority)
     , affinity_mask(affinity_mask) {
     memset(stack.get_ptr<void>().get(mem), 0xcc, this->stack_size);
-    memset(tls.get_ptr<void>().get(mem), 0, SCE_KERNEL_TLS_SIZE + kernel.tls_msize);
+    memset(tls.get_ptr<void>().get(mem), 0, SCE_KERNEL_TLS_SIZE + user_tls_size);
 
     tls_slot(TLS_THREAD_ID) = id;
     tls_slot(TLS_SP_TOP) = stack.get() + this->stack_size;
@@ -77,8 +76,13 @@ ThreadState::ThreadState(SceUID id, KernelState &kernel, MemState &mem, CPUState
     tls_slot(TLS_STACK_CHECK_GUARD) = static_cast<int>(0xC325C2A7);
     tls_slot(TLS_CURRENT_PRIORITY) = priority;
     tls_slot(TLS_CPU_AFFINITY_MASK) = affinity_mask;
+}
 
-    const Ptr<uint8_t> user_tls_ptr = tls.get_ptr<uint8_t>() + SCE_KERNEL_TLS_SIZE;
+GuestThread::GuestThread(SceUID id, KernelState &kernel, MemState &mem, CPUStatePtr cpu, const char *name, Address entry_point, int init_priority, SceInt32 affinity_mask, int stack_size, SceUInt32 attr)
+    : state(id, mem, name, entry_point, init_priority, affinity_mask, stack_size, attr, kernel.tls_msize)
+    , cpu(std::move(cpu))
+    , kernel(kernel) {
+    const Ptr<uint8_t> user_tls_ptr = state.tls.get_ptr<uint8_t>() + SCE_KERNEL_TLS_SIZE;
     this->cpu->set_tpidruro(user_tls_ptr.address());
     if (kernel.tls_address) {
         assert(kernel.tls_psize <= kernel.tls_msize);
@@ -86,111 +90,115 @@ ThreadState::ThreadState(SceUID id, KernelState &kernel, MemState &mem, CPUState
     }
 }
 
-int ThreadState::start(SceSize arglen, const Ptr<void> argp, bool run_entry_callback) {
+int GuestThread::start(SceSize arglen, const Ptr<void> argp, bool run_entry_callback) {
     const std::lock_guard<std::mutex> thread_lock(mutex);
-    if (status != ThreadStatus::dormant)
+    if (state.status != ThreadStatus::dormant)
         return SCE_KERNEL_ERROR_NOT_DORMANT;
-    run_start_callback = run_entry_callback;
-    returned_value = SCE_KERNEL_ERROR_NOT_DORMANT;
+    state.run_start_callback = run_entry_callback;
+    state.returned_value = SCE_KERNEL_ERROR_NOT_DORMANT;
     // Each run starts at the priority and on the cores the thread was created with, and its TLS
     // shows them
-    priority = init_priority;
-    affinity_mask = init_affinity_mask;
-    tls_slot(TLS_CURRENT_PRIORITY) = priority;
-    tls_slot(TLS_CPU_AFFINITY_MASK) = affinity_mask;
-    cpu->load_context(initial_context(stack.get() + stack_size));
+    state.priority = state.init_priority;
+    state.affinity_mask = state.init_affinity_mask;
+    state.tls_slot(TLS_CURRENT_PRIORITY) = state.priority;
+    state.tls_slot(TLS_CPU_AFFINITY_MASK) = state.affinity_mask;
+    cpu->load_context(initial_context(state.stack.get() + state.stack_size));
     // A thread starts with TPIDRURW at 0, also when it starts again
     cpu->set_tpidrurw(0);
     // The entry gets the size of the argument data and its copy on the stack, or null for none
     Address data_addr = 0;
     if (argp && arglen > 0) {
-        data_addr = cpu->stack_alloc(align(arglen, 8));
-        memcpy(Ptr<uint8_t>(data_addr).get(mem), argp.get(mem), arglen);
+        data_addr = stack_alloc(align(arglen, 8));
+        memcpy(Ptr<uint8_t>(data_addr).get(state.mem), argp.get(state.mem), arglen);
     }
-    cpu->place_call(entry_point, { arglen, data_addr });
+    place_call(state.entry_point, { arglen, data_addr });
 
-    update_status(ThreadStatus::running);
+    state.status = ThreadStatus::running;
+    cv.notify_all();
     return SCE_KERNEL_OK;
 }
 
-void ThreadState::exit(SceInt32 status) {
+void GuestThread::exit(SceInt32 status) {
     const std::lock_guard<std::mutex> lock(mutex);
     request_ending(Ending::exit);
-    returned_value = static_cast<uint32_t>(status);
+    state.returned_value = static_cast<uint32_t>(status);
 }
 
-void ThreadState::exit_delete(SceInt32 status) {
+void GuestThread::exit_delete(SceInt32 status) {
     const std::lock_guard<std::mutex> lock(mutex);
     request_ending(Ending::exit_delete);
-    returned_value = static_cast<uint32_t>(status);
+    state.returned_value = static_cast<uint32_t>(status);
 }
 
-void ThreadState::remove() {
+void GuestThread::remove() {
     const std::lock_guard<std::mutex> lock(mutex);
     request_ending(Ending::remove);
     // A dormant thread is gone at once
-    if (status == ThreadStatus::dormant)
-        update_status(ThreadStatus::deleted);
-    else if (status == ThreadStatus::running)
+    if (state.status == ThreadStatus::dormant)
+        end_as(ThreadStatus::deleted);
+    else if (state.status == ThreadStatus::running)
         cpu->request_stop();
 
     // Wake the thread if it is parked dormant, held before its guest code or blocked in a wait
     cv.notify_all();
 }
 
-SceInt32 ThreadState::remove_dormant() {
+SceInt32 GuestThread::remove_dormant() {
     const std::lock_guard<std::mutex> lock(mutex);
-    if (status != ThreadStatus::dormant)
+    if (state.status != ThreadStatus::dormant)
         return SCE_KERNEL_ERROR_NOT_DORMANT;
     // A dormant thread is gone at once, and the status change wakes its parked host thread to end
     request_ending(Ending::remove);
-    update_status(ThreadStatus::deleted);
+    end_as(ThreadStatus::deleted);
     return SCE_KERNEL_OK;
 }
 
 namespace {
-// Sets the current CPU state of the host thread for signal handlers, and puts the previous one
-// back at the end of the scope
-struct CurrentCpuState {
-    CPUState *const previous = get_current_cpu_state();
-    explicit CurrentCpuState(CPUState &state) { set_current_cpu_state(&state); }
-    ~CurrentCpuState() { set_current_cpu_state(previous); }
+thread_local GuestThread *running_thread = nullptr;
+
+// Makes thread the current guest thread of the host thread until the end of the scope
+struct CurrentThread {
+    explicit CurrentThread(GuestThread &thread) { running_thread = &thread; }
+    ~CurrentThread() { running_thread = nullptr; }
 };
 } // namespace
 
-void ThreadState::run_loop() {
-    // Signal handlers find the thread's CPU for the whole host thread, also while the thread ends
-    // outside run_guest
-    const CurrentCpuState current_cpu(*cpu);
+GuestThread *current_thread() {
+    return running_thread;
+}
+
+void GuestThread::run_loop() {
+    // For all of run_loop, also while the thread ends in finish_run
+    const CurrentThread current(*this);
 
     std::unique_lock<std::mutex> lock(mutex);
     do {
         // A thread that returns from its entry ends like one that exits, end handler included
         if (const std::optional<uint32_t> returned = run_guest(lock, false)) {
-            returned_value = *returned;
+            state.returned_value = *returned;
             request_ending(Ending::exit);
         }
     } while (finish_run(lock));
 }
 
-bool ThreadState::finish_run(std::unique_lock<std::mutex> &lock) {
+bool GuestThread::finish_run(std::unique_lock<std::mutex> &lock) {
     // The thread is ending. One that ran ends here: an exit leaves it dormant, while a delete
     // makes it gone for guest calls before its end waiters wake.
-    if (status != ThreadStatus::dormant && status != ThreadStatus::deleted) {
-        if (ending != Ending::remove && kernel.thread_event_end) {
+    if (state.status != ThreadStatus::dormant && state.status != ThreadStatus::deleted) {
+        if (state.ending != Ending::remove && kernel.thread_event_end) {
             // The thread is RUNNING here, since wait() puts it back to RUNNING. The handler runs
             // guest code on it, which a pending ending would end at once, and an exit in the
             // handler must not change the exit status.
-            const uint32_t old_returned_value = returned_value;
-            const Ending old_ending = ending;
+            const uint32_t old_returned_value = state.returned_value;
+            const Ending old_ending = state.ending;
             set_ending(Ending::none);
             lock.unlock();
             // A thread event handler starts with the VFP state of a new thread, like a callback
-            const int ret = call_guest(kernel.thread_event_end.address(), { SCE_KERNEL_THREAD_EVENT_TYPE_END, static_cast<uint32_t>(id), 0, kernel.thread_event_end_arg }, true);
+            const int ret = call_guest(kernel.thread_event_end.address(), { SCE_KERNEL_THREAD_EVENT_TYPE_END, static_cast<uint32_t>(state.id), 0, kernel.thread_event_end_arg }, true);
             if (ret != 0)
                 LOG_WARN("Thread end event handler returned {}", log_hex(ret));
             lock.lock();
-            returned_value = old_returned_value;
+            state.returned_value = old_returned_value;
             // Keep a stronger request made while the handler ran, like a teardown's remove
             request_ending(old_ending);
         }
@@ -198,43 +206,39 @@ bool ThreadState::finish_run(std::unique_lock<std::mutex> &lock) {
         lock.unlock();
         // A mutex or a write lock the thread still holds goes to its next waiter, and the
         // event flags it holds are free again
-        kernel.objects.for_each<HeavyMutex>([&](Mutex &mutex) { mutex.release_ended_owner(*this); });
-        kernel.objects.for_each<RWLock>([&](RWLock &rwlock) { rwlock.release_ended_writer(*this); });
-        kernel.objects.for_each<EventFlag>([&](EventFlag &flag) { flag.release_ended_holder(*this); });
+        kernel.objects.for_each<HeavyMutex>([&](Mutex &mutex) { mutex.release_ended_owner(state); });
+        kernel.objects.for_each<RWLock>([&](RWLock &rwlock) { rwlock.release_ended_writer(state); });
+        kernel.objects.for_each<EventFlag>([&](EventFlag &flag) { flag.release_ended_holder(state); });
         // The callbacks the thread created end with it, with their pending notifications
-        for (const auto &weak_cb : callbacks) {
+        for (const auto &weak_cb : state.callbacks) {
             if (const CallbackPtr cb = weak_cb.lock())
-                kernel.delete_callback(cb->uid, id);
+                kernel.delete_callback(cb->uid, state.id);
         }
-        callbacks.clear();
+        state.callbacks.clear();
         lock.lock();
-        update_status(ending == Ending::exit ? ThreadStatus::dormant : ThreadStatus::deleted);
+        end_as(state.ending == Ending::exit ? ThreadStatus::dormant : ThreadStatus::deleted);
     }
-    if (ending != Ending::exit)
+    if (state.ending != Ending::exit)
         return false;
     // The thread is dormant now, and the next run_guest parks it until a start or a delete
     set_ending(Ending::none);
     return true;
 }
 
-std::optional<uint32_t> ThreadState::run_guest(std::unique_lock<std::mutex> &lock, bool from_kernel_call) {
-    // Guest code runs with this CPU as the current CPU state, and a nested call puts the outer one
-    // back when it returns
-    const CurrentCpuState current_cpu(*cpu);
+std::optional<uint32_t> GuestThread::run_guest(std::unique_lock<std::mutex> &lock, bool from_kernel_call) {
     // Whether this level's guest code last stopped right after a kernel call, which a ForVM hold
     // before its next guest code reports. Each level has its own, a nested call doesn't change it.
     bool after_kernel_call = from_kernel_call;
     while (true) {
-        // Park until the thread runs: dormant between starts, or busy elsewhere for a call that
-        // another host thread makes
-        cv.wait(lock, [&] { return status == ThreadStatus::running || exiting(); });
-        if (exiting())
+        // Park while the thread is dormant between starts
+        cv.wait(lock, [&] { return state.status == ThreadStatus::running || state.exiting(); });
+        if (state.exiting())
             return std::nullopt;
 
         // The thread start event runs once per start, with the VFP state of a new thread
-        if (std::exchange(run_start_callback, false) && kernel.thread_event_start) {
+        if (std::exchange(state.run_start_callback, false) && kernel.thread_event_start) {
             lock.unlock();
-            const int ret = call_guest(kernel.thread_event_start.address(), { SCE_KERNEL_THREAD_EVENT_TYPE_START, static_cast<uint32_t>(id), 0, kernel.thread_event_start_arg }, true);
+            const int ret = call_guest(kernel.thread_event_start.address(), { SCE_KERNEL_THREAD_EVENT_TYPE_START, static_cast<uint32_t>(state.id), 0, kernel.thread_event_start_arg }, true);
             if (ret != 0)
                 LOG_WARN("Thread start event handler returned {}", log_hex(ret));
             lock.lock();
@@ -243,7 +247,7 @@ std::optional<uint32_t> ThreadState::run_guest(std::unique_lock<std::mutex> &loc
         // After the start event, which runs as a nested call, so this level's own value is published
         stopped_after_kernel_call = after_kernel_call;
         stop_for_holds(lock);
-        if (exiting())
+        if (state.exiting())
             return std::nullopt;
         const bool step = step_requested;
 
@@ -264,7 +268,7 @@ std::optional<uint32_t> ThreadState::run_guest(std::unique_lock<std::mutex> &loc
         // the abort handler, then the debugger's hold
         switch (exit.kind) {
         case GuestExit::Kind::import:
-            cpu->write_call_result(kernel.call_import(*cpu, exit.value, id));
+            write_call_result(kernel.call_import(*cpu, exit.value, state.id));
             cpu->clear_exclusive();
             after_kernel_call = true;
             break;
@@ -286,9 +290,9 @@ std::optional<uint32_t> ThreadState::run_guest(std::unique_lock<std::mutex> &loc
     }
 }
 
-uint32_t ThreadState::call_guest(Address fn, std::initializer_list<uint32_t> args, bool fresh_vfp_state) {
+uint32_t GuestThread::call_guest(Address fn, std::initializer_list<uint32_t> args, bool fresh_vfp_state) {
     // Only the thread's own host thread runs its guest code
-    assert(get_current_cpu_state() == cpu.get());
+    assert(current_thread() == this);
     std::unique_lock<std::mutex> thread_lock(mutex);
 
     // Save the thread's context before the call overwrites PC and LR
@@ -296,14 +300,14 @@ uint32_t ThreadState::call_guest(Address fn, std::initializer_list<uint32_t> arg
     const uint32_t previous_tpidruro = cpu->get_tpidruro();
     // A callback sees the thread's TPIDRURW, and the thread gets its own value back after it
     const uint32_t previous_tpidrurw = cpu->get_tpidrurw();
-    int &vfp_exception = tls_slot(TLS_VFP_EXCEPTION);
+    int &vfp_exception = state.tls_slot(TLS_VFP_EXCEPTION);
     const int previous_vfp_exception = vfp_exception;
     if (fresh_vfp_state) {
         cpu->set_fpscr(SCE_KERNEL_THREAD_INITIAL_FPSCR);
         vfp_exception = 0;
     }
 
-    cpu->place_call(fn, args);
+    place_call(fn, args);
 
     // A callback runs inside a kernel call, so a hold before its first instruction finds the
     // thread there
@@ -316,11 +320,45 @@ uint32_t ThreadState::call_guest(Address fn, std::initializer_list<uint32_t> arg
     if (fresh_vfp_state)
         vfp_exception = previous_vfp_exception;
 
-    // A callback the thread's end cut short returns the exit status
-    return returned.value_or(returned_value);
+    // A call cut short by the thread's end returns the exit status
+    return returned.value_or(state.returned_value);
 }
 
-void ThreadState::dispatch_abort(Address fault_addr) {
+void GuestThread::place_call(Address fn, std::initializer_list<uint32_t> args) {
+    cpu->set_pc(fn);
+    // The call returns to the halt instruction, in Thumb mode
+    cpu->set_lr(kernel.halt_instruction.get() | 1);
+    Address sp = cpu->get_sp();
+    for (size_t i = 0; i < std::min<size_t>(args.size(), 4); i++)
+        cpu->set_reg(i, args.begin()[i]);
+    if (args.size() > 4) {
+        // TODO align to 16 bytes
+        sp -= 4 * (args.size() - 4);
+        std::ranges::copy(args.begin() + 4, args.end(), Ptr<uint32_t>(sp).get(state.mem));
+    }
+    cpu->set_sp(sp);
+}
+
+void GuestThread::write_call_result(const CallResult &result) {
+    if (result.in_s0) {
+        cpu->set_float_reg(0, std::bit_cast<float>(result.regs[0]));
+        return;
+    }
+    for (uint8_t i = 0; i < result.count; i++)
+        cpu->set_reg(i, result.regs[i]);
+}
+
+uint32_t GuestThread::stack_alloc(size_t size) {
+    const uint32_t new_sp = cpu->get_sp() - size;
+    cpu->set_sp(new_sp);
+    return new_sp;
+}
+
+void GuestThread::stack_free(size_t size) {
+    cpu->set_sp(cpu->get_sp() + size);
+}
+
+void GuestThread::dispatch_abort(Address fault_addr) {
     CPUState &cpu = *this->cpu;
     // DABT = type 0
     const Address handler = kernel.exception_handlers[0].load();
@@ -348,36 +386,32 @@ void ThreadState::dispatch_abort(Address fault_addr) {
     call_guest(handler, { sp_aligned });
 }
 
-uint32_t ThreadState::start_and_wait(SceSize args, const Ptr<void> argp) {
+uint32_t GuestThread::start_and_wait(SceSize args, const Ptr<void> argp) {
     start(args, argp);
     // A guest thread that waits here, in a module start or stop, counts as stopped until the module
-    // thread ends. The boot and host threads have no CPU of their own.
-    const CPUState *const current = get_current_cpu_state();
-    const ThreadStatePtr caller = current ? kernel.get_thread(current->thread_id) : nullptr;
+    // thread ends. The boot and host threads run no guest thread.
+    GuestThread *const caller = current_thread();
     std::optional<HostWait> waiting;
     if (caller)
         waiting.emplace(*caller, std::nullopt);
-    // Released before the host wait ends, so the end never holds this thread's mutex
+    // Declared after waiting, so it unlocks before ~HostWait takes the caller's mutex
     std::unique_lock<std::mutex> lock(mutex);
-    cv.wait(lock, [&] { return status == ThreadStatus::dormant || status == ThreadStatus::deleted; });
-    return returned_value;
+    cv.wait(lock, [&] { return state.status == ThreadStatus::dormant || state.status == ThreadStatus::deleted; });
+    return state.returned_value;
 }
 
-void ThreadState::update_status(ThreadStatus status) {
-    this->status = status;
+void GuestThread::end_as(ThreadStatus status) {
+    state.status = status;
     cv.notify_all();
-
-    if (status == ThreadStatus::dormant || status == ThreadStatus::deleted) {
-        const std::lock_guard<std::mutex> end_lock(end_waiters_mutex);
-        end_waiters.wake_if([&](auto &waiter) {
-            if (waiter.entry.exit_status)
-                *waiter.entry.exit_status = static_cast<SceInt32>(returned_value);
-            return true;
-        });
-    }
+    const std::lock_guard<std::mutex> end_lock(end_waiters_mutex);
+    state.end_waiters.wake_if([&](auto &waiter) {
+        if (waiter.entry.exit_status)
+            *waiter.entry.exit_status = static_cast<SceInt32>(state.returned_value);
+        return true;
+    });
 }
 
-WaitResult ThreadState::delay_until(Deadline deadline, bool callbacks) {
+WaitResult GuestThread::delay_until(Deadline deadline, bool callbacks) {
     while (true) {
         WaitResult r = wait({ .type = SCE_KERNEL_WAITTYPE_DELAY, .callbacks = callbacks }, deadline);
         if (r && *r == SCE_KERNEL_ERROR_NOTIFY_CALLBACK)
@@ -390,10 +424,10 @@ WaitResult ThreadState::delay_until(Deadline deadline, bool callbacks) {
     }
 }
 
-WaitResult ThreadState::wait_for_signal(SceUInt32 *timeout, bool callbacks) {
+WaitResult GuestThread::wait_for_signal(SceUInt32 *timeout, bool callbacks) {
     const auto take_signal = [this] {
         const std::lock_guard<std::mutex> lock(mutex);
-        return std::exchange(signal_pending, false);
+        return std::exchange(state.signal_pending, false);
     };
     // A signal sent before ends the wait at once, with the timeout untouched
     if (take_signal())
@@ -411,40 +445,40 @@ WaitResult ThreadState::wait_for_signal(SceUInt32 *timeout, bool callbacks) {
     return r;
 }
 
-SceInt32 ThreadState::send_signal() {
+SceInt32 GuestThread::send_signal() {
     {
         const std::lock_guard<std::mutex> lock(mutex);
-        if (signal_pending)
+        if (state.signal_pending)
             return SCE_KERNEL_ERROR_ALREADY_SENT;
-        signal_pending = true;
+        state.signal_pending = true;
     }
     wake();
     return SCE_KERNEL_OK;
 }
 
-ThreadStatus ThreadState::get_status() const {
+ThreadStatus GuestThread::get_status() const {
     const std::lock_guard<std::mutex> lock(mutex);
     return shown_status();
 }
 
-ThreadStatus ThreadState::shown_status() const {
+ThreadStatus GuestThread::shown_status() const {
     // A ForVM suspend shows once the thread has stopped for it, and the host's holds never show
-    if (status == ThreadStatus::running && vm_suspend_count > 0 && parked)
+    if (state.status == ThreadStatus::running && state.vm_suspend_count > 0 && parked)
         return ThreadStatus::suspended;
-    return status;
+    return state.status;
 }
 
-void ThreadState::set_ending(Ending how) {
-    ending = how;
+void GuestThread::set_ending(Ending how) {
+    state.ending = how;
     if (how != Ending::none)
         step_requested = false;
 }
 
-bool ThreadState::held() const {
-    return !exiting() && (debugger_hold || vm_suspend_count > 0 || kernel.is_threads_paused());
+bool GuestThread::held() const {
+    return !state.exiting() && (debugger_hold || state.vm_suspend_count > 0 || kernel.is_threads_paused());
 }
 
-void ThreadState::stop_for_holds(std::unique_lock<std::mutex> &lock) {
+void GuestThread::stop_for_holds(std::unique_lock<std::mutex> &lock) {
     if (!held())
         return;
     parked = true;
@@ -454,60 +488,61 @@ void ThreadState::stop_for_holds(std::unique_lock<std::mutex> &lock) {
     parked = false;
 }
 
-int ThreadState::stack_free_size() const {
+int GuestThread::stack_free_size() const {
     const std::lock_guard<std::mutex> lock(mutex);
     // A dormant thread's whole stack is free, a started one's is free below its stack pointer
-    if (status == ThreadStatus::dormant)
-        return stack_size;
-    return static_cast<int>(cpu->get_sp() - stack.get());
+    if (state.status == ThreadStatus::dormant)
+        return state.stack_size;
+    return static_cast<int>(cpu->get_sp() - state.stack.get());
 }
 
-ThreadState::HostWait::HostWait(ThreadState &thread, std::optional<WaitTarget> shown)
+GuestThread::HostWait::HostWait(GuestThread &thread, std::optional<WaitTarget> shown)
     : thread(thread) {
     // Only the thread's own host thread blocks it in a host wait
-    assert(get_current_cpu_state() == thread.cpu.get());
+    assert(current_thread() == &thread);
     const std::lock_guard<std::mutex> lock(thread.mutex);
     thread.host_waiting = true;
     if (shown) {
-        thread.wait_target = *shown;
-        thread.update_status(ThreadStatus::waiting);
-    } else {
+        thread.state.wait_target = *shown;
+        thread.state.status = ThreadStatus::waiting;
+    }
+    thread.cv.notify_all();
+}
+
+GuestThread::HostWait::~HostWait() {
+    const std::lock_guard<std::mutex> lock(thread.mutex);
+    thread.host_waiting = false;
+    if (thread.state.status == ThreadStatus::waiting) {
+        thread.state.wait_target = {};
+        thread.state.status = ThreadStatus::running;
         thread.cv.notify_all();
     }
 }
 
-ThreadState::HostWait::~HostWait() {
-    const std::lock_guard<std::mutex> lock(thread.mutex);
-    thread.host_waiting = false;
-    if (thread.status == ThreadStatus::waiting) {
-        thread.wait_target = {};
-        thread.update_status(ThreadStatus::running);
-    }
-}
-
-uint64_t ThreadState::next_display_wait(uint64_t next_vblank, int vcount) {
+uint64_t GuestThread::next_display_wait(uint64_t next_vblank, int vcount) {
     const std::lock_guard<std::mutex> lock(mutex);
-    last_vblank_waited = std::max(next_vblank, last_vblank_waited + vcount);
-    return last_vblank_waited;
+    state.last_vblank_waited = std::max(next_vblank, state.last_vblank_waited + vcount);
+    return state.last_vblank_waited;
 }
 
-WaitResult ThreadState::wait_for_thread_end(const ThreadStatePtr &waiter, SceInt32 *exit_status, Deadline deadline, bool callbacks) {
+WaitResult GuestThread::wait_for_thread_end(const GuestThreadPtr &waiter, SceInt32 *exit_status, Deadline deadline, bool callbacks) {
     std::unique_lock<std::mutex> lock(mutex);
-    if (status == ThreadStatus::dormant || status == ThreadStatus::deleted) {
+    if (state.status == ThreadStatus::dormant || state.status == ThreadStatus::deleted) {
         if (exit_status)
-            *exit_status = static_cast<SceInt32>(returned_value);
+            *exit_status = static_cast<SceInt32>(state.returned_value);
         return SCE_KERNEL_OK;
     }
     std::unique_lock<std::mutex> end_lock(end_waiters_mutex);
     lock.unlock();
-    return end_waiters.wait(end_lock, waiter, { SCE_KERNEL_WAITTYPE_WAITTHEND, id, callbacks }, { exit_status }, deadline);
+    return state.end_waiters.wait(end_lock, waiter, { SCE_KERNEL_WAITTYPE_WAITTHEND, state.id, callbacks }, { exit_status }, deadline);
 }
 
-WaitResult ThreadState::wait(WaitTarget target, Deadline deadline) {
+WaitResult GuestThread::wait(WaitTarget target, Deadline deadline) {
     std::unique_lock<std::mutex> lock(mutex);
-    const auto woken = [&] { return wait_over(); };
-    wait_target = target;
-    update_status(ThreadStatus::waiting);
+    const auto woken = [&] { return state.wait_over(); };
+    state.wait_target = target;
+    state.status = ThreadStatus::waiting;
+    cv.notify_all();
     bool satisfied = true;
     if (deadline == Deadline::max())
         cv.wait(lock, woken);
@@ -515,52 +550,53 @@ WaitResult ThreadState::wait(WaitTarget target, Deadline deadline) {
         satisfied = cv.wait_until(lock, deadline, woken);
     // Before the call writes its result to the registers. A thread something holds goes on to its
     // holds, which keep it from its callbacks and its code.
-    update_status(ThreadStatus::running);
-    const bool callbacks_due = callback_ends_wait();
-    wait_target = {};
-    if (exiting())
+    state.status = ThreadStatus::running;
+    cv.notify_all();
+    const bool callbacks_due = state.callback_ends_wait();
+    state.wait_target = {};
+    if (state.exiting())
         return std::unexpected{ ThreadExiting{} };
-    wake_pending = false;
+    state.wake_pending = false;
     if (callbacks_due)
         return SCE_KERNEL_ERROR_NOTIFY_CALLBACK;
     return satisfied ? SCE_KERNEL_OK : SCE_KERNEL_ERROR_WAIT_TIMEOUT;
 }
 
-WaitResult ThreadState::run_callbacks() {
+WaitResult GuestThread::run_callbacks() {
     process_callbacks();
     const std::lock_guard<std::mutex> lock(mutex);
     // The thread exited or was deleted during the callbacks, so the wait must not complete
-    if (exiting())
+    if (state.exiting())
         return std::unexpected{ ThreadExiting{} };
     // The callbacks may have changed what the caller waits for, so it rechecks before waiting again
     return SCE_KERNEL_OK;
 }
 
-void ThreadState::wake() {
+void GuestThread::wake() {
     const std::lock_guard<std::mutex> lock(mutex);
-    wake_pending = true;
+    state.wake_pending = true;
     cv.notify_all();
 }
 
-bool ThreadState::has_pending_callbacks() {
+bool GuestThread::has_pending_callbacks() {
     const std::lock_guard<std::mutex> lock(mutex);
-    return !is_processing_callbacks && callbacks_notified();
+    return !state.is_processing_callbacks && state.callbacks_notified();
 }
 
-SceUInt32 ThreadState::process_callbacks() {
+SceUInt32 GuestThread::process_callbacks() {
     {
         // Thread info reads the flag too, through wait_over()
         const std::lock_guard<std::mutex> lock(mutex);
-        if (is_processing_callbacks)
+        if (state.is_processing_callbacks)
             return 0;
-        is_processing_callbacks = true;
+        state.is_processing_callbacks = true;
     }
     SceUInt32 processed = 0;
-    for (auto it = callbacks.begin(); it != callbacks.end();) {
+    for (auto it = state.callbacks.begin(); it != state.callbacks.end();) {
         const CallbackPtr cb = it->lock();
         // Deleted since it was added
         if (!cb) {
-            it = callbacks.erase(it);
+            it = state.callbacks.erase(it);
             continue;
         }
         ++it;
@@ -575,72 +611,72 @@ SceUInt32 ThreadState::process_callbacks() {
         {
             const std::lock_guard<std::mutex> lock(mutex);
             // The thread's other callbacks are deleted when it ends, with their notifications
-            if (exiting())
+            if (state.exiting())
                 break;
         }
         // A callback that returns nonzero deletes itself
         if (ret != 0)
-            kernel.delete_callback(cb->uid, id);
+            kernel.delete_callback(cb->uid, state.id);
     }
     const std::lock_guard<std::mutex> lock(mutex);
-    is_processing_callbacks = false;
+    state.is_processing_callbacks = false;
     return processed;
 }
 
-void ThreadState::add_notified_callback() {
+void GuestThread::add_notified_callback() {
     const std::lock_guard<std::mutex> lock(mutex);
-    ++notified_callbacks;
+    ++state.notified_callbacks;
     cv.notify_all();
 }
 
-void ThreadState::remove_notified_callback() {
+void GuestThread::remove_notified_callback() {
     const std::lock_guard<std::mutex> lock(mutex);
-    if (notified_callbacks > 0)
-        --notified_callbacks;
+    if (state.notified_callbacks > 0)
+        --state.notified_callbacks;
 }
 
-SceKernelThreadInfo ThreadState::info() {
+SceKernelThreadInfo GuestThread::info() {
     const std::lock_guard<std::mutex> lock(mutex);
     SceKernelThreadInfo info{};
-    strncpy(info.name, name.c_str(), KERNELOBJECT_MAX_NAME_LENGTH);
-    info.attr = attr;
-    info.stack = Ptr<void>(stack.get());
-    info.stackSize = stack_size;
-    info.initPriority = init_priority;
-    info.currentPriority = priority;
-    info.initCpuAffinityMask = init_affinity_mask;
-    info.currentCpuAffinityMask = affinity_mask;
-    info.entry = SceKernelThreadEntry(entry_point);
+    strncpy(info.name, state.name.c_str(), KERNELOBJECT_MAX_NAME_LENGTH);
+    info.attr = state.attr;
+    info.stack = Ptr<void>(state.stack.get());
+    info.stackSize = state.stack_size;
+    info.initPriority = state.init_priority;
+    info.currentPriority = state.priority;
+    info.initCpuAffinityMask = state.init_affinity_mask;
+    info.currentCpuAffinityMask = state.affinity_mask;
+    info.entry = SceKernelThreadEntry(state.entry_point);
     // A thread whose kernel wait is over is READY until it goes on, and waits on nothing, like on a
     // Vita, where the waker ends the wait. A host wait ends with its host call and stays WAITING.
-    const bool ready = status == ThreadStatus::waiting && !host_waiting && wait_over();
-    const WaitTarget reported = ready ? WaitTarget{} : wait_target;
+    const bool ready = state.status == ThreadStatus::waiting && !host_waiting && state.wait_over();
+    const WaitTarget reported = ready ? WaitTarget{} : state.wait_target;
     info.status = ready ? SCE_KERNEL_THREAD_STATUS_READY : std::to_underlying(shown_status());
     info.waitType = reported.callbacks ? reported.type | SCE_KERNEL_WAITTYPE_CB_BIT : reported.type;
     info.waitId = reported.id;
-    info.exitStatus = returned_value;
-    info.fNotifyCallback = callbacks_notified() ? 1 : 0;
+    info.exitStatus = state.returned_value;
+    info.fNotifyCallback = state.callbacks_notified() ? 1 : 0;
     return info;
 }
 
-int ThreadState::get_priority() const {
+int GuestThread::get_priority() const {
     const std::lock_guard<std::mutex> lock(mutex);
-    return priority;
+    return state.priority;
 }
 
-int ThreadState::change_priority(int new_priority) {
+int GuestThread::change_priority(int new_priority) {
     const std::lock_guard<std::mutex> lock(mutex);
-    tls_slot(TLS_CURRENT_PRIORITY) = new_priority;
-    return std::exchange(priority, new_priority);
+    state.tls_slot(TLS_CURRENT_PRIORITY) = new_priority;
+    return std::exchange(state.priority, new_priority);
 }
 
-SceInt32 ThreadState::change_affinity_mask(SceInt32 new_affinity_mask) {
+SceInt32 GuestThread::change_affinity_mask(SceInt32 new_affinity_mask) {
     const std::lock_guard<std::mutex> lock(mutex);
-    tls_slot(TLS_CPU_AFFINITY_MASK) = new_affinity_mask;
-    return std::exchange(affinity_mask, new_affinity_mask);
+    state.tls_slot(TLS_CPU_AFFINITY_MASK) = new_affinity_mask;
+    return std::exchange(state.affinity_mask, new_affinity_mask);
 }
 
-void ThreadState::set_suspended(bool suspended) {
+void GuestThread::set_suspended(bool suspended) {
     const std::lock_guard<std::mutex> lock(mutex);
     debugger_hold = suspended;
     // A step the thread didn't take doesn't outlive the debugger's next call
@@ -650,74 +686,74 @@ void ThreadState::set_suspended(bool suspended) {
     cv.notify_all();
 }
 
-bool ThreadState::step() {
+bool GuestThread::step() {
     std::unique_lock<std::mutex> lock(mutex);
     // A pause or a ForVM suspend holds the thread, so it doesn't step. One that comes after this
     // check delays the step until it ends.
-    if (kernel.is_threads_paused() || vm_suspend_count > 0)
+    if (kernel.is_threads_paused() || state.vm_suspend_count > 0)
         return false;
     // A thread with no run, or one that is ending, has no instruction to step, and the wait ends
     // once it is dormant or deleted
-    step_requested = (status == ThreadStatus::running || status == ThreadStatus::waiting) && !exiting();
+    step_requested = (state.status == ThreadStatus::running || state.status == ThreadStatus::waiting) && !state.exiting();
     debugger_hold = false;
     cv.notify_all();
     // The thread holds for the debugger again after the instruction
-    cv.wait(lock, [&] { return (debugger_hold && parked) || status == ThreadStatus::dormant || status == ThreadStatus::deleted; });
+    cv.wait(lock, [&] { return (debugger_hold && parked) || state.status == ThreadStatus::dormant || state.status == ThreadStatus::deleted; });
     return true;
 }
 
-void ThreadState::wait_until_not_running() {
+void GuestThread::wait_until_not_running() {
     std::unique_lock<std::mutex> lock(mutex);
     cv.wait(lock, [&] { return !runs(); });
 }
 
-bool ThreadState::stopped_at_breakpoint() const {
+bool GuestThread::stopped_at_breakpoint() const {
     const std::lock_guard<std::mutex> lock(mutex);
     return debugger_hold && parked;
 }
 
-void ThreadState::pause_changed() {
+void GuestThread::pause_changed() {
     const std::lock_guard<std::mutex> lock(mutex);
     if (kernel.is_threads_paused() && runs())
         cpu->request_stop();
     cv.notify_all();
 }
 
-int ThreadState::vm_suspend() {
+int GuestThread::vm_suspend() {
     std::unique_lock<std::mutex> lock(mutex);
-    if (status == ThreadStatus::dormant)
+    if (state.status == ThreadStatus::dormant)
         return SCE_KERNEL_ERROR_DORMANT;
-    const int count = ++vm_suspend_count;
+    const int count = ++state.vm_suspend_count;
     if (runs())
         cpu->request_stop();
     cv.notify_all();
     // Like on a Vita, return once the thread has stopped, so its context holds still
-    cv.wait(lock, [&] { return parked || status != ThreadStatus::running || vm_suspend_count == 0 || exiting(); });
+    cv.wait(lock, [&] { return parked || state.status != ThreadStatus::running || state.vm_suspend_count == 0 || state.exiting(); });
     return count;
 }
 
-int ThreadState::vm_resume() {
+int GuestThread::vm_resume() {
     const std::lock_guard<std::mutex> lock(mutex);
     // Like on a Vita, a dormant thread fails before the count does
-    if (status == ThreadStatus::dormant)
+    if (state.status == ThreadStatus::dormant)
         return SCE_KERNEL_ERROR_DORMANT;
-    if (vm_suspend_count == 0)
+    if (state.vm_suspend_count == 0)
         return SCE_KERNEL_ERROR_VM_NOT_SUSPENDED;
     // The thread's holds wait for the last resume, and so may a suspend that waits for it to stop
-    if (--vm_suspend_count == 0)
+    if (--state.vm_suspend_count == 0)
         cv.notify_all();
-    return vm_suspend_count;
+    return state.vm_suspend_count;
 }
 
-SceInt32 ThreadState::get_vm_context(CPUContext &context, uint32_t &tpidrurw, bool &in_kernel_call) {
+SceInt32 GuestThread::get_vm_context(CPUContext &context, uint32_t &tpidrurw, bool &in_kernel_call) {
     std::unique_lock<std::mutex> lock(mutex);
     // A thread whose wait timed out while suspended stops on its way back to its code
-    cv.wait(lock, [&] { return parked || status != ThreadStatus::running || vm_suspend_count == 0 || exiting(); });
-    if (vm_suspend_count == 0)
+    cv.wait(lock, [&] { return parked || state.status != ThreadStatus::running || state.vm_suspend_count == 0 || state.exiting(); });
+    if (state.vm_suspend_count == 0)
         return SCE_KERNEL_ERROR_NOT_SUSPENDED;
     context = cpu->save_context();
     tpidrurw = cpu->get_tpidrurw();
     // Inside a kernel call means waiting, or held on the way back from one
-    in_kernel_call = status == ThreadStatus::waiting || (parked && stopped_after_kernel_call);
+    in_kernel_call = state.status == ThreadStatus::waiting || (parked && stopped_after_kernel_call);
     return SCE_KERNEL_OK;
 }

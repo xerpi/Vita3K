@@ -28,8 +28,8 @@
 #include <optional>
 
 // Only declared here so ThreadState can hold a WaitQueue. The template bodies need the full type.
-struct ThreadState;
-using ThreadStatePtr = std::shared_ptr<ThreadState>;
+struct GuestThread;
+using GuestThreadPtr = std::shared_ptr<GuestThread>;
 
 // Threads blocked on a sync object, in FIFO or thread priority order.
 // Entry is the per-waiter data the object needs, such as a requested count.
@@ -39,7 +39,7 @@ template <typename Entry>
 class WaitQueue {
 public:
     struct Waiter {
-        ThreadStatePtr thread;
+        GuestThreadPtr thread;
         // Taken when the wait starts, the queue is not reordered if it changes
         int priority = 0;
         Entry entry;
@@ -64,7 +64,7 @@ public:
     // Blocks thread on target until a waker gives it a result, it is being deleted, or the deadline passes.
     // thread must be the guest thread making this HLE call.
     // With target.callbacks, the thread runs its notified callbacks while it waits.
-    [[nodiscard]] WaitResult wait(std::unique_lock<std::mutex> &lock, const ThreadStatePtr &thread, WaitTarget target, Entry entry, Deadline deadline) {
+    [[nodiscard]] WaitResult wait(std::unique_lock<std::mutex> &lock, const GuestThreadPtr &thread, WaitTarget target, Entry entry, Deadline deadline) {
         Waiter waiter{ .thread = thread, .entry = std::move(entry) };
         waiter.priority = waiter.thread->get_priority();
         push(waiter);

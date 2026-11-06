@@ -104,7 +104,7 @@ public:
         : cpu(cpu) {}
 
     std::optional<std::uint32_t> MemoryReadCode(Dynarmic::A32::VAddr addr) override {
-        if (cpu.log_mem)
+        if (cpu.options.log_mem)
             LOG_TRACE("Instruction fetch at address 0x{:X}", addr);
         if (addr < KiB(4))
             return std::nullopt;
@@ -120,7 +120,7 @@ public:
     }
 
     void PreCodeTranslationHook(bool is_thumb, Dynarmic::A32::VAddr pc, Dynarmic::A32::IREmitter &ir) override {
-        if (cpu.log_code) {
+        if (cpu.options.log_code) {
             ir.CallHostFunction(&TraceInstruction, ir.Imm64(reinterpret_cast<uint64_t>(this)), ir.Imm64(pc), ir.Imm64(is_thumb));
         }
     }
@@ -150,7 +150,7 @@ public:
         if (invalid_access("read", addr))
             return 0;
         const T ret = *Ptr<T>(addr).get(cpu.mem);
-        if (cpu.log_mem) {
+        if (cpu.options.log_mem) {
             LOG_TRACE("Read uint{}_t at address: 0x{:x}, val = 0x{:x}", sizeof(T) * 8, addr, ret);
         }
         return ret;
@@ -177,7 +177,7 @@ public:
         if (invalid_access("write", addr))
             return;
         *Ptr<T>(addr).get(cpu.mem) = value;
-        if (cpu.log_mem) {
+        if (cpu.options.log_mem) {
             LOG_TRACE("Write uint{}_t at addr: 0x{:x}, val = 0x{:x}", sizeof(T) * 8, addr, value);
         }
     }
@@ -203,7 +203,7 @@ public:
         if (invalid_access("exclusive write", addr))
             return false;
         const bool result = Ptr<T>(addr).atomic_compare_and_swap(cpu.mem, value, expected);
-        if (cpu.log_mem) {
+        if (cpu.options.log_mem) {
             LOG_TRACE("Write uint{}_t at addr: 0x{:x}, val = 0x{:x}, expected = 0x{:x}", sizeof(T) * 8, addr, value, expected);
         }
         return result;
@@ -285,26 +285,27 @@ std::unique_ptr<Dynarmic::A32::Jit> DynarmicCPU::make_jit() {
     config.arch_version = Dynarmic::A32::ArchVersion::v7;
     config.callbacks = cb.get();
     if (mem.use_page_table) {
-        config.page_table = (log_mem || !cpu_opt) ? nullptr : reinterpret_cast<decltype(config.page_table)>(mem.page_table.get());
+        config.page_table = (options.log_mem || !options.optimize) ? nullptr : reinterpret_cast<decltype(config.page_table)>(mem.page_table.get());
         config.absolute_offset_page_table = true;
-    } else if (!log_mem && cpu_opt) {
+    } else if (!options.log_mem && options.optimize) {
         config.fastmem_pointer = std::bit_cast<uintptr_t>(mem.memory.get());
     }
     config.hook_hint_instructions = true;
     config.global_monitor = &shared_monitor;
     config.coprocessors[15] = cp15;
     config.processor_id = processor_id;
-    config.optimizations = cpu_opt ? Dynarmic::all_safe_optimizations : Dynarmic::no_optimizations;
+    config.optimizations = options.optimize ? Dynarmic::all_safe_optimizations : Dynarmic::no_optimizations;
     config.enable_cycle_counting = false;
 
     return std::make_unique<Dynarmic::A32::Jit>(config);
 }
 
-DynarmicCPU::DynarmicCPU(MemState &mem, SceUID thread_id, std::size_t processor_id, bool cpu_opt)
-    : CPUState(mem, thread_id, processor_id)
+DynarmicCPU::DynarmicCPU(MemState &mem, SceUID thread_id, std::size_t processor_id, CPUOptions options)
+    : CPUState(mem, thread_id)
     , cb(std::make_unique<ArmDynarmicCallback>(*this))
     , cp15(std::make_shared<ArmDynarmicCP15>())
-    , cpu_opt(cpu_opt) {
+    , options(options)
+    , processor_id(processor_id) {
     jit = make_jit();
 }
 
@@ -334,22 +335,6 @@ GuestExit DynarmicCPU::run(RunMode mode) {
 
 void DynarmicCPU::clear_exclusive() {
     shared_monitor.ClearProcessor(processor_id);
-}
-
-void DynarmicCPU::set_log_code(bool log) {
-    if (log_code == log)
-        return;
-
-    log_code = log;
-    jit = make_jit();
-}
-
-void DynarmicCPU::set_log_mem(bool log) {
-    if (log_mem == log)
-        return;
-
-    log_mem = log;
-    jit = make_jit();
 }
 
 void DynarmicCPU::request_stop() {

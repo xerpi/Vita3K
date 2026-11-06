@@ -17,7 +17,7 @@
 
 #pragma once
 
-#include <cpu/common.h>
+#include <kernel/thread/guest_thread.h>
 #include <mem/ptr.h>
 
 #include <cstdlib>

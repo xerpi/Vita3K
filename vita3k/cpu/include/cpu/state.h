@@ -28,20 +28,12 @@
 #include <string>
 
 // The CPU of one guest thread, which a backend like DynarmicCPU implements. It runs the thread's
-// guest code when its ThreadState lets it. The executor is the host thread that runs it.
+// guest code when its GuestThread lets it. The executor is the host thread that runs it.
 struct CPUState {
+    // The guest thread's id, for log lines
     const SceUID thread_id;
     MemState &mem;
-    // The core number the kernel gave the thread
-    const std::size_t processor_id;
     DisasmState disasm;
-
-    // Return address place_call() writes to LR. Execution stops there.
-    Address return_pc = 0;
-
-    // Set by the kubridge fault handler from a signal, read by the CPU after it halts
-    std::atomic<bool> abort_pending{ false };
-    std::atomic<uint32_t> abort_fault_addr{ 0 };
 
     virtual ~CPUState() = default;
 
@@ -58,6 +50,8 @@ struct CPUState {
     // Called by any thread, also from a signal handler. Takes no lock.
     // Asks the CPU to stop guest code soon
     virtual void request_stop() = 0;
+    // Notes an abort at addr for take_abort and asks the CPU to stop
+    void note_abort(Address addr);
 
     // Called by any thread, the executor too, but not from a signal handler. It takes the JIT's
     // own lock.
@@ -71,17 +65,7 @@ struct CPUState {
     // protected guest memory, so the kernel code after an exit can note one too.
     std::optional<Address> take_abort();
 
-    // Called by the executor, or under the ThreadState's mutex for a thread with no run, as its
-    // start() does
-    // Sets up a call of fn with args: the first four in r0 to r3, the rest on the stack, and the
-    // return address in LR
-    void place_call(Address fn, std::initializer_list<uint32_t> args);
-    // Writes an import's result to the registers the calling convention returns it in
-    void write_call_result(const CallResult &result);
-    uint32_t stack_alloc(size_t size);
-    void stack_free(size_t size);
-
-    // Called by the executor, or by another thread under the ThreadState's mutex while the thread
+    // Called by the executor, or by another thread under the GuestThread's mutex while the thread
     // has no run or is parked, or is waiting for a read. A thread that stopped before may run
     // again, so that alone isn't enough.
     // TODO: the gdb stub doesn't take the mutex for them yet.
@@ -116,17 +100,28 @@ struct CPUState {
     bool is_thumb_mode() { return get_cpsr() & 0x20; }
 
     // Debugging helpers
-    virtual void set_log_code(bool log) = 0;
-    virtual void set_log_mem(bool log) = 0;
     std::string disassemble(uint64_t at, bool thumb, uint16_t *insn_size = nullptr);
     std::string disassemble(uint64_t at, uint16_t *insn_size = nullptr);
 
 protected:
-    CPUState(MemState &mem, SceUID thread_id, std::size_t processor_id);
+    CPUState(MemState &mem, SceUID thread_id);
+
+private:
+    // Written by note_abort, also from a signal handler
+    std::atomic<bool> abort_pending{ false };
+    std::atomic<uint32_t> abort_fault_addr{ 0 };
+    static_assert(std::atomic<bool>::is_always_lock_free && std::atomic<uint32_t>::is_always_lock_free);
 };
 
-CPUStatePtr init_cpu(bool cpu_opt, SceUID thread_id, std::size_t processor_id, MemState &mem);
+// How a CPU's JIT is built, fixed when it is created
+struct CPUOptions {
+    bool optimize = true;
+    // Log every instruction it runs
+    bool log_code = false;
+    // Log every memory access, without fast memory
+    bool log_mem = false;
+};
 
-// The CPU state running on this host thread, for signal handlers
-void set_current_cpu_state(CPUState *state);
-CPUState *get_current_cpu_state();
+// A CPU for the thread thread_id. processor_id is its exclusive monitor slot, the core number the
+// kernel gave the thread.
+CPUStatePtr init_cpu(MemState &mem, SceUID thread_id, std::size_t processor_id, CPUOptions options);

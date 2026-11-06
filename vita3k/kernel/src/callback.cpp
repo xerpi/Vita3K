@@ -16,12 +16,12 @@
 // 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
 #include <kernel/callback.h>
-#include <kernel/thread/thread_state.h>
+#include <kernel/thread/guest_thread.h>
 
 #include <mutex>
 
-Callback::Callback(const ThreadStatePtr &owner, const std::string &name, Ptr<SceKernelCallbackFunction> cb_func, Ptr<void> pCommon)
-    : thread_id(owner->id)
+Callback::Callback(const GuestThreadPtr &owner, const std::string &name, Ptr<SceKernelCallbackFunction> cb_func, Ptr<void> pCommon)
+    : thread_id(owner->state.id)
     , name(name)
     , cb_func(cb_func)
     , userdata(pCommon)
@@ -35,7 +35,7 @@ void Callback::notify(SceUID notifier_id, SceInt32 notify_arg) {
     this->notification_arg = notify_arg;
     // The owner already counts a callback with notifications, and only the first one wakes it
     if (this->num_notifications++ == 0) {
-        if (const ThreadStatePtr thread = owner.lock())
+        if (const GuestThreadPtr thread = owner.lock())
             thread->add_notified_callback();
     }
 }
@@ -85,7 +85,7 @@ std::optional<Callback::Notification> Callback::take_notification() {
 
 void Callback::reset() {
     if (this->num_notifications != 0) {
-        if (const ThreadStatePtr thread = owner.lock())
+        if (const GuestThreadPtr thread = owner.lock())
             thread->remove_notified_callback();
     }
     this->num_notifications = 0;

@@ -23,8 +23,8 @@
 #include <optional>
 #include <string>
 
-struct ThreadState;
-using ThreadStatePtr = std::shared_ptr<ThreadState>;
+struct GuestThread;
+using GuestThreadPtr = std::shared_ptr<GuestThread>;
 
 // Lock order: a callback's lock, then its owner thread's mutex. Code that holds a thread's mutex
 // must not take the lock of a callback.
@@ -37,7 +37,7 @@ public:
         SceInt32 arg;
     };
 
-    Callback(const ThreadStatePtr &owner, const std::string &name, Ptr<SceKernelCallbackFunction> cb_func, Ptr<void> pCommon);
+    Callback(const GuestThreadPtr &owner, const std::string &name, Ptr<SceKernelCallbackFunction> cb_func, Ptr<void> pCommon);
 
     void notify(SceUID notifier_id, SceInt32 notify_arg);
     // Notifies from an event, without notification argument
@@ -68,7 +68,7 @@ private:
     // Clears the notifications and tells the owner if there were any. The lock must be held.
     void reset();
 
-    const std::weak_ptr<ThreadState> owner; // Thread that created this callback, woken when it is notified
+    const std::weak_ptr<GuestThread> owner; // Thread that created this callback, woken when it is notified
 
     uint32_t num_notifications = 0; // Number of times this callback has been notified - reset every time it is run
     SceInt32 notification_arg = 0; // User-specified argument passed by sceKernelNotifyCallback
