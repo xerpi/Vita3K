@@ -128,8 +128,8 @@ cond_signal_all_order           pass
 cond_signal_before_relock       fail     # a signaled waiter runs at once on its host thread, so it is in its relock before the main thread reads
 cond_signal_to_mixed_priority   pass
 cond_signal_to_race             pass
-cond_suspend_for_vm_steps       fail     # a waiter suspended for VM waits for a held mutex after its signal or timeout instead of staying suspended, and a mutex delete doesn't end its conditions' waits
-cond_suspend_relock_no_timeout  fail     # a waiter suspended for VM waits for the mutex once its wait times out, and the wait returns 0x80028005, not 0
+cond_suspend_for_vm_steps       fail     # a mutex delete doesn't end its conditions' waits
+cond_suspend_relock_no_timeout  pass
 cond_timeout_claim_races        fail     # a woken thread runs at once, so it has relocked before the main thread acts
 cond_waits                      pass
 core_affinity                   fail     # threads ignore their core affinity and the priorities on a core
@@ -556,13 +556,13 @@ suspend_for_vm_end_handler      pass
 suspend_for_vm_handoff          pass
 suspend_for_vm_handoff_more     fail     # sceKernelWaitMultipleEvents
 suspend_for_vm_inner_wait       pass
-suspend_for_vm_notify           fail     # a thread a ForVM suspend holds shows a notified callback's pc
+suspend_for_vm_notify           skip     # threads ignore their core and priority, so whether a second notify merges with the first before the held thread takes it is a race
 suspend_for_vm_resume_before_wake pass
 suspend_for_vm_two_callbacks    skip     # threads ignore their core and priority, so whether T took A's notification before the main thread reads its count is a race
 suspend_ready_order             fail     # threads ignore their core and priority
 suspend_running_resume_order    fail     # resumed threads report RUNNING or DORMANT where the Vita has READY before the gate lifts
-suspend_vm_context_after_wake   fail     # a ForVM suspended waiter's context gets the wait's result in r0 when the wait ends, not the semaphore's UID
-suspend_vm_mutual               fail     # a thread blocked in sceKernelSuspendThreadForVM doesn't stop for a suspend, so the two are never both SUSPENDED
+suspend_vm_context_after_wake   pass
+suspend_vm_mutual               skip     # threads ignore their core and priority, so whether both suspend calls land inside the other thread's call is a race
 suspend_vm_syscall_boundary     pass
 suspend_wake_status_at_once     skip     # whether a woken waiter suspended for VM still shows READY or already parked as SUSPENDED is a race, and so is its relock
 suspend_wake_status_kinds       skip     # whether a woken waiter suspended for VM still shows READY or already parked as SUSPENDED is a race
@@ -579,12 +579,12 @@ thread_call_states              fail     # a thread ready behind a gate reports 
 thread_change_attr              pass
 thread_context_core_registers   fail     # a waiting thread's context sp is the one inside the wait, not the one before it
 thread_context_for_vm           pass
-thread_context_for_vm_error_order fail     # Get checks block sizes before the thread ID, Set skips the caller and VM checks and returns 0 without blocks
+thread_context_for_vm_error_order pass
 thread_context_never_ran        fail     # a new thread's argument copy takes its size rounded up to 8, so r1 and sp start 0x8 below the stack top, not 0x10
 thread_context_set_for_vm       fail     # sceKernelSetThreadContextForVM checks, its writes don't reach the thread
 thread_context_set_fpscr        fail     # sceKernelSetThreadContextForVM returns 0 but doesn't write the FPSCR, so the thread keeps its own rounding mode
 thread_context_set_frame        fail     # sceKernelSetThreadContextForVM writes no registers, so the read shows the old ones and the thread runs on past its wait
-thread_context_tls_words        fail     # the context read puts 100000 in words 19 to 21, the write ignores them, and the resumed thread gets past its wait
+thread_context_tls_words        fail     # the context write ignores words 20 and 21, and the resumed thread gets past its wait
 thread_context_vfp              pass
 thread_cpu_fields               fail     # the CPU fields of thread info, threads ignore their core
 thread_create_attr              pass

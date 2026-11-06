@@ -619,7 +619,7 @@ SceInt32 Mutex::acquire(MemState &mem, const GuestThreadPtr &thread, SceInt32 co
     return guest_result(r);
 }
 
-SceInt32 Mutex::relock(MemState &mem, const GuestThreadPtr &thread, WaitTarget target) {
+SceInt32 Mutex::relock(MemState &mem, const GuestThreadPtr &thread, WaitTarget target, bool &held_for_vm) {
     auto guard = lock();
     if (!guard)
         return lightweight() ? SCE_KERNEL_ERROR_UNKNOWN_LW_MUTEX_ID : SCE_KERNEL_ERROR_UNKNOWN_MUTEX_ID;
@@ -627,9 +627,7 @@ SceInt32 Mutex::relock(MemState &mem, const GuestThreadPtr &thread, WaitTarget t
     if (owner == thread->state.id)
         return try_take(mem, thread, 1);
 
-    const WaitResult r = wait_loop(waiters, guard, thread, target, { 1 }, nullptr, CallbacksCheck::on_delete, [&](WaitEntry &, SceInt32) {
-        return take_if_free(mem, thread, 1);
-    });
+    const WaitResult r = wait_loop(waiters, guard, thread, target, { 1 }, nullptr, CallbacksCheck::on_delete, [&](WaitEntry &, SceInt32) { return take_if_free(mem, thread, 1); }, &held_for_vm);
     if (owner == thread->state.id)
         update_workarea(mem);
     return guest_result(r);
@@ -1087,8 +1085,10 @@ SceInt32 Condvar::wait(MemState &mem, const GuestThreadPtr &thread, SceUInt32 *t
     guard.unlock();
     // Taking the mutex back is still part of the condition variable wait, a wait on the mutex with no
     // timeout that leaves the time left as it was at the signal
-    const SceInt32 result = associated_mutex->relock(mem, thread, { lightweight() ? SCE_KERNEL_WAITTYPE_LW_COND_LW_MUTEX : SCE_KERNEL_WAITTYPE_COND_MUTEX, associated_mutex->uid, callbacks });
-    if (timed_out && result == SCE_KERNEL_OK)
+    bool relock_held_for_vm = false;
+    const SceInt32 result = associated_mutex->relock(mem, thread, { lightweight() ? SCE_KERNEL_WAITTYPE_LW_COND_LW_MUTEX : SCE_KERNEL_WAITTYPE_COND_MUTEX, associated_mutex->uid, callbacks }, relock_held_for_vm);
+    // A ForVM suspend before the relock drops the timeout, and the call returns the relock's result
+    if (timed_out && result == SCE_KERNEL_OK && !relock_held_for_vm)
         return SCE_KERNEL_ERROR_WAIT_TIMEOUT;
     // Report a wait ended by the mutex with the mutex error codes, also when the mutex was deleted
     // before the wait went back to it. On a Vita a lightweight mutex deleted then leaves the waiter

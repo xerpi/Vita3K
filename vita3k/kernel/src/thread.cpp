@@ -174,7 +174,7 @@ void GuestThread::run_loop() {
     std::unique_lock<std::mutex> lock(mutex);
     do {
         // A thread that returns from its entry ends like one that exits, end handler included
-        if (const std::optional<uint32_t> returned = run_guest(lock, false)) {
+        if (const std::optional<uint32_t> returned = run_guest(lock, std::nullopt)) {
             state.returned_value = *returned;
             request_ending(Ending::exit);
         }
@@ -225,10 +225,7 @@ bool GuestThread::finish_run(std::unique_lock<std::mutex> &lock) {
     return true;
 }
 
-std::optional<uint32_t> GuestThread::run_guest(std::unique_lock<std::mutex> &lock, bool from_kernel_call) {
-    // Whether this level's guest code last stopped right after a kernel call, which a ForVM hold
-    // before its next guest code reports. Each level has its own, a nested call doesn't change it.
-    bool after_kernel_call = from_kernel_call;
+std::optional<uint32_t> GuestThread::run_guest(std::unique_lock<std::mutex> &lock, std::optional<GuestCall> call) {
     while (true) {
         // Park while the thread is dormant between starts
         cv.wait(lock, [&] { return state.status == ThreadStatus::running || state.exiting(); });
@@ -244,39 +241,44 @@ std::optional<uint32_t> GuestThread::run_guest(std::unique_lock<std::mutex> &loc
             lock.lock();
         }
 
-        // After the start event, which runs as a nested call, so this level's own value is published
-        stopped_after_kernel_call = after_kernel_call;
-        stop_for_holds(lock);
+        // A call's registers are set up after the holds, so a hold inside a kernel call shows that call's registers
+        stop_for_holds(lock, call.has_value());
         if (state.exiting())
             return std::nullopt;
+        if (call) {
+            set_up_call(*std::exchange(call, std::nullopt));
+            // The next pass stops for the holds again, at the called function's first instruction
+            continue;
+        }
         const bool step = step_requested;
 
+        running_guest = true;
         lock.unlock();
         const GuestExit exit = cpu->run(step ? CPUState::RunMode::single_step : CPUState::RunMode::run);
+        lock.lock();
+        // A ForVM suspend waits for this
+        running_guest = false;
+        cv.notify_all();
         if (step) {
-            lock.lock();
             // A stop request made before the step ends it before its instruction, so the step goes
             // again after the holds, unless the debugger lets the thread go meanwhile
             if (exit.kind == GuestExit::Kind::stopped && !exit.debugger_stop)
                 continue;
             // The step is taken, so a call that a stepped import makes doesn't step too
             step_requested = false;
-            lock.unlock();
         }
+        lock.unlock();
 
-        // In this order, also when the import ended the thread: the import, the exclusive monitor,
-        // the abort handler, then the debugger's hold
-        switch (exit.kind) {
-        case GuestExit::Kind::import:
-            write_call_result(kernel.call_import(*cpu, exit.value, state.id));
+        // In this order, also when the import ended the thread: the import, the holds at its end,
+        // its result, the exclusive monitor, the abort handler, then the debugger's hold
+        if (exit.kind == GuestExit::Kind::import) {
+            const CallResult result = kernel.call_import(*cpu, exit.value, state.id);
+            // A hold here shows the registers before the call result is written
+            lock.lock();
+            stop_for_holds(lock, true);
+            lock.unlock();
+            write_call_result(result);
             cpu->clear_exclusive();
-            after_kernel_call = true;
-            break;
-        case GuestExit::Kind::stopped:
-            after_kernel_call = false;
-            break;
-        case GuestExit::Kind::returned:
-            break;
         }
         // A host fault on protected guest memory, in guest code or in the import's host code
         if (const std::optional<Address> fault = cpu->take_abort())
@@ -286,7 +288,6 @@ std::optional<uint32_t> GuestThread::run_guest(std::unique_lock<std::mutex> &loc
             debugger_hold = true;
         if (exit.kind == GuestExit::Kind::returned)
             return exit.value;
-        // A thread that doesn't run here anymore parks again at the top
     }
 }
 
@@ -302,16 +303,8 @@ uint32_t GuestThread::call_guest(Address fn, std::initializer_list<uint32_t> arg
     const uint32_t previous_tpidrurw = cpu->get_tpidrurw();
     int &vfp_exception = state.tls_slot(TLS_VFP_EXCEPTION);
     const int previous_vfp_exception = vfp_exception;
-    if (fresh_vfp_state) {
-        cpu->set_fpscr(SCE_KERNEL_THREAD_INITIAL_FPSCR);
-        vfp_exception = 0;
-    }
 
-    place_call(fn, args);
-
-    // A callback runs inside a kernel call, so a hold before its first instruction finds the
-    // thread there
-    const std::optional<uint32_t> returned = run_guest(thread_lock, true);
+    const std::optional<uint32_t> returned = run_guest(thread_lock, GuestCall{ fn, args, fresh_vfp_state });
 
     // The caller and the callback should keep to the calling convention, but put everything back
     cpu->load_context(previous_ctx);
@@ -322,6 +315,14 @@ uint32_t GuestThread::call_guest(Address fn, std::initializer_list<uint32_t> arg
 
     // A call cut short by the thread's end returns the exit status
     return returned.value_or(state.returned_value);
+}
+
+void GuestThread::set_up_call(const GuestCall &call) {
+    if (call.fresh_vfp_state) {
+        cpu->set_fpscr(SCE_KERNEL_THREAD_INITIAL_FPSCR);
+        state.tls_slot(TLS_VFP_EXCEPTION) = 0;
+    }
+    place_call(call.fn, call.args);
 }
 
 void GuestThread::place_call(Address fn, std::initializer_list<uint32_t> args) {
@@ -463,7 +464,7 @@ ThreadStatus GuestThread::get_status() const {
 
 ThreadStatus GuestThread::shown_status() const {
     // A ForVM suspend shows once the thread has stopped for it, and the host's holds never show
-    if (state.status == ThreadStatus::running && state.vm_suspend_count > 0 && parked)
+    if (state.status == ThreadStatus::running && state.vm_suspend_count > 0 && (parked || held_in_call))
         return ThreadStatus::suspended;
     return state.status;
 }
@@ -478,14 +479,15 @@ bool GuestThread::held() const {
     return !state.exiting() && (debugger_hold || state.vm_suspend_count > 0 || kernel.is_threads_paused());
 }
 
-void GuestThread::stop_for_holds(std::unique_lock<std::mutex> &lock) {
+void GuestThread::stop_for_holds(std::unique_lock<std::mutex> &lock, bool in_call) {
     if (!held())
         return;
-    parked = true;
+    bool &stopped = in_call ? held_in_call : parked;
+    stopped = true;
     cv.notify_all();
     // The holds can change while the thread waits
     cv.wait(lock, [&] { return !held(); });
-    parked = false;
+    stopped = false;
 }
 
 int GuestThread::stack_free_size() const {
@@ -681,7 +683,7 @@ void GuestThread::set_suspended(bool suspended) {
     debugger_hold = suspended;
     // A step the thread didn't take doesn't outlive the debugger's next call
     step_requested = false;
-    if (suspended && runs())
+    if (suspended && running_guest)
         cpu->request_stop();
     cv.notify_all();
 }
@@ -702,6 +704,18 @@ bool GuestThread::step() {
     return true;
 }
 
+bool GuestThread::hold_before_wait(std::unique_lock<std::mutex> &object_lock) {
+    std::unique_lock<std::mutex> lock(mutex);
+    // Only a ForVM suspend stops a thread before a new wait, so a host hold never changes the wait's result
+    if (state.vm_suspend_count == 0 || state.exiting())
+        return false;
+    object_lock.unlock();
+    stop_for_holds(lock, true);
+    lock.unlock();
+    object_lock.lock();
+    return true;
+}
+
 void GuestThread::wait_until_not_running() {
     std::unique_lock<std::mutex> lock(mutex);
     cv.wait(lock, [&] { return !runs(); });
@@ -714,7 +728,7 @@ bool GuestThread::stopped_at_breakpoint() const {
 
 void GuestThread::pause_changed() {
     const std::lock_guard<std::mutex> lock(mutex);
-    if (kernel.is_threads_paused() && runs())
+    if (kernel.is_threads_paused() && running_guest)
         cpu->request_stop();
     cv.notify_all();
 }
@@ -724,11 +738,11 @@ int GuestThread::vm_suspend() {
     if (state.status == ThreadStatus::dormant)
         return SCE_KERNEL_ERROR_DORMANT;
     const int count = ++state.vm_suspend_count;
-    if (runs())
+    if (running_guest)
         cpu->request_stop();
     cv.notify_all();
-    // Like on a Vita, return once the thread has stopped, so its context holds still
-    cv.wait(lock, [&] { return parked || state.status != ThreadStatus::running || state.vm_suspend_count == 0 || state.exiting(); });
+    // Guest code stops before this returns. A thread inside a kernel call stops on its way out.
+    cv.wait(lock, [&] { return !running_guest || state.vm_suspend_count == 0; });
     return count;
 }
 
@@ -747,13 +761,13 @@ int GuestThread::vm_resume() {
 
 SceInt32 GuestThread::get_vm_context(CPUContext &context, uint32_t &tpidrurw, bool &in_kernel_call) {
     std::unique_lock<std::mutex> lock(mutex);
-    // A thread whose wait timed out while suspended stops on its way back to its code
-    cv.wait(lock, [&] { return parked || state.status != ThreadStatus::running || state.vm_suspend_count == 0 || state.exiting(); });
+    // Waits until the thread runs no guest code or kernel code that changes its registers
+    cv.wait(lock, [&] { return !runs() || state.vm_suspend_count == 0; });
     if (state.vm_suspend_count == 0)
         return SCE_KERNEL_ERROR_NOT_SUSPENDED;
     context = cpu->save_context();
     tpidrurw = cpu->get_tpidrurw();
-    // Inside a kernel call means waiting, or held on the way back from one
-    in_kernel_call = state.status == ThreadStatus::waiting || (parked && stopped_after_kernel_call);
+    // Inside a kernel call means waiting, in a host wait or held inside one
+    in_kernel_call = state.status == ThreadStatus::waiting || held_in_call || host_waiting;
     return SCE_KERNEL_OK;
 }

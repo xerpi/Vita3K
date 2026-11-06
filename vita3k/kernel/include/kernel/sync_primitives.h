@@ -76,9 +76,10 @@ protected:
     // and a callback notify starts a new round. attempt returns the result once the thread got what
     // it waits for, or nullopt to keep waiting. It is passed the result of the last sleep
     // (SCE_KERNEL_OK the first time). timeout is updated after every sleep. callbacks_check decides
-    // whether callbacks notified during the wait run before it returns.
+    // whether callbacks notified during the wait run before it returns. held_for_vm, if given, is set
+    // when a ForVM suspend stopped the thread before a round.
     template <typename Entry, typename Attempt>
-    [[nodiscard]] WaitResult wait_loop(WaitQueue<Entry> &queue, std::unique_lock<std::mutex> &lock, const GuestThreadPtr &thread, WaitTarget target, Entry entry, SceUInt32 *timeout, CallbacksCheck callbacks_check, Attempt attempt) {
+    [[nodiscard]] WaitResult wait_loop(WaitQueue<Entry> &queue, std::unique_lock<std::mutex> &lock, const GuestThreadPtr &thread, WaitTarget target, Entry entry, SceUInt32 *timeout, CallbacksCheck callbacks_check, Attempt attempt, bool *held_for_vm = nullptr) {
         typename WaitQueue<Entry>::Waiter waiter{ .thread = thread, .entry = std::move(entry) };
         const Deadline deadline = deadline_from(timeout);
         // The result of the last sleep, then the final result
@@ -91,6 +92,14 @@ protected:
                     return *taken;
                 result = *taken;
                 break;
+            }
+            // A ForVM suspend stops the thread here, and the wait starts again after the resume
+            if (thread->hold_before_wait(lock)) {
+                if (held_for_vm)
+                    *held_for_vm = true;
+                if (was_deleted())
+                    return SCE_KERNEL_ERROR_WAIT_DELETE;
+                continue;
             }
             // Timed out before being queued, so timed_out() isn't called
             if (std::chrono::steady_clock::now() >= deadline) {
@@ -311,8 +320,9 @@ public:
     static SceInt32 check_create(const char *name, SceUInt32 attr, SceInt32 init_count, bool kernel);
 
     SceInt32 acquire(MemState &mem, const GuestThreadPtr &thread, SceInt32 count, SceUInt32 *timeout, bool callbacks);
-    // Relocks the mutex after a condition variable wait. No timeout, and target is the reported wait.
-    SceInt32 relock(MemState &mem, const GuestThreadPtr &thread, WaitTarget target);
+    // Relocks the mutex after a condition variable wait. No timeout, target is the reported wait, and
+    // held_for_vm is set if a ForVM suspend stopped the thread first.
+    SceInt32 relock(MemState &mem, const GuestThreadPtr &thread, WaitTarget target, bool &held_for_vm);
     SceInt32 try_acquire(MemState &mem, const GuestThreadPtr &thread, SceInt32 count);
     SceInt32 release(MemState &mem, const GuestThreadPtr &thread, SceInt32 unlock_count);
     SceInt32 cancel(const GuestThreadPtr &thread, SceInt32 new_count, SceUInt32 *num_wait_threads);

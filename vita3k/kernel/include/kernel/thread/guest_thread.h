@@ -148,6 +148,9 @@ struct GuestThread final {
     bool step();
     // Waits until the thread doesn't run guest code
     void wait_until_not_running();
+    // Stops for a ForVM suspend before a new object wait, with object_lock released until nothing
+    // holds the thread. Called with object_lock held. Returns whether it stopped.
+    bool hold_before_wait(std::unique_lock<std::mutex> &object_lock);
     // Whether the debugger holds the thread and it has stopped. Once the debugger has let every
     // thread go, only a breakpoint or a finished step holds a thread for it again.
     bool stopped_at_breakpoint() const;
@@ -156,8 +159,8 @@ struct GuestThread final {
 
     // ForVM suspend
     // Suspends the thread for sceKernelSuspendThreadForVM: it doesn't run guest code until as many
-    // vm_resume calls. vm_suspend returns once it has stopped. Each returns the suspend count after
-    // it, or an error for a dormant thread or a resume with no suspend.
+    // vm_resume calls. vm_suspend returns once the thread runs no guest code. Each returns the
+    // suspend count after it, or an error for a dormant thread or a resume with no suspend.
     int vm_suspend();
     int vm_resume();
     // Waits until a ForVM suspend has stopped the thread, then gets the context it stopped with, its
@@ -176,21 +179,30 @@ private:
     // Sets how the thread ends, which stops its guest code for good and drops a step it didn't take
     // unless it's none
     void set_ending(Ending how);
-    // Whether something holds the thread before its guest code: the debugger, the emulator pause or
-    // a ForVM suspend
+    // Whether the debugger, the emulator pause or a ForVM suspend holds the thread
     bool held() const;
-    // Waits with mutex held through lock until nothing holds the thread, parked meanwhile
-    void stop_for_holds(std::unique_lock<std::mutex> &lock);
+    // Waits with mutex held through lock until nothing holds the thread. in_call marks a stop
+    // inside a kernel call, where the registers are the call's.
+    void stop_for_holds(std::unique_lock<std::mutex> &lock, bool in_call);
     // Whether the thread may run guest code now, or kernel code that changes its registers
-    bool runs() const { return state.status == ThreadStatus::running && !parked && !host_waiting; }
+    bool runs() const { return state.status == ThreadStatus::running && !parked && !held_in_call && !host_waiting; }
     // Asks the thread to end, keeping a stronger request already made
     void request_ending(Ending how) { set_ending(std::max(state.ending, how)); }
 
-    // Runs guest code at one level, the thread's run or a call, with mutex held through lock, which
-    // it releases around guest code and the handling of each exit. A call the kernel makes starts
-    // from_kernel_call. Returns r0 once the level's function returns, or nothing once the
-    // thread is ending.
-    std::optional<uint32_t> run_guest(std::unique_lock<std::mutex> &lock, bool from_kernel_call);
+    // A call of guest code from inside a kernel call
+    struct GuestCall {
+        Address fn;
+        std::initializer_list<uint32_t> args;
+        // Starts with the FPSCR and VFP exception setting of a new thread
+        bool fresh_vfp_state;
+    };
+
+    // Runs guest code at one level, the thread's run or call, with mutex held through lock, which
+    // it releases around guest code and the handling of each exit. Returns r0 once the level's
+    // function returns, or nothing once the thread is ending.
+    std::optional<uint32_t> run_guest(std::unique_lock<std::mutex> &lock, std::optional<GuestCall> call);
+    // Sets the registers up for call, with mutex held
+    void set_up_call(const GuestCall &call);
     // Ends the thread's run and returns whether it parks dormant for another start
     bool finish_run(std::unique_lock<std::mutex> &lock);
     // Calls the guest's data abort handler with the abort context on the stack, without mutex held
@@ -210,17 +222,18 @@ private:
     std::condition_variable cv;
 
     // Host flags, guarded by mutex. The guest never sees them.
-    // Whether the guest code of the level about to run last stopped right after a kernel call, which
-    // a hold there reports. run_guest() sets it before the holds.
-    bool stopped_after_kernel_call = false;
     // The debugger holds the thread, also after a breakpoint or a finished step
     bool debugger_hold = false;
     // The debugger asked for one instruction, which the next run of guest code takes
     bool step_requested = false;
     // The thread waits for its holds before guest code, with its registers still
     bool parked = false;
+    // The thread waits for its holds inside a kernel call, with the call's registers
+    bool held_in_call = false;
     // Blocked in a host wait inside an export
     bool host_waiting = false;
+    // Running guest code inside cpu->run()
+    bool running_guest = false;
 
     // Guards state.end_waiters, taken after mutex
     std::mutex end_waiters_mutex;

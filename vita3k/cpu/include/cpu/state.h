@@ -44,7 +44,11 @@ struct CPUState {
     };
     // Called by the executor
     // Runs guest code from the PC until it returns, calls an import or stops, or one instruction. A
-    // step that a stop request ends before its instruction stops without debugger_stop.
+    // step that a stop request ends before its instruction stops without debugger_stop. Only guest
+    // code, the backend's own entry and exit code and the fault handler for protected memory run
+    // inside: an import returns its NID with the registers as the guest left them, before any kernel
+    // or HLE code runs. It takes no kernel or thread lock and returns soon after request_stop(),
+    // except while the fault handler waits for the memory protection lock.
     virtual GuestExit run(RunMode mode) = 0;
 
     // Called by any thread, also from a signal handler. Takes no lock.
