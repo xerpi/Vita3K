@@ -71,7 +71,7 @@ void Atrac9Module::on_param_change(const MemState &mem, ModuleData &data) {
     }
 }
 
-bool Atrac9Module::decode_more_data(KernelState &kern, const MemState &mem, const SceUID thread_id, ModuleData &data, const SceNgsAT9Params *params, SceNgsAT9States *state, Atrac9LogicalState *logical, Atrac9RuntimeState *runtime, std::unique_lock<std::recursive_mutex> &scheduler_lock, std::unique_lock<std::mutex> &voice_lock) {
+bool Atrac9Module::decode_more_data(const MemState &mem, GuestThread &thread, ModuleData &data, const SceNgsAT9Params *params, SceNgsAT9States *state, Atrac9LogicalState *logical, Atrac9RuntimeState *runtime, std::unique_lock<std::recursive_mutex> &scheduler_lock, std::unique_lock<std::mutex> &voice_lock) {
     const SceNgsAT9BufferParams &bufparam = params->buffer_params[state->current_buffer];
 
     const bool config_changed = (params->config_data != logical->decoder_config);
@@ -105,18 +105,18 @@ bool Atrac9Module::decode_more_data(KernelState &kern, const MemState &mem, cons
             if ((state->current_buffer == -1)
                 || !params->buffer_params[state->current_buffer].buffer
                 || (params->buffer_params[state->current_buffer].bytes_count == 0)) {
-                data.invoke_callback(kern, mem, thread_id, SCE_NGS_AT9_END_OF_DATA, 0, 0);
+                data.invoke_callback(mem, thread, SCE_NGS_AT9_END_OF_DATA, 0, 0);
 
                 // we are done
                 scheduler_lock.lock();
                 voice_lock.lock();
                 return false;
             } else {
-                data.invoke_callback(kern, mem, thread_id, SCE_NGS_AT9_SWAPPED_BUFFER, prev_index,
+                data.invoke_callback(mem, thread, SCE_NGS_AT9_SWAPPED_BUFFER, prev_index,
                     params->buffer_params[state->current_buffer].buffer.address());
             }
         } else {
-            data.invoke_callback(kern, mem, thread_id, SCE_NGS_AT9_LOOPED_BUFFER, logical->current_loop_count,
+            data.invoke_callback(mem, thread, SCE_NGS_AT9_LOOPED_BUFFER, logical->current_loop_count,
                 params->buffer_params[state->current_buffer].buffer.address());
         }
 
@@ -272,7 +272,7 @@ bool Atrac9Module::decode_more_data(KernelState &kern, const MemState &mem, cons
         voice_lock.unlock();
         scheduler_lock.unlock();
 
-        data.invoke_callback(kern, mem, thread_id, SCE_NGS_AT9_DECODE_ERROR, state->current_byte_position_in_buffer,
+        data.invoke_callback(mem, thread, SCE_NGS_AT9_DECODE_ERROR, state->current_byte_position_in_buffer,
             params->buffer_params[state->current_buffer].buffer.address());
 
         scheduler_lock.lock();
@@ -293,7 +293,7 @@ bool Atrac9Module::decode_more_data(KernelState &kern, const MemState &mem, cons
     return true;
 }
 
-bool Atrac9Module::process(KernelState &kern, const MemState &mem, const SceUID thread_id, ModuleData &data, std::unique_lock<std::recursive_mutex> &scheduler_lock, std::unique_lock<std::mutex> &voice_lock) {
+bool Atrac9Module::process(const MemState &mem, GuestThread &thread, ModuleData &data, std::unique_lock<std::recursive_mutex> &scheduler_lock, std::unique_lock<std::mutex> &voice_lock) {
     const SceNgsAT9Params *params = data.get_parameters<SceNgsAT9Params>(mem);
     SceNgsAT9States *state = data.get_state<SceNgsAT9States>();
     Atrac9LogicalState *logical = data.get_logical_state<Atrac9LogicalState>();
@@ -310,7 +310,7 @@ bool Atrac9Module::process(KernelState &kern, const MemState &mem, const SceUID 
     bool is_finished = false;
     // call decode more data until we either have an error or reached end of data
     while (static_cast<int32_t>(logical->decoded_pcm.available_frames()) < data.parent->rack->system->granularity) {
-        if (!decode_more_data(kern, mem, thread_id, data, params, state, logical, runtime, scheduler_lock, voice_lock)) {
+        if (!decode_more_data(mem, thread, data, params, state, logical, runtime, scheduler_lock, voice_lock)) {
             is_finished = true;
             break;
         }

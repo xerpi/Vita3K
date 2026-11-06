@@ -25,7 +25,7 @@ void OutputModule::initialize_voice_data(ModuleData &data) const {
     data.guest_state_data.resize(static_cast<size_t>(data.parent->rack->system->granularity) * sizeof(std::uint16_t) * 2);
 }
 
-bool OutputModule::process(KernelState &kern, const MemState &mem, const SceUID thread_id, ModuleData &data, std::unique_lock<std::recursive_mutex> &scheduler_lock, std::unique_lock<std::mutex> &voice_lock) {
+bool OutputModule::process(const MemState &mem, GuestThread &thread, ModuleData &data, std::unique_lock<std::recursive_mutex> &scheduler_lock, std::unique_lock<std::mutex> &voice_lock) {
     // Merge all voices. This buss manually outputs 2 channels
     std::ranges::fill(data.guest_state_data, 0);
 

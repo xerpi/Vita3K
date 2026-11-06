@@ -33,9 +33,9 @@
         return 0;                                                           \
     })()
 
-#define CALL_EXPORT(name, ...) export_##name(emuenv, thread_id, #name, ##__VA_ARGS__)
+#define CALL_EXPORT(name, ...) export_##name(emuenv, thread, #name, ##__VA_ARGS__)
 
-#define DECL_EXPORT(ret, name, ...) ret export_##name(EmuEnvState &emuenv, SceUID thread_id, const char *export_name, ##__VA_ARGS__)
+#define DECL_EXPORT(ret, name, ...) ret export_##name(EmuEnvState &emuenv, GuestThread &thread, const char *export_name, ##__VA_ARGS__)
 #define EXPORT(ret, name, ...)                                                                \
     DECL_EXPORT(ret, name, ##__VA_ARGS__);                                                    \
     extern const ImportFn import_##name = make_bridge<&export_##name>(#name, &export_##name); \

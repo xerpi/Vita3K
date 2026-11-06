@@ -20,12 +20,12 @@
 
 #include <mutex>
 
-Callback::Callback(const GuestThreadPtr &owner, const std::string &name, Ptr<SceKernelCallbackFunction> cb_func, Ptr<void> pCommon)
-    : thread_id(owner->state.id)
+Callback::Callback(GuestThread &owner, const std::string &name, Ptr<SceKernelCallbackFunction> cb_func, Ptr<void> pCommon)
+    : thread_id(owner.state.id)
     , name(name)
     , cb_func(cb_func)
     , userdata(pCommon)
-    , owner(owner) {}
+    , owner(owner.weak_from_this()) {}
 
 void Callback::notify(SceUID notifier_id, SceInt32 notify_arg) {
     const auto guard = lock();

@@ -34,7 +34,7 @@
 #include <vector>
 
 struct MemState;
-struct KernelState;
+struct GuestThread;
 
 namespace ngs {
 // random number of bytes to make sure nothing bad happens
@@ -209,7 +209,7 @@ struct ModuleData {
         return info.data.cast<T>().get(mem);
     }
 
-    void invoke_callback(KernelState &kern, const MemState &mem, const SceUID thread_id, const uint32_t reason1,
+    void invoke_callback(const MemState &mem, GuestThread &thread, const uint32_t reason1,
         const uint32_t reason2, Address reason_ptr);
 
     SceNgsBufferInfo *lock_params(const MemState &mem);
@@ -227,7 +227,7 @@ public:
     virtual ~Module() = default;
 
     virtual void set_default_preset(const MemState &mem, ModuleData &data) {}
-    virtual bool process(KernelState &kern, const MemState &mem, const SceUID thread_id, ModuleData &data, std::unique_lock<std::recursive_mutex> &scheduler_lock, std::unique_lock<std::mutex> &voice_lock) = 0;
+    virtual bool process(const MemState &mem, GuestThread &thread, ModuleData &data, std::unique_lock<std::recursive_mutex> &scheduler_lock, std::unique_lock<std::mutex> &voice_lock) = 0;
     virtual uint32_t module_id() const { return 0; }
     virtual uint32_t get_buffer_parameter_size() const = 0;
     virtual uint32_t get_guest_state_size() const { return 0; }
@@ -311,7 +311,7 @@ struct Voice {
     SceInt32 parse_params_block(const MemState &mem, const SceNgsModuleParamHeader *header, const SceUInt32 size);
     bool set_preset(const MemState &mem, const SceNgsVoicePreset *preset);
 
-    void invoke_callback(KernelState &kernel, const MemState &mem, const SceUID thread_id, Ptr<void> callback, Ptr<void> user_data,
+    void invoke_callback(const MemState &mem, GuestThread &thread, Ptr<void> callback, Ptr<void> user_data,
         const uint32_t module_id, const uint32_t reason = 0, const uint32_t reason2 = 0, Address reason_ptr = 0);
 };
 

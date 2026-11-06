@@ -368,7 +368,7 @@ EXPORT(SceInt32, sceNgsRackRelease, ngs::Rack *rack, Ptr<void> callback) {
         // but I don't think this is allowed (and if it is I don't know how to prevent this)
         LOG_WARN_ONCE("sceNgsRackRelease called in a synchronous way during a ngs update, contact devs if your game softlocks now.");
 
-        rack->system->voice_scheduler.wait_update_end(*emuenv.kernel.get_thread(thread_id), lock);
+        rack->system->voice_scheduler.wait_update_end(thread, lock);
         ngs::release_rack(emuenv.ngs, emuenv.mem, rack->system, rack);
     } else {
         // destroy rack asynchronously
@@ -434,7 +434,7 @@ EXPORT(SceInt32, sceNgsSystemRelease, ngs::System *system) {
         if (system->voice_scheduler.is_updating) {
             LOG_WARN_ONCE("sceNgsSystemRelease called during a ngs update, contact devs if your game softlocks now.");
 
-            system->voice_scheduler.wait_update_end(*emuenv.kernel.get_thread(thread_id), lock);
+            system->voice_scheduler.wait_update_end(thread, lock);
         }
     }
 
@@ -464,7 +464,7 @@ EXPORT(SceUInt32, sceNgsSystemUpdate, ngs::System *system) {
         return 0;
     }
 
-    system->voice_scheduler.update(emuenv.kernel, emuenv.mem, thread_id);
+    system->voice_scheduler.update(emuenv.mem, thread);
 
     return SCE_NGS_OK;
 }
@@ -870,7 +870,7 @@ EXPORT(SceInt32, sceNgsVoiceKeyOff, ngs::Voice *voice) {
     voice->rack->system->voice_scheduler.off(emuenv.mem, voice);
 
     // call the finish callback, I got no idea what the module id should be in this case
-    voice->invoke_callback(emuenv.kernel, emuenv.mem, thread_id, voice->finished_callback, voice->finished_callback_user_data, 0);
+    voice->invoke_callback(emuenv.mem, thread, voice->finished_callback, voice->finished_callback_user_data, 0);
 
     voice->is_keyed_off = false;
     voice->rack->system->voice_scheduler.stop(emuenv.mem, voice);

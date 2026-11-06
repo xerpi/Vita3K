@@ -94,11 +94,7 @@ void start_sync_thread(EmuEnvState &emuenv) {
     emuenv.display.vblank_thread = std::make_unique<std::thread>(vblank_sync_thread, std::ref(emuenv));
 }
 
-void wait_vblank(DisplayState &display, const GuestThreadPtr &wait_thread, const uint64_t target_vcount, const bool is_cb) {
-    if (!wait_thread) {
-        return;
-    }
-
+void wait_vblank(DisplayState &display, GuestThread &wait_thread, const uint64_t target_vcount, const bool is_cb) {
     std::unique_lock<std::mutex> lock(display.mutex);
 
     if (target_vcount <= display.vblank_count)

@@ -231,7 +231,7 @@ static Address find_import_stub_in_module(EmuEnvState &emuenv, const char *modul
 // Create a hook: patch a stub at target_addr to jump to hook_func,
 // create trampoline + hook_user struct, return UID
 // This is for IMPORT hooks where target_addr points to a 12-byte import stub.
-static SceUID create_hook(EmuEnvState &emuenv, TaihenState *state, SceUID thread_id,
+static SceUID create_hook(EmuEnvState &emuenv, TaihenState *state, GuestThread &thread,
     Address target_addr, Address hook_func) {
     uint32_t *stub = Ptr<uint32_t>(target_addr).get(emuenv.mem);
 
@@ -285,7 +285,7 @@ static SceUID create_hook(EmuEnvState &emuenv, TaihenState *state, SceUID thread
     // Store hook info for release
     auto hook = std::make_unique<TaiHook>();
     hook->uid = state->alloc_uid();
-    hook->pid = thread_id;
+    hook->pid = thread.state.id;
     hook->type = TAI_HOOK_IMPORT;
     hook->target_addr = target_addr;
     hook->saved_bytes.assign(reinterpret_cast<uint8_t *>(trampoline),
@@ -313,7 +313,7 @@ static void write_arm_stub(uint32_t *dest, Address target) {
 // func_addr must include Thumb bit if target is Thumb.
 // func_nid is optional (0 = none), used for export_nids management on release.
 // Returns hook UID on success, TAI_ERROR_HOOK_ERROR if function can't be hooked.
-static SceUID create_inline_hook(EmuEnvState &emuenv, TaihenState *state, SceUID thread_id,
+static SceUID create_inline_hook(EmuEnvState &emuenv, TaihenState *state, GuestThread &thread,
     Address func_addr, Address hook_func, uint32_t func_nid = 0) {
     bool is_thumb = (func_addr & 1) != 0;
     Address code_addr = func_addr & ~1u;
@@ -410,7 +410,7 @@ static SceUID create_inline_hook(EmuEnvState &emuenv, TaihenState *state, SceUID
 
     auto hook = std::make_unique<TaiHook>();
     hook->uid = state->alloc_uid();
-    hook->pid = thread_id;
+    hook->pid = thread.state.id;
     hook->type = TAI_HOOK_INLINE;
     hook->target_addr = code_addr;
     hook->saved_bytes = std::move(saved);
@@ -430,10 +430,10 @@ static SceUID create_inline_hook(EmuEnvState &emuenv, TaihenState *state, SceUID
 
 // Create an EXPORT hook using inline hooking (patch function prologue).
 // Falls back to stub patching if prologue contains PC-relative instructions.
-static SceUID create_export_hook(EmuEnvState &emuenv, TaihenState *state, SceUID thread_id,
+static SceUID create_export_hook(EmuEnvState &emuenv, TaihenState *state, GuestThread &thread,
     uint32_t func_nid, Address original_addr, Address hook_func) {
     // Try inline hook first
-    SceUID uid = create_inline_hook(emuenv, state, thread_id, original_addr, hook_func, func_nid);
+    SceUID uid = create_inline_hook(emuenv, state, thread, original_addr, hook_func, func_nid);
     if (uid >= 0) {
         redirect_export(emuenv.kernel, func_nid, original_addr, hook_func);
         return uid;
@@ -483,7 +483,7 @@ static SceUID create_export_hook(EmuEnvState &emuenv, TaihenState *state, SceUID
 
     auto hook = std::make_unique<TaiHook>();
     hook->uid = state->alloc_uid();
-    hook->pid = thread_id;
+    hook->pid = thread.state.id;
     hook->type = TAI_HOOK_IMPORT; // Fallback uses import-style patching
     hook->target_addr = 0; // No single target
     hook->saved_bytes.clear();
@@ -536,7 +536,7 @@ EXPORT(SceUID, taiHookFunctionExportForUser, Ptr<uint32_t> p_hook, Ptr<void> arg
     SceUID uid;
     {
         const std::lock_guard<std::mutex> guard(emuenv.kernel.export_nids_mutex);
-        uid = create_export_hook(emuenv, state, thread_id, func_nid, export_addr, hook_func);
+        uid = create_export_hook(emuenv, state, thread, func_nid, export_addr, hook_func);
     }
     if (uid < 0)
         return uid;
@@ -577,7 +577,7 @@ EXPORT(SceUID, taiHookFunctionImportForUser, Ptr<uint32_t> p_hook, Ptr<void> arg
 
     const std::lock_guard<std::mutex> lock(state->mutex);
 
-    SceUID uid = create_hook(emuenv, state, thread_id, stub_addr, hook_func);
+    SceUID uid = create_hook(emuenv, state, thread, stub_addr, hook_func);
     if (uid < 0)
         return uid;
 
@@ -629,7 +629,7 @@ EXPORT(SceUID, taiHookFunctionOffsetForUser, Ptr<uint32_t> p_hook, Ptr<void> arg
 
     // Offset hooks use inline hooking (patch function prologue)
     // The offset may include the Thumb bit (bit 0)
-    SceUID uid = create_inline_hook(emuenv, state, thread_id, target_addr, hook_func);
+    SceUID uid = create_inline_hook(emuenv, state, thread, target_addr, hook_func);
     if (uid < 0)
         return uid;
 
@@ -784,7 +784,7 @@ EXPORT(SceUID, taiInjectAbs, Ptr<void> dest, Ptr<const void> src, uint32_t size)
 
     TaiInjection inject;
     inject.uid = state->alloc_uid();
-    inject.pid = thread_id; // approximate
+    inject.pid = thread.state.id; // approximate
     inject.dest = dest.address();
 
     auto dest_ptr = dest.get(emuenv.mem);
@@ -854,7 +854,7 @@ EXPORT(SceUID, taiInjectDataForUser, Ptr<void> args) {
     Ptr<void> dest(dest_addr);
 
     // Delegate to taiInjectAbs logic
-    return export_taiInjectAbs(emuenv, thread_id, export_name, dest, Ptr<const void>(source_addr), size);
+    return export_taiInjectAbs(emuenv, thread, export_name, dest, Ptr<const void>(source_addr), size);
 }
 
 EXPORT(int, taiInjectRelease, SceUID tai_uid) {
@@ -1032,7 +1032,7 @@ EXPORT(SceUID, taiHookFunctionExportForKernel, SceUID pid, Ptr<uint32_t> p_hook,
     SceUID uid;
     {
         const std::lock_guard<std::mutex> guard(emuenv.kernel.export_nids_mutex);
-        uid = create_export_hook(emuenv, state, thread_id, func_nid, export_addr, hook_func.address());
+        uid = create_export_hook(emuenv, state, thread, func_nid, export_addr, hook_func.address());
     }
     if (uid < 0)
         return uid;
@@ -1067,7 +1067,7 @@ EXPORT(SceUID, taiHookFunctionImportForKernel, SceUID pid, Ptr<uint32_t> p_hook,
     }
 
     const std::lock_guard<std::mutex> lock(state->mutex);
-    SceUID uid = create_hook(emuenv, state, thread_id, stub_addr, hook_func.address());
+    SceUID uid = create_hook(emuenv, state, thread, stub_addr, hook_func.address());
     if (uid < 0)
         return uid;
 
@@ -1106,7 +1106,7 @@ EXPORT(SceUID, taiHookFunctionOffsetForKernel, SceUID pid, Ptr<uint32_t> p_hook,
     target_addr &= ~1u; // Clear thumb bit
 
     const std::lock_guard<std::mutex> lock(state->mutex);
-    SceUID uid = create_hook(emuenv, state, thread_id, target_addr, hook_func.address());
+    SceUID uid = create_hook(emuenv, state, thread, target_addr, hook_func.address());
     if (uid < 0)
         return uid;
 
@@ -1120,19 +1120,19 @@ EXPORT(SceUID, taiHookFunctionOffsetForKernel, SceUID pid, Ptr<uint32_t> p_hook,
 EXPORT(int, taiGetModuleInfoForKernel, SceUID pid, const char *module, Ptr<void> info) {
     TRACY_FUNC(taiGetModuleInfoForKernel, pid, module, info);
     // Delegate to the user version — in emulator there's no pid separation
-    return export_taiGetModuleInfo(emuenv, thread_id, export_name, module, info);
+    return export_taiGetModuleInfo(emuenv, thread, export_name, module, info);
 }
 
 EXPORT(int, taiHookReleaseForKernel, SceUID tai_uid, uint32_t hook_ref) {
     TRACY_FUNC(taiHookReleaseForKernel, tai_uid, hook_ref);
     // Delegate to user version — no pid separation in emulator
-    return export_taiHookRelease(emuenv, thread_id, export_name, tai_uid, hook_ref);
+    return export_taiHookRelease(emuenv, thread, export_name, tai_uid, hook_ref);
 }
 
 EXPORT(SceUID, taiInjectAbsForKernel, SceUID pid, Ptr<void> dest, Ptr<const void> src, uint32_t size) {
     TRACY_FUNC(taiInjectAbsForKernel, pid, dest, src, size);
     // Delegate — no pid separation in emulator
-    return export_taiInjectAbs(emuenv, thread_id, export_name, dest, src, size);
+    return export_taiInjectAbs(emuenv, thread, export_name, dest, src, size);
 }
 
 EXPORT(SceUID, taiInjectDataForKernel, SceUID pid, SceUID modid, int segidx, uint32_t offset,
@@ -1158,12 +1158,12 @@ EXPORT(SceUID, taiInjectDataForKernel, SceUID pid, SceUID modid, int segidx, uin
     }
     Ptr<void> dest(dest_addr);
 
-    return export_taiInjectAbs(emuenv, thread_id, export_name, dest, Ptr<const void>(data.address()), size);
+    return export_taiInjectAbs(emuenv, thread, export_name, dest, Ptr<const void>(data.address()), size);
 }
 
 EXPORT(int, taiInjectReleaseForKernel, SceUID tai_uid) {
     TRACY_FUNC(taiInjectReleaseForKernel, tai_uid);
-    return export_taiInjectRelease(emuenv, thread_id, export_name, tai_uid);
+    return export_taiInjectRelease(emuenv, thread, export_name, tai_uid);
 }
 
 EXPORT(int, taiLoadPluginsForTitleForKernel, SceUID pid, const char *titleid, int flags) {
@@ -1174,7 +1174,7 @@ EXPORT(int, taiLoadPluginsForTitleForKernel, SceUID pid, const char *titleid, in
 
 EXPORT(int, taiReloadConfigForKernel, int schedule, int load_kernel) {
     TRACY_FUNC(taiReloadConfigForKernel, schedule, load_kernel);
-    return export_taiReloadConfig(emuenv, thread_id, export_name);
+    return export_taiReloadConfig(emuenv, thread, export_name);
 }
 
 // ==================== taihenModuleUtils library ====================

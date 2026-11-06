@@ -148,7 +148,7 @@ static void log_import_call(char emulation_level, uint32_t nid, SceUID thread_id
     }
 }
 
-CallResult call_import(EmuEnvState &emuenv, CPUState &cpu, uint32_t nid, SceUID thread_id) {
+CallResult call_import(EmuEnvState &emuenv, GuestThread &thread, uint32_t nid) {
     // HLE - call our C++ function
     if (emuenv.kernel.debugger.watch_import_calls) {
         const std::unordered_set<uint32_t> hle_nid_blacklist = {
@@ -156,16 +156,15 @@ CallResult call_import(EmuEnvState &emuenv, CPUState &cpu, uint32_t nid, SceUID 
             0x46E7BE7B, // sceKernelLockLwMutex
             0x91FA6614, // sceKernelUnlockLwMutex
         };
-        auto lr = cpu.get_lr();
-        log_import_call('H', nid, thread_id, hle_nid_blacklist, lr);
+        auto lr = thread.cpu->get_lr();
+        log_import_call('H', nid, thread.state.id, hle_nid_blacklist, lr);
     }
     const ImportFn *fn = resolve_import(nid);
     if (fn)
-        return (*fn)(emuenv, cpu, thread_id);
+        return (*fn)(emuenv, thread);
 
     if (!emuenv.missing_nids.contains(nid) || LOG_UNK_NIDS_ALWAYS) {
-        const GuestThreadPtr thread = emuenv.kernel.get_thread(thread_id);
-        LOG_ERROR("Import function for NID {} not found (thread name: {}, thread ID: {})", log_hex(nid), thread->state.name, thread_id);
+        LOG_ERROR("Import function for NID {} not found (thread name: {}, thread ID: {})", log_hex(nid), thread.state.name, thread.state.id);
         if (!LOG_UNK_NIDS_ALWAYS)
             emuenv.missing_nids.insert(nid);
     }

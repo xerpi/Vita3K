@@ -83,7 +83,7 @@ EXPORT(int, ksceKernelCreateMutex, const char *name, SceUInt attr, int init_coun
     if (const SceInt32 error = Mutex::check_create(name, attr, init_count, true))
         return RET_ERROR(error);
 
-    const auto mutex = std::make_shared<HeavyMutex>(attr, name, init_count, emuenv.kernel.get_thread(thread_id));
+    const auto mutex = std::make_shared<HeavyMutex>(attr, name, init_count, thread);
     return emuenv.kernel.objects.add(mutex, emuenv.kernel.get_next_uid());
 }
 
@@ -96,10 +96,10 @@ EXPORT(int, ksceKernelCreateSimpleEvent) {
 }
 
 EXPORT(SceUID, ksceKernelCreateThread, const char *name, SceKernelThreadEntry entry, int initPriority, SceSize stackSize, SceUInt attr, int cpuAffinityMask, void *pOptParam) {
-    const GuestThreadPtr thread = emuenv.kernel.create_thread(emuenv.mem, name, entry.cast<void>(), initPriority, cpuAffinityMask, stackSize, 0);
-    if (!thread)
+    const GuestThreadPtr target = emuenv.kernel.create_thread(emuenv.mem, name, entry.cast<void>(), initPriority, cpuAffinityMask, stackSize, 0);
+    if (!target)
         return RET_ERROR(SCE_KERNEL_ERROR_ERROR);
-    return thread->state.id;
+    return target->state.id;
 }
 
 EXPORT(int, ksceKernelDeleteCallback) {

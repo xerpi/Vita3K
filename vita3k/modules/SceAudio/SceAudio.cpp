@@ -201,10 +201,7 @@ EXPORT(int, sceAudioOutOutput, int port, const void *buf) {
     if (!buf)
         return 0;
 
-    const GuestThreadPtr thread = emuenv.kernel.get_thread(thread_id);
-    if (!thread)
-        return RET_ERROR(SCE_AUDIO_OUT_ERROR_INVALID_PORT);
-    const GuestThread::HostWait waiting(*thread);
+    const GuestThread::HostWait waiting(thread);
     emuenv.audio.audio_output(*prt, buf);
     return prt->len;
 }

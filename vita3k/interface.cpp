@@ -468,8 +468,8 @@ static void load_cheats(EmuEnvState &emuenv, const SceKernelModuleInfo &module_i
 }
 
 static ExitCode load_app_impl(SceUID &main_module_id, EmuEnvState &emuenv, const AppLaunchRequest &launch_request) {
-    const auto call_import = [&emuenv](CPUState &cpu, uint32_t nid, SceUID thread_id) {
-        return ::call_import(emuenv, cpu, nid, thread_id);
+    const auto call_import = [&emuenv](GuestThread &thread, uint32_t nid) {
+        return ::call_import(emuenv, thread, nid);
     };
     emuenv.kernel.process_exit_callback = [&emuenv](int res, std::optional<AppLaunchRequest> relaunch) {
         emuenv.post_app_launch_request(relaunch.value_or(AppLaunchRequest{ .reason = AppLaunchReason::ProcessExit, .exit_code = res }));

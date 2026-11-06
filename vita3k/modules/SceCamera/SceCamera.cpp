@@ -245,7 +245,7 @@ EXPORT(int, sceCameraIsActive, SceCameraDevice devnum) {
     return 1;
 }
 
-static int camera_get_attribute(EmuEnvState &emuenv, SceUID thread_id, const char *export_name, SceCameraDevice devnum, CameraAttributes attribute, int *pValue) {
+static int camera_get_attribute(EmuEnvState &emuenv, const char *export_name, SceCameraDevice devnum, CameraAttributes attribute, int *pValue) {
     if (emuenv.cfg.pstv_mode)
         return RET_ERROR(SCE_CAMERA_ERROR_NOT_MOUNTED);
     if (devnum != SCE_CAMERA_DEVICE_BACK && devnum != SCE_CAMERA_DEVICE_FRONT)
@@ -262,7 +262,7 @@ static int camera_get_attribute(EmuEnvState &emuenv, SceUID thread_id, const cha
     return STUBBED("Default value");
 }
 
-static int camera_set_attribute(EmuEnvState &emuenv, SceUID thread_id, const char *export_name, SceCameraDevice devnum, CameraAttributes attribute, int value) {
+static int camera_set_attribute(EmuEnvState &emuenv, const char *export_name, SceCameraDevice devnum, CameraAttributes attribute, int value) {
     if (emuenv.cfg.pstv_mode)
         return RET_ERROR(SCE_CAMERA_ERROR_NOT_MOUNTED);
     if (devnum != SCE_CAMERA_DEVICE_BACK && devnum != SCE_CAMERA_DEVICE_FRONT)
@@ -279,102 +279,102 @@ static int camera_set_attribute(EmuEnvState &emuenv, SceUID thread_id, const cha
 
 EXPORT(int, sceCameraGetSaturation, SceCameraDevice devnum, int *pValue) {
     TRACY_FUNC(sceCameraGetSaturation, devnum, pValue);
-    return camera_get_attribute(emuenv, thread_id, "sceCameraGetSaturation", devnum, CameraAttributes::Saturation, pValue);
+    return camera_get_attribute(emuenv, "sceCameraGetSaturation", devnum, CameraAttributes::Saturation, pValue);
 }
 
 EXPORT(int, sceCameraSetSaturation, SceCameraDevice devnum, int value) {
     TRACY_FUNC(sceCameraSetSaturation, devnum, value);
-    return camera_set_attribute(emuenv, thread_id, "sceCameraSetSaturation", devnum, CameraAttributes::Saturation, value);
+    return camera_set_attribute(emuenv, "sceCameraSetSaturation", devnum, CameraAttributes::Saturation, value);
 }
 
 EXPORT(int, sceCameraGetBrightness, SceCameraDevice devnum, int *pValue) {
     TRACY_FUNC(sceCameraGetBrightness, devnum, pValue);
-    return camera_get_attribute(emuenv, thread_id, "sceCameraGetBrightness", devnum, CameraAttributes::Brightness, pValue);
+    return camera_get_attribute(emuenv, "sceCameraGetBrightness", devnum, CameraAttributes::Brightness, pValue);
 }
 
 EXPORT(int, sceCameraSetBrightness, SceCameraDevice devnum, int value) {
     TRACY_FUNC(sceCameraSetBrightness, devnum, value);
-    return camera_set_attribute(emuenv, thread_id, "sceCameraSetBrightness", devnum, CameraAttributes::Brightness, value);
+    return camera_set_attribute(emuenv, "sceCameraSetBrightness", devnum, CameraAttributes::Brightness, value);
 }
 
 EXPORT(int, sceCameraGetContrast, SceCameraDevice devnum, int *pValue) {
     TRACY_FUNC(sceCameraGetContrast, devnum, pValue);
-    return camera_get_attribute(emuenv, thread_id, "sceCameraGetContrast", devnum, CameraAttributes::Contrast, pValue);
+    return camera_get_attribute(emuenv, "sceCameraGetContrast", devnum, CameraAttributes::Contrast, pValue);
 }
 
 EXPORT(int, sceCameraSetContrast, SceCameraDevice devnum, int value) {
     TRACY_FUNC(sceCameraSetContrast, devnum, value);
-    return camera_set_attribute(emuenv, thread_id, "sceCameraSetContrast", devnum, CameraAttributes::Contrast, value);
+    return camera_set_attribute(emuenv, "sceCameraSetContrast", devnum, CameraAttributes::Contrast, value);
 }
 
 EXPORT(int, sceCameraGetSharpness, SceCameraDevice devnum, int *pValue) {
     TRACY_FUNC(sceCameraGetSharpness, devnum, pValue);
-    return camera_get_attribute(emuenv, thread_id, "sceCameraGetSharpness", devnum, CameraAttributes::Sharpness, pValue);
+    return camera_get_attribute(emuenv, "sceCameraGetSharpness", devnum, CameraAttributes::Sharpness, pValue);
 }
 
 EXPORT(int, sceCameraSetSharpness, SceCameraDevice devnum, int value) {
     TRACY_FUNC(sceCameraSetSharpness, devnum, value);
-    return camera_set_attribute(emuenv, thread_id, "sceCameraSetSharpness", devnum, CameraAttributes::Sharpness, value);
+    return camera_set_attribute(emuenv, "sceCameraSetSharpness", devnum, CameraAttributes::Sharpness, value);
 }
 
 EXPORT(int, sceCameraGetReverse, SceCameraDevice devnum, int *pValue) {
     TRACY_FUNC(sceCameraGetReverse, devnum, pValue);
-    return camera_get_attribute(emuenv, thread_id, "sceCameraGetReverse", devnum, CameraAttributes::Reverse, pValue);
+    return camera_get_attribute(emuenv, "sceCameraGetReverse", devnum, CameraAttributes::Reverse, pValue);
 }
 
 EXPORT(int, sceCameraSetReverse, SceCameraDevice devnum, int value) {
     TRACY_FUNC(sceCameraSetReverse, devnum, value);
-    return camera_set_attribute(emuenv, thread_id, "sceCameraSetReverse", devnum, CameraAttributes::Reverse, value);
+    return camera_set_attribute(emuenv, "sceCameraSetReverse", devnum, CameraAttributes::Reverse, value);
 }
 
 EXPORT(int, sceCameraGetEffect, SceCameraDevice devnum, int *pValue) {
     TRACY_FUNC(sceCameraGetEffect, devnum, pValue);
-    return camera_get_attribute(emuenv, thread_id, "sceCameraGetEffect", devnum, CameraAttributes::Effect, pValue);
+    return camera_get_attribute(emuenv, "sceCameraGetEffect", devnum, CameraAttributes::Effect, pValue);
 }
 
 EXPORT(int, sceCameraSetEffect, SceCameraDevice devnum, int value) {
     TRACY_FUNC(sceCameraSetEffect, devnum, value);
-    return camera_set_attribute(emuenv, thread_id, "sceCameraSetEffect", devnum, CameraAttributes::Effect, value);
+    return camera_set_attribute(emuenv, "sceCameraSetEffect", devnum, CameraAttributes::Effect, value);
 }
 
 EXPORT(int, sceCameraGetEV, SceCameraDevice devnum, int *pValue) {
     TRACY_FUNC(sceCameraGetEV, devnum, pValue);
-    return camera_get_attribute(emuenv, thread_id, "sceCameraGetEV", devnum, CameraAttributes::EV, pValue);
+    return camera_get_attribute(emuenv, "sceCameraGetEV", devnum, CameraAttributes::EV, pValue);
 }
 
 EXPORT(int, sceCameraSetEV, SceCameraDevice devnum, int value) {
     TRACY_FUNC(sceCameraSetEV, devnum, value);
-    return camera_set_attribute(emuenv, thread_id, "sceCameraSetEV", devnum, CameraAttributes::EV, value);
+    return camera_set_attribute(emuenv, "sceCameraSetEV", devnum, CameraAttributes::EV, value);
 }
 
 EXPORT(int, sceCameraGetZoom, SceCameraDevice devnum, int *pValue) {
     TRACY_FUNC(sceCameraGetZoom, devnum, pValue);
-    return camera_get_attribute(emuenv, thread_id, "sceCameraGetZoom", devnum, CameraAttributes::Zoom, pValue);
+    return camera_get_attribute(emuenv, "sceCameraGetZoom", devnum, CameraAttributes::Zoom, pValue);
 }
 
 EXPORT(int, sceCameraSetZoom, SceCameraDevice devnum, int value) {
     TRACY_FUNC(sceCameraSetZoom, devnum, value);
-    return camera_set_attribute(emuenv, thread_id, "sceCameraSetZoom", devnum, CameraAttributes::Zoom, value);
+    return camera_set_attribute(emuenv, "sceCameraSetZoom", devnum, CameraAttributes::Zoom, value);
 }
 
 EXPORT(int, sceCameraGetAntiFlicker, SceCameraDevice devnum, int *pValue) {
     TRACY_FUNC(sceCameraGetAntiFlicker, devnum, pValue);
-    return camera_get_attribute(emuenv, thread_id, "sceCameraGetAntiFlicker", devnum, CameraAttributes::AntiFlicker, pValue);
+    return camera_get_attribute(emuenv, "sceCameraGetAntiFlicker", devnum, CameraAttributes::AntiFlicker, pValue);
 }
 
 EXPORT(int, sceCameraSetAntiFlicker, SceCameraDevice devnum, int value) {
     TRACY_FUNC(sceCameraSetAntiFlicker, devnum, value);
-    return camera_set_attribute(emuenv, thread_id, "sceCameraSetAntiFlicker", devnum, CameraAttributes::AntiFlicker, value);
+    return camera_set_attribute(emuenv, "sceCameraSetAntiFlicker", devnum, CameraAttributes::AntiFlicker, value);
 }
 
 EXPORT(int, sceCameraGetISO, SceCameraDevice devnum, int *pValue) {
     TRACY_FUNC(sceCameraGetISO, devnum, pValue);
-    return camera_get_attribute(emuenv, thread_id, "sceCameraGetISO", devnum, CameraAttributes::ISO, pValue);
+    return camera_get_attribute(emuenv, "sceCameraGetISO", devnum, CameraAttributes::ISO, pValue);
 }
 
 EXPORT(int, sceCameraSetISO, SceCameraDevice devnum, int value) {
     TRACY_FUNC(sceCameraSetISO, devnum, value);
-    return camera_set_attribute(emuenv, thread_id, "sceCameraSetISO", devnum, CameraAttributes::ISO, value);
+    return camera_set_attribute(emuenv, "sceCameraSetISO", devnum, CameraAttributes::ISO, value);
 }
 
 EXPORT(int, sceCameraGetGain, SceCameraDevice devnum, int *pValue) {
@@ -397,82 +397,82 @@ EXPORT(int, sceCameraSetGain, SceCameraDevice devnum, int value) {
 
 EXPORT(int, sceCameraGetWhiteBalance, SceCameraDevice devnum, int *pValue) {
     TRACY_FUNC(sceCameraGetWhiteBalance, devnum, pValue);
-    return camera_get_attribute(emuenv, thread_id, "sceCameraGetWhiteBalance", devnum, CameraAttributes::WhiteBalance, pValue);
+    return camera_get_attribute(emuenv, "sceCameraGetWhiteBalance", devnum, CameraAttributes::WhiteBalance, pValue);
 }
 
 EXPORT(int, sceCameraSetWhiteBalance, SceCameraDevice devnum, int value) {
     TRACY_FUNC(sceCameraSetWhiteBalance, devnum, value);
-    return camera_set_attribute(emuenv, thread_id, "sceCameraSetWhiteBalance", devnum, CameraAttributes::WhiteBalance, value);
+    return camera_set_attribute(emuenv, "sceCameraSetWhiteBalance", devnum, CameraAttributes::WhiteBalance, value);
 }
 
 EXPORT(int, sceCameraGetBacklight, SceCameraDevice devnum, int *pValue) {
     TRACY_FUNC(sceCameraGetBacklight, devnum, pValue);
-    return camera_get_attribute(emuenv, thread_id, "sceCameraGetBacklight", devnum, CameraAttributes::Backlight, pValue);
+    return camera_get_attribute(emuenv, "sceCameraGetBacklight", devnum, CameraAttributes::Backlight, pValue);
 }
 
 EXPORT(int, sceCameraSetBacklight, SceCameraDevice devnum, int value) {
     TRACY_FUNC(sceCameraSetBacklight, devnum, value);
-    return camera_set_attribute(emuenv, thread_id, "sceCameraSetBacklight", devnum, CameraAttributes::Backlight, value);
+    return camera_set_attribute(emuenv, "sceCameraSetBacklight", devnum, CameraAttributes::Backlight, value);
 }
 
 EXPORT(int, sceCameraGetNightmode, SceCameraDevice devnum, int *pValue) {
     TRACY_FUNC(sceCameraGetNightmode, devnum, pValue);
-    return camera_get_attribute(emuenv, thread_id, "sceCameraGetNightmode", devnum, CameraAttributes::Nightmode, pValue);
+    return camera_get_attribute(emuenv, "sceCameraGetNightmode", devnum, CameraAttributes::Nightmode, pValue);
 }
 
 EXPORT(int, sceCameraSetNightmode, SceCameraDevice devnum, int value) {
     TRACY_FUNC(sceCameraSetNightmode, devnum, value);
-    return camera_set_attribute(emuenv, thread_id, "sceCameraSetNightmode", devnum, CameraAttributes::Nightmode, value);
+    return camera_set_attribute(emuenv, "sceCameraSetNightmode", devnum, CameraAttributes::Nightmode, value);
 }
 
 EXPORT(int, sceCameraGetExposureCeiling, SceCameraDevice devnum, int *pValue) {
     TRACY_FUNC(sceCameraGetExposureCeiling, devnum, pValue);
-    return camera_get_attribute(emuenv, thread_id, "sceCameraGetExposureCeiling", devnum, CameraAttributes::ExposureCeiling, pValue);
+    return camera_get_attribute(emuenv, "sceCameraGetExposureCeiling", devnum, CameraAttributes::ExposureCeiling, pValue);
 }
 
 EXPORT(int, sceCameraSetExposureCeiling, SceCameraDevice devnum, int value) {
     TRACY_FUNC(sceCameraSetExposureCeiling, devnum, value);
-    return camera_set_attribute(emuenv, thread_id, "sceCameraSetExposureCeiling", devnum, CameraAttributes::ExposureCeiling, value);
+    return camera_set_attribute(emuenv, "sceCameraSetExposureCeiling", devnum, CameraAttributes::ExposureCeiling, value);
 }
 
 EXPORT(int, sceCameraGetAutoControlHold, SceCameraDevice devnum, int *pValue) {
     TRACY_FUNC(sceCameraGetAutoControlHold, devnum, pValue);
-    return camera_get_attribute(emuenv, thread_id, "sceCameraGetAutoControlHold", devnum, CameraAttributes::AutoControlHold, pValue);
+    return camera_get_attribute(emuenv, "sceCameraGetAutoControlHold", devnum, CameraAttributes::AutoControlHold, pValue);
 }
 
 EXPORT(int, sceCameraSetAutoControlHold, SceCameraDevice devnum, int value) {
     TRACY_FUNC(sceCameraSetAutoControlHold, devnum, value);
-    return camera_set_attribute(emuenv, thread_id, "sceCameraSetAutoControlHold", devnum, CameraAttributes::AutoControlHold, value);
+    return camera_set_attribute(emuenv, "sceCameraSetAutoControlHold", devnum, CameraAttributes::AutoControlHold, value);
 }
 
 EXPORT(int, sceCameraGetImageQuality, SceCameraDevice devnum, int *pValue) {
     TRACY_FUNC(sceCameraGetImageQuality, devnum, pValue);
-    return camera_get_attribute(emuenv, thread_id, "sceCameraGetImageQuality", devnum, CameraAttributes::ImageQuality, pValue);
+    return camera_get_attribute(emuenv, "sceCameraGetImageQuality", devnum, CameraAttributes::ImageQuality, pValue);
 }
 
 EXPORT(int, sceCameraSetImageQuality, SceCameraDevice devnum, int value) {
     TRACY_FUNC(sceCameraSetImageQuality, devnum, value);
-    return camera_set_attribute(emuenv, thread_id, "sceCameraSetImageQuality", devnum, CameraAttributes::ImageQuality, value);
+    return camera_set_attribute(emuenv, "sceCameraSetImageQuality", devnum, CameraAttributes::ImageQuality, value);
 }
 
 EXPORT(int, sceCameraGetNoiseReduction, SceCameraDevice devnum, int *pValue) {
     TRACY_FUNC(sceCameraGetNoiseReduction, devnum, pValue);
-    return camera_get_attribute(emuenv, thread_id, "sceCameraGetNoiseReduction", devnum, CameraAttributes::NoiseReduction, pValue);
+    return camera_get_attribute(emuenv, "sceCameraGetNoiseReduction", devnum, CameraAttributes::NoiseReduction, pValue);
 }
 
 EXPORT(int, sceCameraSetNoiseReduction, SceCameraDevice devnum, int value) {
     TRACY_FUNC(sceCameraSetNoiseReduction, devnum, value);
-    return camera_set_attribute(emuenv, thread_id, "sceCameraSetNoiseReduction", devnum, CameraAttributes::NoiseReduction, value);
+    return camera_set_attribute(emuenv, "sceCameraSetNoiseReduction", devnum, CameraAttributes::NoiseReduction, value);
 }
 
 EXPORT(int, sceCameraGetSharpnessOff, SceCameraDevice devnum, int *pValue) {
     TRACY_FUNC(sceCameraGetSharpnessOff, devnum, pValue);
-    return camera_get_attribute(emuenv, thread_id, "sceCameraGetSharpnessOff", devnum, CameraAttributes::SharpnessOff, pValue);
+    return camera_get_attribute(emuenv, "sceCameraGetSharpnessOff", devnum, CameraAttributes::SharpnessOff, pValue);
 }
 
 EXPORT(int, sceCameraSetSharpnessOff, SceCameraDevice devnum, int value) {
     TRACY_FUNC(sceCameraSetSharpnessOff, devnum, value);
-    return camera_set_attribute(emuenv, thread_id, "sceCameraSetSharpnessOff", devnum, CameraAttributes::SharpnessOff, value);
+    return camera_set_attribute(emuenv, "sceCameraSetSharpnessOff", devnum, CameraAttributes::SharpnessOff, value);
 }
 
 EXPORT(int, sceCameraGetDeviceLocation, SceCameraDevice devnum, SceFVector3 *pLocation) {

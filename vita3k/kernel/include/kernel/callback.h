@@ -37,7 +37,7 @@ public:
         SceInt32 arg;
     };
 
-    Callback(const GuestThreadPtr &owner, const std::string &name, Ptr<SceKernelCallbackFunction> cb_func, Ptr<void> pCommon);
+    Callback(GuestThread &owner, const std::string &name, Ptr<SceKernelCallbackFunction> cb_func, Ptr<void> pCommon);
 
     void notify(SceUID notifier_id, SceInt32 notify_arg);
     // Notifies from an event, without notification argument

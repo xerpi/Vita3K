@@ -93,10 +93,10 @@ private:
     static SwrContext *swr_stereo;
 
     // return false if data could not be decoded (error or no more data available)
-    bool decode_more_data(KernelState &kern, const MemState &mem, const SceUID thread_id, ModuleData &data, const SceNgsAT9Params *params, SceNgsAT9States *state, Atrac9LogicalState *logical, Atrac9RuntimeState *runtime, std::unique_lock<std::recursive_mutex> &scheduler_lock, std::unique_lock<std::mutex> &voice_lock);
+    bool decode_more_data(const MemState &mem, GuestThread &thread, ModuleData &data, const SceNgsAT9Params *params, SceNgsAT9States *state, Atrac9LogicalState *logical, Atrac9RuntimeState *runtime, std::unique_lock<std::recursive_mutex> &scheduler_lock, std::unique_lock<std::mutex> &voice_lock);
 
 public:
-    bool process(KernelState &kern, const MemState &mem, const SceUID thread_id, ModuleData &data, std::unique_lock<std::recursive_mutex> &scheduler_lock, std::unique_lock<std::mutex> &voice_lock) override;
+    bool process(const MemState &mem, GuestThread &thread, ModuleData &data, std::unique_lock<std::recursive_mutex> &scheduler_lock, std::unique_lock<std::mutex> &voice_lock) override;
     uint32_t module_id() const override { return 0x5CAA; }
     uint32_t get_guest_state_size() const override { return sizeof(SceNgsAT9States); }
     std::unique_ptr<ModuleLogicalState> create_logical_state() const override;

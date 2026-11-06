@@ -18,7 +18,6 @@
 #include <ngs/scheduler.h>
 #include <ngs/system.h>
 
-#include <kernel/state.h>
 #include <kernel/thread/guest_thread.h>
 
 #include <algorithm>
@@ -123,7 +122,7 @@ bool VoiceScheduler::off(const MemState &mem, Voice *voice) {
     return true;
 }
 
-void VoiceScheduler::update(KernelState &kern, const MemState &mem, const SceUID thread_id) {
+void VoiceScheduler::update(const MemState &mem, GuestThread &thread) {
     std::unique_lock<std::recursive_mutex> scheduler_lock(mutex);
     is_updating = true;
 
@@ -145,7 +144,7 @@ void VoiceScheduler::update(KernelState &kern, const MemState &mem, const SceUID
 
         for (size_t i = 0; i < voice->rack->modules.size(); i++) {
             if (voice->rack->modules[i]) {
-                if (voice->rack->modules[i]->process(kern, mem, thread_id, voice->datas[i], scheduler_lock, voice_lock)) {
+                if (voice->rack->modules[i]->process(mem, thread, voice->datas[i], scheduler_lock, voice_lock)) {
                     finished = true;
                     finished_module = voice->rack->modules[i]->module_id();
                 }
@@ -157,7 +156,7 @@ void VoiceScheduler::update(KernelState &kern, const MemState &mem, const SceUID
             if (voice->finished_callback) {
                 voice_lock.unlock();
                 scheduler_lock.unlock();
-                voice->invoke_callback(kern, mem, thread_id, voice->finished_callback, voice->finished_callback_user_data, finished_module);
+                voice->invoke_callback(mem, thread, voice->finished_callback, voice->finished_callback_user_data, finished_module);
                 scheduler_lock.lock();
                 voice_lock.lock();
             }
@@ -183,7 +182,7 @@ void VoiceScheduler::update(KernelState &kern, const MemState &mem, const SceUID
             release_rack(*op.release_data.state, mem, op.system, op.release_data.rack);
             // Without the lock, so another thread can use the scheduler during the callback
             scheduler_lock.unlock();
-            kern.get_thread(thread_id)->call_guest(op.release_data.callback, { Ptr<void>(op.release_data.rack, mem).address() });
+            thread.call_guest(op.release_data.callback, { Ptr<void>(op.release_data.rack, mem).address() });
             scheduler_lock.lock();
             break;
         }

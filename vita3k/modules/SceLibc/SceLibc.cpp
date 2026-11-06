@@ -253,7 +253,7 @@ EXPORT(int, _sceLdTlsUnregisterModuleInfo) {
 EXPORT(Ptr<int>, _sceLibcErrnoLoc) {
     TRACY_FUNC(_sceLibcErrnoLoc);
     // tls key from disasmed source
-    auto res = emuenv.kernel.get_thread_tls_addr(emuenv.mem, thread_id, TLS_LIBC_ERRNO);
+    auto res = thread.state.tls_addr(TLS_LIBC_ERRNO);
     return res.cast<int>();
 }
 
@@ -966,13 +966,7 @@ EXPORT(int, printf, const char *format, module::vargs args) {
     // TODO: add args to tracy func
     std::vector<char> buffer(1024);
 
-    const GuestThreadPtr thread = emuenv.kernel.get_thread(thread_id);
-
-    if (!thread) {
-        return SCE_KERNEL_ERROR_UNKNOWN_THREAD_ID;
-    }
-
-    const int result = utils::snprintf(buffer.data(), buffer.size(), format, *(thread->cpu), emuenv.mem, args);
+    const int result = utils::snprintf(buffer.data(), buffer.size(), format, *(thread.cpu), emuenv.mem, args);
 
     if (!result) {
         return SCE_KERNEL_ERROR_INVALID_ARGUMENT;
@@ -1127,8 +1121,7 @@ EXPORT(int, snprintf, char *s, size_t n, const char *format, module::vargs args)
     // TODO: add args to tracy func
     TRACY_FUNC(snprintf, s, n, format);
 
-    const GuestThreadPtr thread = emuenv.kernel.get_thread(thread_id);
-    return utils::snprintf(s, n, format, *(thread->cpu), emuenv.mem, args);
+    return utils::snprintf(s, n, format, *(thread.cpu), emuenv.mem, args);
 }
 
 EXPORT(int, snprintf_s) {

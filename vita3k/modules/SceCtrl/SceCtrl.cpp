@@ -119,62 +119,62 @@ EXPORT(bool, sceCtrlIsMultiControllerSupported) {
 
 EXPORT(int, sceCtrlPeekBufferNegative, int port, SceCtrlData *pad_data, int count) {
     TRACY_FUNC(sceCtrlPeekBufferNegative, port, pad_data, count);
-    return ctrl_get(thread_id, emuenv, port, reinterpret_cast<SceCtrlData2 *>(pad_data), count, true, true, false, false);
+    return ctrl_get(thread, emuenv, port, reinterpret_cast<SceCtrlData2 *>(pad_data), count, true, true, false, false);
 }
 
 EXPORT(int, sceCtrlPeekBufferNegative2, int port, SceCtrlData2 *pad_data, int count) {
     TRACY_FUNC(sceCtrlPeekBufferNegative2, port, pad_data, count);
-    return ctrl_get(thread_id, emuenv, port, pad_data, count, true, true, true, false);
+    return ctrl_get(thread, emuenv, port, pad_data, count, true, true, true, false);
 }
 
 EXPORT(int, sceCtrlPeekBufferPositive, int port, SceCtrlData *pad_data, int count) {
     TRACY_FUNC(sceCtrlPeekBufferPositive, port, pad_data, count);
-    return ctrl_get(thread_id, emuenv, port, reinterpret_cast<SceCtrlData2 *>(pad_data), count, false, true, false, false);
+    return ctrl_get(thread, emuenv, port, reinterpret_cast<SceCtrlData2 *>(pad_data), count, false, true, false, false);
 }
 
 EXPORT(int, sceCtrlPeekBufferPositive2, int port, SceCtrlData2 *pad_data, int count) {
     TRACY_FUNC(sceCtrlPeekBufferPositive2, port, pad_data, count);
-    return ctrl_get(thread_id, emuenv, port, pad_data, count, false, true, true, false);
+    return ctrl_get(thread, emuenv, port, pad_data, count, false, true, true, false);
 }
 
 EXPORT(int, sceCtrlPeekBufferPositiveExt, int port, SceCtrlData *pad_data, int count) {
     TRACY_FUNC(sceCtrlPeekBufferPositiveExt, port, pad_data, count);
-    return ctrl_get(thread_id, emuenv, port, reinterpret_cast<SceCtrlData2 *>(pad_data), count, false, true, false, true);
+    return ctrl_get(thread, emuenv, port, reinterpret_cast<SceCtrlData2 *>(pad_data), count, false, true, false, true);
 }
 
 EXPORT(int, sceCtrlPeekBufferPositiveExt2, int port, SceCtrlData2 *pad_data, int count) {
     TRACY_FUNC(sceCtrlPeekBufferPositiveExt2, port, pad_data, count);
-    return ctrl_get(thread_id, emuenv, port, pad_data, count, false, true, true, true);
+    return ctrl_get(thread, emuenv, port, pad_data, count, false, true, true, true);
 }
 
 EXPORT(int, sceCtrlReadBufferNegative, int port, SceCtrlData *pad_data, int count) {
     TRACY_FUNC(sceCtrlReadBufferNegative, port, pad_data, count);
-    return ctrl_get(thread_id, emuenv, port, reinterpret_cast<SceCtrlData2 *>(pad_data), count, true, false, false, false);
+    return ctrl_get(thread, emuenv, port, reinterpret_cast<SceCtrlData2 *>(pad_data), count, true, false, false, false);
 }
 
 EXPORT(int, sceCtrlReadBufferNegative2, int port, SceCtrlData2 *pad_data, int count) {
     TRACY_FUNC(sceCtrlReadBufferNegative2, port, pad_data, count);
-    return ctrl_get(thread_id, emuenv, port, pad_data, count, true, false, true, false);
+    return ctrl_get(thread, emuenv, port, pad_data, count, true, false, true, false);
 }
 
 EXPORT(int, sceCtrlReadBufferPositive, int port, SceCtrlData *pad_data, int count) {
     TRACY_FUNC(sceCtrlReadBufferPositive, port, pad_data, count);
-    return ctrl_get(thread_id, emuenv, port, reinterpret_cast<SceCtrlData2 *>(pad_data), count, false, false, false, false);
+    return ctrl_get(thread, emuenv, port, reinterpret_cast<SceCtrlData2 *>(pad_data), count, false, false, false, false);
 }
 
 EXPORT(int, sceCtrlReadBufferPositive2, int port, SceCtrlData2 *pad_data, int count) {
     TRACY_FUNC(sceCtrlReadBufferPositive2, port, pad_data, count);
-    return ctrl_get(thread_id, emuenv, port, pad_data, count, false, false, true, false);
+    return ctrl_get(thread, emuenv, port, pad_data, count, false, false, true, false);
 }
 
 EXPORT(int, sceCtrlReadBufferPositiveExt, int port, SceCtrlData *pad_data, int count) {
     TRACY_FUNC(sceCtrlReadBufferPositiveExt, port, pad_data, count);
-    return ctrl_get(thread_id, emuenv, port, reinterpret_cast<SceCtrlData2 *>(pad_data), count, false, false, false, true);
+    return ctrl_get(thread, emuenv, port, reinterpret_cast<SceCtrlData2 *>(pad_data), count, false, false, false, true);
 }
 
 EXPORT(int, sceCtrlReadBufferPositiveExt2, int port, SceCtrlData2 *pad_data, int count) {
     TRACY_FUNC(sceCtrlReadBufferPositiveExt2, port, pad_data, count);
-    return ctrl_get(thread_id, emuenv, port, pad_data, count, false, false, true, true);
+    return ctrl_get(thread, emuenv, port, pad_data, count, false, false, true, true);
 }
 
 EXPORT(int, sceCtrlRegisterBdRMCCallback) {

@@ -34,7 +34,7 @@ namespace ngs {
 
 class InputMixerModule : public Module {
 public:
-    bool process(KernelState &kern, const MemState &mem, const SceUID thread_id, ModuleData &data, std::unique_lock<std::recursive_mutex> &scheduler_lock, std::unique_lock<std::mutex> &voice_lock) override;
+    bool process(const MemState &mem, GuestThread &thread, ModuleData &data, std::unique_lock<std::recursive_mutex> &scheduler_lock, std::unique_lock<std::mutex> &voice_lock) override;
     uint32_t module_id() const override { return 0x5CE0; }
 
     static constexpr uint32_t get_max_parameter_size() {
@@ -47,7 +47,7 @@ public:
 
 class MixerModule : public Module {
 public:
-    bool process(KernelState &kern, const MemState &mem, const SceUID thread_id, ModuleData &data, std::unique_lock<std::recursive_mutex> &scheduler_lock, std::unique_lock<std::mutex> &voice_lock) override;
+    bool process(const MemState &mem, GuestThread &thread, ModuleData &data, std::unique_lock<std::recursive_mutex> &scheduler_lock, std::unique_lock<std::mutex> &voice_lock) override;
     uint32_t module_id() const override { return 0x5CE9; }
 
     static constexpr uint32_t get_max_parameter_size() {

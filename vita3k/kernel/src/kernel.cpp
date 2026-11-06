@@ -76,7 +76,8 @@ static int SDLCALL thread_function(void *data) {
     thread->run_loop();
     const uint32_t r0 = thread->cpu->get_reg(0);
     const SceUID id = thread->state.id;
-    // release our reference first so the erase below destroys the GuestThread before process_exit() is woken
+    // Dropped first, so the erase below destroys the GuestThread, unless the netctl adhoc thread still
+    // holds it
     thread.reset();
 
     {
@@ -142,10 +143,10 @@ GuestThreadPtr KernelState::get_thread(SceUID thread_id) {
     return thread;
 }
 
-SceUID KernelState::create_callback(const GuestThreadPtr &thread, const char *name, Ptr<SceKernelCallbackFunction> func, Ptr<void> common) {
+SceUID KernelState::create_callback(GuestThread &thread, const char *name, Ptr<SceKernelCallbackFunction> func, Ptr<void> common) {
     const CallbackPtr cb = std::make_shared<Callback>(thread, name, func, common);
     const SceUID uid = objects.add(cb, get_next_uid());
-    thread->add_callback(cb);
+    thread.add_callback(cb);
     return uid;
 }
 
@@ -185,19 +186,6 @@ GuestThreadPtr KernelState::create_thread(MemState &mem, const char *name, Ptr<c
     SDL_DestroySemaphore(params.host_may_destroy_params);
 
     return thread;
-}
-
-Ptr<Ptr<void>> KernelState::get_thread_tls_addr(MemState &mem, SceUID thread_id, int key) {
-    Ptr<Ptr<void>> address(0);
-    // magic numbers taken from decompiled source. There is 0x400 unused bytes of unknown usage
-    if (key <= 0x100 && key >= 0) {
-        // A thread that doesn't exist has no TLS
-        if (const GuestThreadPtr thread = get_thread(thread_id))
-            address = thread->state.tls.get_ptr<Ptr<void>>() + key;
-    } else {
-        LOG_ERROR("Wrong tls slot index. TID:{} index:{}", thread_id, key);
-    }
-    return address;
 }
 
 void KernelState::request_process_exit(int res, std::optional<AppLaunchRequest> relaunch) {

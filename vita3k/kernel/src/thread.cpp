@@ -78,6 +78,15 @@ ThreadState::ThreadState(SceUID id, MemState &mem, const char *name, Address ent
     tls_slot(TLS_CPU_AFFINITY_MASK) = affinity_mask;
 }
 
+Ptr<Ptr<void>> ThreadState::tls_addr(int key) const {
+    // magic numbers taken from decompiled source. There is 0x400 unused bytes of unknown usage
+    if (key < 0 || key > 0x100) {
+        LOG_ERROR("Wrong tls slot index. TID:{} index:{}", id, key);
+        return Ptr<Ptr<void>>(0);
+    }
+    return tls.get_ptr<Ptr<void>>() + key;
+}
+
 GuestThread::GuestThread(SceUID id, KernelState &kernel, MemState &mem, CPUStatePtr cpu, const char *name, Address entry_point, int init_priority, SceInt32 affinity_mask, int stack_size, SceUInt32 attr)
     : state(id, mem, name, entry_point, init_priority, affinity_mask, stack_size, attr, kernel.tls_msize)
     , cpu(std::move(cpu))
@@ -275,7 +284,7 @@ std::optional<uint32_t> GuestThread::run_guest(std::unique_lock<std::mutex> &loc
         // In this order, also when the import ended the thread: the import, the holds at its end,
         // its result, the exclusive monitor, then the abort handler
         if (exit.kind == GuestExit::Kind::import) {
-            const CallResult result = kernel.call_import(*cpu, exit.value, state.id);
+            const CallResult result = kernel.call_import(*this, exit.value);
             // A hold here shows the registers before the call result is written
             lock.lock();
             stop_for_holds(lock, true);
@@ -528,7 +537,7 @@ uint64_t GuestThread::next_display_wait(uint64_t next_vblank, int vcount) {
     return state.last_vblank_waited;
 }
 
-WaitResult GuestThread::wait_for_thread_end(const GuestThreadPtr &waiter, SceInt32 *exit_status, Deadline deadline, bool callbacks) {
+WaitResult GuestThread::wait_for_thread_end(GuestThread &waiter, SceInt32 *exit_status, Deadline deadline, bool callbacks) {
     std::unique_lock<std::mutex> lock(mutex);
     if (state.status == ThreadStatus::dormant || state.status == ThreadStatus::deleted) {
         if (exit_status)

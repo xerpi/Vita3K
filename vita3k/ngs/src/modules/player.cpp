@@ -100,7 +100,7 @@ void PlayerModule::set_default_preset(const MemState &mem, ModuleData &data) {
     *logical = {};
 }
 
-bool PlayerModule::process(KernelState &kern, const MemState &mem, const SceUID thread_id, ModuleData &data, std::unique_lock<std::recursive_mutex> &scheduler_lock, std::unique_lock<std::mutex> &voice_lock) {
+bool PlayerModule::process(const MemState &mem, GuestThread &thread, ModuleData &data, std::unique_lock<std::recursive_mutex> &scheduler_lock, std::unique_lock<std::mutex> &voice_lock) {
     SceNgsPlayerParams *params = data.get_parameters<SceNgsPlayerParams>(mem);
     SceNgsPlayerStates *state = data.get_state<SceNgsPlayerStates>();
     PlayerLogicalState *logical = data.get_logical_state<PlayerLogicalState>();
@@ -160,7 +160,7 @@ bool PlayerModule::process(KernelState &kern, const MemState &mem, const SceUID 
                 if ((state->current_buffer == -1)
                     || !params->buffer_params[state->current_buffer].buffer
                     || (params->buffer_params[state->current_buffer].bytes_count == 0)) {
-                    data.invoke_callback(kern, mem, thread_id, SCE_NGS_PLAYER_END_OF_DATA, 0, 0);
+                    data.invoke_callback(mem, thread, SCE_NGS_PLAYER_END_OF_DATA, 0, 0);
 
                     // we are done
                     finished = true;
@@ -168,11 +168,11 @@ bool PlayerModule::process(KernelState &kern, const MemState &mem, const SceUID 
                     voice_lock.lock();
                     break;
                 } else {
-                    data.invoke_callback(kern, mem, thread_id, SCE_NGS_PLAYER_SWAPPED_BUFFER, prev_index,
+                    data.invoke_callback(mem, thread, SCE_NGS_PLAYER_SWAPPED_BUFFER, prev_index,
                         params->buffer_params[state->current_buffer].buffer.address());
                 }
             } else {
-                data.invoke_callback(kern, mem, thread_id, SCE_NGS_PLAYER_LOOPED_BUFFER, logical->current_loop_count,
+                data.invoke_callback(mem, thread, SCE_NGS_PLAYER_LOOPED_BUFFER, logical->current_loop_count,
                     params->buffer_params[state->current_buffer].buffer.address());
             }
 

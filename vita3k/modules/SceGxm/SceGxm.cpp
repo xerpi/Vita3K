@@ -944,15 +944,14 @@ static void display_entry_thread(EmuEnvState &emuenv) {
     }
 }
 
-static Ptr<void> gxmRunDeferredMemoryCallback(KernelState &kernel, const MemState &mem, std::uint32_t &return_size, Ptr<SceGxmDeferredContextCallback> callback, Ptr<void> userdata,
-    const std::uint32_t size, const SceUID thread_id) {
-    const GuestThreadPtr thread = kernel.get_thread(thread_id);
-    const Address final_size_addr = thread->stack_alloc(4);
+static Ptr<void> gxmRunDeferredMemoryCallback(GuestThread &thread, const MemState &mem, std::uint32_t &return_size, Ptr<SceGxmDeferredContextCallback> callback, Ptr<void> userdata,
+    const std::uint32_t size) {
+    const Address final_size_addr = thread.stack_alloc(4);
 
-    Ptr<void> result(thread->call_guest(callback.address(), { userdata.address(), size, final_size_addr }));
+    Ptr<void> result(thread.call_guest(callback.address(), { userdata.address(), size, final_size_addr }));
 
     return_size = *Ptr<std::uint32_t>(final_size_addr).get(mem);
-    thread->stack_free(4);
+    thread.stack_free(4);
 
     return result;
 }
@@ -1080,7 +1079,7 @@ struct SceGxmContext {
         curr_command_list->memory_ranges.push(it);
     }
 
-    bool make_new_alloc_space(KernelState &kern, const MemState &mem, const SceUID thread_id, bool force = false) {
+    bool make_new_alloc_space(const MemState &mem, GuestThread &thread, bool force = false) {
         if (alloc_space && (state.type == SCE_GXM_CONTEXT_TYPE_IMMEDIATE)) {
             return false;
         }
@@ -1112,8 +1111,8 @@ struct SceGxmContext {
         } else {
             constexpr uint32_t DEFAULT_SIZE = 1024;
 
-            Ptr<void> space = gxmRunDeferredMemoryCallback(kern, mem, actual_size, state.vdm_memory_callback,
-                state.memory_callback_userdata, DEFAULT_SIZE, thread_id);
+            Ptr<void> space = gxmRunDeferredMemoryCallback(thread, mem, actual_size, state.vdm_memory_callback,
+                state.memory_callback_userdata, DEFAULT_SIZE);
 
             if (!space) {
                 LOG_ERROR("VDM callback runs out of memory!");
@@ -1128,7 +1127,7 @@ struct SceGxmContext {
         return true;
     }
 
-    std::uint8_t *linearly_allocate(KernelState &kern, const MemState &mem, const SceUID thread_id, const std::uint32_t size) {
+    std::uint8_t *linearly_allocate(const MemState &mem, GuestThread &thread, const std::uint32_t size) {
         if (state.type != SCE_GXM_CONTEXT_TYPE_DEFERRED) {
             return nullptr;
         }
@@ -1138,7 +1137,7 @@ struct SceGxmContext {
         constexpr uint32_t allocated_on_vdm = 4;
 
         if (alloc_space.address() + allocated_on_vdm > alloc_space_end.address()) {
-            if (!make_new_alloc_space(kern, mem, thread_id, true)) {
+            if (!make_new_alloc_space(mem, thread, true)) {
                 return nullptr;
             }
         }
@@ -1150,11 +1149,11 @@ struct SceGxmContext {
     }
 
     template <typename T>
-    T *linearly_allocate(KernelState &kern, const MemState &mem, const SceUID thread_id) {
-        return reinterpret_cast<T *>(linearly_allocate(kern, mem, thread_id, sizeof(T)));
+    T *linearly_allocate(const MemState &mem, GuestThread &thread) {
+        return reinterpret_cast<T *>(linearly_allocate(mem, thread, sizeof(T)));
     }
 
-    renderer::Command *allocate_new_command(KernelState &kern, const MemState &mem, SceUID current_thread_id) {
+    renderer::Command *allocate_new_command(const MemState &mem, GuestThread &thread) {
         renderer::Command *new_command = nullptr;
 
         if (state.type == SCE_GXM_CONTEXT_TYPE_IMMEDIATE) {
@@ -1168,7 +1167,7 @@ struct SceGxmContext {
                 new_command->flags |= renderer::Command::FLAG_FROM_HOST;
             }
         } else {
-            new_command = linearly_allocate<renderer::Command>(kern, mem, current_thread_id);
+            new_command = linearly_allocate<renderer::Command>(mem, thread);
 
             new (new_command) renderer::Command;
             new_command->flags |= renderer::Command::FLAG_NO_FREE;
@@ -1629,7 +1628,7 @@ EXPORT(int, sceGxmBeginCommandList, SceGxmContext *deferredContext) {
 
     deferredContext->curr_command_list = new SceGxmCommandList();
 
-    if (!deferredContext->make_new_alloc_space(emuenv.kernel, emuenv.mem, thread_id)) {
+    if (!deferredContext->make_new_alloc_space(emuenv.mem, thread)) {
         return RET_ERROR(SCE_GXM_ERROR_RESERVE_FAILED);
     }
 
@@ -1637,8 +1636,8 @@ EXPORT(int, sceGxmBeginCommandList, SceGxmContext *deferredContext) {
     deferredContext->alloc_space_start = deferredContext->alloc_space;
 
     if (!deferredContext->state.vertex_ring_buffer) {
-        deferredContext->state.vertex_ring_buffer = gxmRunDeferredMemoryCallback(emuenv.kernel, emuenv.mem, deferredContext->state.vertex_ring_buffer_size,
-            deferredContext->state.vertex_memory_callback, deferredContext->state.memory_callback_userdata, DEFAULT_RING_SIZE, thread_id);
+        deferredContext->state.vertex_ring_buffer = gxmRunDeferredMemoryCallback(thread, emuenv.mem, deferredContext->state.vertex_ring_buffer_size,
+            deferredContext->state.vertex_memory_callback, deferredContext->state.memory_callback_userdata, DEFAULT_RING_SIZE);
 
         if (!deferredContext->state.vertex_ring_buffer) {
             return RET_ERROR(SCE_GXM_ERROR_RESERVE_FAILED);
@@ -1646,8 +1645,8 @@ EXPORT(int, sceGxmBeginCommandList, SceGxmContext *deferredContext) {
     }
 
     if (!deferredContext->state.fragment_ring_buffer) {
-        deferredContext->state.fragment_ring_buffer = gxmRunDeferredMemoryCallback(emuenv.kernel, emuenv.mem, deferredContext->state.fragment_ring_buffer_size,
-            deferredContext->state.fragment_memory_callback, deferredContext->state.memory_callback_userdata, DEFAULT_RING_SIZE, thread_id);
+        deferredContext->state.fragment_ring_buffer = gxmRunDeferredMemoryCallback(thread, emuenv.mem, deferredContext->state.fragment_ring_buffer_size,
+            deferredContext->state.fragment_memory_callback, deferredContext->state.memory_callback_userdata, DEFAULT_RING_SIZE);
 
         if (!deferredContext->state.fragment_ring_buffer) {
             return RET_ERROR(SCE_GXM_ERROR_RESERVE_FAILED);
@@ -1655,12 +1654,11 @@ EXPORT(int, sceGxmBeginCommandList, SceGxmContext *deferredContext) {
     }
 
     // Set command allocate functions
-    KernelState *kernel = &emuenv.kernel;
     MemState *mem = &emuenv.mem;
 
     // The thread that records a command runs the memory callback it needs
-    deferredContext->renderer->alloc_func = [deferredContext, kernel, mem]() {
-        return deferredContext->allocate_new_command(*kernel, *mem, current_thread()->state.id);
+    deferredContext->renderer->alloc_func = [deferredContext, mem]() {
+        return deferredContext->allocate_new_command(*mem, *current_thread());
     };
 
     deferredContext->renderer->free_func = [](renderer::Command *cmd) {
@@ -1993,7 +1991,7 @@ EXPORT(int, sceGxmCreateContext, const SceGxmContextParams *params, Ptr<SceGxmCo
     std::unique_ptr<renderer::Context> renderer_context;
     bool created;
     {
-        const GuestThread::HostWait waiting(*emuenv.kernel.get_thread(thread_id), std::nullopt);
+        const GuestThread::HostWait waiting(thread, std::nullopt);
         created = renderer::create_context(*emuenv.renderer, renderer_context);
     }
     if (!created) {
@@ -2007,15 +2005,13 @@ EXPORT(int, sceGxmCreateContext, const SceGxmContextParams *params, Ptr<SceGxmCo
     ctx->state.vdm_buffer = params->vdmRingBufferMem;
     ctx->state.vdm_buffer_size = params->vdmRingBufferMemSize;
 
-    ctx->make_new_alloc_space(emuenv.kernel, emuenv.mem, thread_id);
+    ctx->make_new_alloc_space(emuenv.mem, thread);
 
     // Set command allocate functions
-    // The command buffer will not be reallocated, so this is fine to use this thread ID
-    KernelState *kernel = &emuenv.kernel;
     MemState *mem = &emuenv.mem;
 
-    ctx->renderer->alloc_func = [ctx, kernel, mem, thread_id]() {
-        return ctx->allocate_new_command(*kernel, *mem, thread_id);
+    ctx->renderer->alloc_func = [ctx, mem]() {
+        return ctx->allocate_new_command(*mem, *current_thread());
     };
 
     ctx->renderer->free_func = [ctx](renderer::Command *cmd) {
@@ -2079,7 +2075,7 @@ EXPORT(int, sceGxmCreateRenderTarget, const SceGxmRenderTargetParams *params, Pt
     std::unique_ptr<renderer::RenderTarget> renderer_target;
     bool created;
     {
-        const GuestThread::HostWait waiting(*emuenv.kernel.get_thread(thread_id), std::nullopt);
+        const GuestThread::HostWait waiting(thread, std::nullopt);
         created = renderer::create_render_target(*emuenv.renderer, renderer_target, params);
     }
     if (!created) {
@@ -2261,7 +2257,7 @@ EXPORT(int, sceGxmDisplayQueueAddEntry, Ptr<SceGxmSyncObject> oldBuffer, Ptr<Sce
     // for another thread's addition and for the slot, and the debugger can stop the process meanwhile.
     std::unique_lock<std::mutex> add_lock(emuenv.gxm.display_queue_add_mutex, std::defer_lock);
     {
-        const GuestThread::HostWait waiting(*emuenv.kernel.get_thread(thread_id));
+        const GuestThread::HostWait waiting(thread);
         add_lock.lock();
         if (emuenv.gxm.display_queue_closed)
             return RET_ERROR(SCE_GXM_ERROR_UNINITIALIZED);
@@ -2319,7 +2315,7 @@ EXPORT(int, sceGxmDisplayQueueFinish) {
     TRACY_FUNC(sceGxmDisplayQueueFinish);
     if (!emuenv.gxm.params.displayQueueCallback)
         return RET_ERROR(SCE_GXM_ERROR_UNINITIALIZED);
-    const GuestThread::HostWait waiting(*emuenv.kernel.get_thread(thread_id));
+    const GuestThread::HostWait waiting(thread);
     emuenv.gxm.display_queue.wait_empty();
 
     return 0;
@@ -2358,7 +2354,7 @@ static void gxmSetUniformBuffers(renderer::State &state, GxmState &gxm, SceGxmCo
     }
 }
 
-static int gxmDrawElementGeneral(EmuEnvState &emuenv, const char *export_name, const SceUID thread_id, SceGxmContext *context, SceGxmPrimitiveType primType, SceGxmIndexFormat indexType, Ptr<const void> indexData, uint32_t indexCount, uint32_t instanceCount) {
+static int gxmDrawElementGeneral(EmuEnvState &emuenv, const char *export_name, SceGxmContext *context, SceGxmPrimitiveType primType, SceGxmIndexFormat indexType, Ptr<const void> indexData, uint32_t indexCount, uint32_t instanceCount) {
     if (!context || !indexData)
         return RET_ERROR(SCE_GXM_ERROR_INVALID_POINTER);
 
@@ -2474,7 +2470,7 @@ static int gxmDrawElementGeneral(EmuEnvState &emuenv, const char *export_name, c
 
 EXPORT(int, sceGxmDraw, SceGxmContext *context, SceGxmPrimitiveType primType, SceGxmIndexFormat indexType, Ptr<const void> indexData, uint32_t indexCount) {
     TRACY_FUNC(sceGxmDraw, context, primType, indexType, indexData, indexCount);
-    return gxmDrawElementGeneral(emuenv, export_name, thread_id, context, primType, indexType, indexData, indexCount, 1);
+    return gxmDrawElementGeneral(emuenv, export_name, context, primType, indexType, indexData, indexCount, 1);
 }
 
 EXPORT(int, sceGxmDrawInstanced, SceGxmContext *context, SceGxmPrimitiveType primType, SceGxmIndexFormat indexType, Ptr<const void> indexData, uint32_t indexCount, uint32_t indexWrap) {
@@ -2483,7 +2479,7 @@ EXPORT(int, sceGxmDrawInstanced, SceGxmContext *context, SceGxmPrimitiveType pri
         LOG_WARN("Extra vertexes are requested to be drawn (ignored)");
     }
 
-    return gxmDrawElementGeneral(emuenv, export_name, thread_id, context, primType, indexType, indexData, indexWrap, indexCount / indexWrap);
+    return gxmDrawElementGeneral(emuenv, export_name, context, primType, indexType, indexData, indexWrap, indexCount / indexWrap);
 }
 
 EXPORT(int, sceGxmDrawPrecomputed, SceGxmContext *context, SceGxmPrecomputedDraw *draw) {
@@ -2625,8 +2621,7 @@ EXPORT(int, sceGxmEndCommandList, SceGxmContext *deferredContext, SceGxmCommandL
     }
 
     // only set the first two fields for commandList (its size is assumed to be 32 bytes by the game)
-    commandList->list = deferredContext->linearly_allocate<renderer::CommandList>(emuenv.kernel, emuenv.mem,
-        thread_id);
+    commandList->list = deferredContext->linearly_allocate<renderer::CommandList>(emuenv.mem, thread);
 
     // also update our own command list
     deferredContext->curr_command_list->list = commandList->list;
@@ -2742,7 +2737,7 @@ EXPORT(int, sceGxmFinish, SceGxmContext *context) {
 
     // Wait for this context's rendering. The finish command comes from the host heap, not from the
     // context's ring in guest memory, so the guest memory doesn't change during the wait.
-    const GuestThread::HostWait waiting(*emuenv.kernel.get_thread(thread_id));
+    const GuestThread::HostWait waiting(thread);
     renderer::finish(*emuenv.renderer, nullptr);
 
     return 0;
@@ -2917,7 +2912,6 @@ EXPORT(int, sceGxmInitialize, const SceGxmInitializeParams *params) {
     // A slot stays occupied until its callback returns, like the firmware
     emuenv.gxm.display_queue.maxPendingCount_ = params->displayQueueMaxPendingCount;
 
-    const GuestThreadPtr main_thread = emuenv.kernel.get_thread(thread_id);
     const GuestThreadPtr display_queue_thread = emuenv.kernel.create_thread(emuenv.mem, "SceGxmDisplayQueue", emuenv.gxm.params.displayQueueCallback, SCE_KERNEL_HIGHEST_PRIORITY_USER, SCE_KERNEL_THREAD_CPU_AFFINITY_MASK_DEFAULT, SCE_KERNEL_STACK_SIZE_USER_DEFAULT, 0);
     if (!display_queue_thread) {
         return RET_ERROR(SCE_GXM_ERROR_DRIVER);
@@ -2982,7 +2976,7 @@ EXPORT(int, sceGxmMapMemory, Ptr<void> base, uint32_t size, uint32_t attribs) {
 
         // little big planet maps regions of size 0
         if (emuenv.renderer->features.enable_memory_mapping && size > 0) {
-            const GuestThread::HostWait waiting(*emuenv.kernel.get_thread(thread_id), std::nullopt);
+            const GuestThread::HostWait waiting(thread, std::nullopt);
             renderer::send_single_command(*emuenv.renderer, nullptr, renderer::CommandOpcode::MemoryMap, true, aligned_base, size);
         }
 
@@ -3049,7 +3043,7 @@ EXPORT(int, sceGxmNotificationWait, const SceGxmNotification *notification) {
     std::uint32_t volatile *value = notification->address.get(emuenv.mem);
     const std::uint32_t target_value = notification->value;
 
-    const GuestThread::HostWait waiting(*emuenv.kernel.get_thread(thread_id));
+    const GuestThread::HostWait waiting(thread);
     std::unique_lock<std::mutex> lock(emuenv.renderer->notification_mutex);
     if (*value != target_value) {
         emuenv.renderer->notification_ready.wait(lock, [&]() { return *value == target_value || emuenv.display.abort.load(); });
@@ -3698,8 +3692,8 @@ EXPORT(int, sceGxmReserveFragmentDefaultUniformBuffer, SceGxmContext *context, P
 
     if (next_used > context->state.fragment_ring_buffer_size) {
         if (context->state.type != SCE_GXM_CONTEXT_TYPE_IMMEDIATE) {
-            context->state.fragment_ring_buffer = gxmRunDeferredMemoryCallback(emuenv.kernel, emuenv.mem, context->state.fragment_ring_buffer_size,
-                context->state.fragment_memory_callback, context->state.memory_callback_userdata, DEFAULT_RING_SIZE, thread_id);
+            context->state.fragment_ring_buffer = gxmRunDeferredMemoryCallback(thread, emuenv.mem, context->state.fragment_ring_buffer_size,
+                context->state.fragment_memory_callback, context->state.memory_callback_userdata, DEFAULT_RING_SIZE);
 
             if (!context->state.fragment_ring_buffer) {
                 return RET_ERROR(SCE_GXM_ERROR_RESERVE_FAILED);
@@ -3743,8 +3737,8 @@ EXPORT(int, sceGxmReserveVertexDefaultUniformBuffer, SceGxmContext *context, Ptr
 
     if (next_used > context->state.vertex_ring_buffer_size) {
         if (context->state.type != SCE_GXM_CONTEXT_TYPE_IMMEDIATE) {
-            context->state.vertex_ring_buffer = gxmRunDeferredMemoryCallback(emuenv.kernel, emuenv.mem, context->state.vertex_ring_buffer_size,
-                context->state.vertex_memory_callback, context->state.memory_callback_userdata, DEFAULT_RING_SIZE, thread_id);
+            context->state.vertex_ring_buffer = gxmRunDeferredMemoryCallback(thread, emuenv.mem, context->state.vertex_ring_buffer_size,
+                context->state.vertex_memory_callback, context->state.memory_callback_userdata, DEFAULT_RING_SIZE);
 
             if (!context->state.vertex_ring_buffer) {
                 return RET_ERROR(SCE_GXM_ERROR_RESERVE_FAILED);
@@ -4509,18 +4503,17 @@ EXPORT(int, sceGxmSetYuvProfile) {
     return UNIMPLEMENTED();
 }
 
-static Address alloc_callbacked(EmuEnvState &emuenv, SceUID thread_id, const SceGxmShaderPatcherParams &shaderPatcherParams, unsigned int size) {
+static Address alloc_callbacked(EmuEnvState &emuenv, GuestThread &thread, const SceGxmShaderPatcherParams &shaderPatcherParams, unsigned int size) {
     if (!shaderPatcherParams.hostAllocCallback) {
         LOG_ERROR("Empty hostAllocCallback");
     }
-    const auto thread = emuenv.kernel.get_thread(thread_id);
-    auto result = thread->call_guest(shaderPatcherParams.hostAllocCallback.address(), { shaderPatcherParams.userData.address(), size });
+    auto result = thread.call_guest(shaderPatcherParams.hostAllocCallback.address(), { shaderPatcherParams.userData.address(), size });
     return result;
 }
 
 template <typename T>
-static Ptr<T> alloc_callbacked(EmuEnvState &emuenv, SceUID thread_id, const SceGxmShaderPatcherParams &shaderPatcherParams) {
-    const Address address = alloc_callbacked(emuenv, thread_id, shaderPatcherParams, sizeof(T));
+static Ptr<T> alloc_callbacked(EmuEnvState &emuenv, GuestThread &thread, const SceGxmShaderPatcherParams &shaderPatcherParams) {
+    const Address address = alloc_callbacked(emuenv, thread, shaderPatcherParams, sizeof(T));
     const Ptr<T> ptr(address);
     if (!ptr) {
         return ptr;
@@ -4531,21 +4524,20 @@ static Ptr<T> alloc_callbacked(EmuEnvState &emuenv, SceUID thread_id, const SceG
 }
 
 template <typename T>
-static Ptr<T> alloc_callbacked(EmuEnvState &emuenv, SceUID thread_id, SceGxmShaderPatcher *shaderPatcher) {
-    return alloc_callbacked<T>(emuenv, thread_id, shaderPatcher->params);
+static Ptr<T> alloc_callbacked(EmuEnvState &emuenv, GuestThread &thread, SceGxmShaderPatcher *shaderPatcher) {
+    return alloc_callbacked<T>(emuenv, thread, shaderPatcher->params);
 }
 
-static void free_callbacked(EmuEnvState &emuenv, SceUID thread_id, SceGxmShaderPatcher *shaderPatcher, Address data) {
+static void free_callbacked(EmuEnvState &emuenv, GuestThread &thread, SceGxmShaderPatcher *shaderPatcher, Address data) {
     if (!shaderPatcher->params.hostFreeCallback) {
         LOG_ERROR("Empty hostFreeCallback");
     }
-    const auto thread = emuenv.kernel.get_thread(thread_id);
-    thread->call_guest(shaderPatcher->params.hostFreeCallback.address(), { shaderPatcher->params.userData.address(), data });
+    thread.call_guest(shaderPatcher->params.hostFreeCallback.address(), { shaderPatcher->params.userData.address(), data });
 }
 
 template <typename T>
-static void free_callbacked(EmuEnvState &emuenv, SceUID thread_id, SceGxmShaderPatcher *shaderPatcher, Ptr<T> data) {
-    free_callbacked(emuenv, thread_id, shaderPatcher, data.address());
+static void free_callbacked(EmuEnvState &emuenv, GuestThread &thread, SceGxmShaderPatcher *shaderPatcher, Ptr<T> data) {
+    free_callbacked(emuenv, thread, shaderPatcher, data.address());
 }
 
 EXPORT(int, sceGxmShaderPatcherAddRefFragmentProgram, SceGxmShaderPatcher *shaderPatcher, SceGxmFragmentProgram *fragmentProgram) {
@@ -4573,7 +4565,7 @@ EXPORT(int, sceGxmShaderPatcherCreate, const SceGxmShaderPatcherParams *params, 
     if (!params || !shaderPatcher)
         return RET_ERROR(SCE_GXM_ERROR_INVALID_POINTER);
 
-    *shaderPatcher = alloc_callbacked<SceGxmShaderPatcher>(emuenv, thread_id, *params);
+    *shaderPatcher = alloc_callbacked<SceGxmShaderPatcher>(emuenv, thread, *params);
     assert(*shaderPatcher);
     if (!*shaderPatcher) {
         return RET_ERROR(SCE_GXM_ERROR_OUT_OF_MEMORY);
@@ -4609,7 +4601,7 @@ EXPORT(int, sceGxmShaderPatcherCreateFragmentProgram, SceGxmShaderPatcher *shade
         return 0;
     }
 
-    *fragmentProgram = alloc_callbacked<SceGxmFragmentProgram>(emuenv, thread_id, shaderPatcher);
+    *fragmentProgram = alloc_callbacked<SceGxmFragmentProgram>(emuenv, thread, shaderPatcher);
     assert(*fragmentProgram);
     if (!*fragmentProgram) {
         return RET_ERROR(SCE_GXM_ERROR_OUT_OF_MEMORY);
@@ -4635,7 +4627,7 @@ EXPORT(int, sceGxmShaderPatcherCreateMaskUpdateFragmentProgram, SceGxmShaderPatc
     if (!shaderPatcher || !fragmentProgram)
         return RET_ERROR(SCE_GXM_ERROR_INVALID_POINTER);
 
-    *fragmentProgram = alloc_callbacked<SceGxmFragmentProgram>(emuenv, thread_id, shaderPatcher);
+    *fragmentProgram = alloc_callbacked<SceGxmFragmentProgram>(emuenv, thread, shaderPatcher);
     assert(*fragmentProgram);
     if (!*fragmentProgram) {
         return RET_ERROR(SCE_GXM_ERROR_OUT_OF_MEMORY);
@@ -4643,7 +4635,7 @@ EXPORT(int, sceGxmShaderPatcherCreateMaskUpdateFragmentProgram, SceGxmShaderPatc
 
     SceGxmFragmentProgram *const fp = fragmentProgram->get(mem);
     fp->is_maskupdate = true;
-    fp->program = Ptr<const SceGxmProgram>(alloc_callbacked(emuenv, thread_id, shaderPatcher->params, size_mask_gxp));
+    fp->program = Ptr<const SceGxmProgram>(alloc_callbacked(emuenv, thread, shaderPatcher->params, size_mask_gxp));
     memcpy(const_cast<SceGxmProgram *>(fp->program.get(mem)), mask_gxp, size_mask_gxp);
 
     if (!renderer::create(fp->renderer_data, *emuenv.renderer, *fp->program.get(mem), nullptr, emuenv.renderer->gxp_ptr_map)) {
@@ -4680,7 +4672,7 @@ EXPORT(int, sceGxmShaderPatcherCreateVertexProgram, SceGxmShaderPatcher *shaderP
         return 0;
     }
 
-    *vertexProgram = alloc_callbacked<SceGxmVertexProgram>(emuenv, thread_id, shaderPatcher);
+    *vertexProgram = alloc_callbacked<SceGxmVertexProgram>(emuenv, thread, shaderPatcher);
     assert(*vertexProgram);
     if (!*vertexProgram) {
         return RET_ERROR(SCE_GXM_ERROR_OUT_OF_MEMORY);
@@ -4712,7 +4704,7 @@ EXPORT(int, sceGxmShaderPatcherDestroy, Ptr<SceGxmShaderPatcher> shaderPatcher) 
     if (!shaderPatcher)
         return RET_ERROR(SCE_GXM_ERROR_INVALID_POINTER);
 
-    free_callbacked(emuenv, thread_id, shaderPatcher.get(emuenv.mem), shaderPatcher);
+    free_callbacked(emuenv, thread, shaderPatcher.get(emuenv.mem), shaderPatcher);
 
     return 0;
 }
@@ -4733,7 +4725,7 @@ EXPORT(int, sceGxmShaderPatcherForceUnregisterProgram, SceGxmShaderPatcher *shad
                 while (vertex_program->compile_threads_on.load(std::memory_order_acquire) > 0)
                     std::this_thread::yield();
 
-                free_callbacked(emuenv, thread_id, shaderPatcher, it->second.address());
+                free_callbacked(emuenv, thread, shaderPatcher, it->second.address());
                 it = shaderPatcher->vertex_program_cache.erase(it);
             } else {
                 ++it;
@@ -4746,7 +4738,7 @@ EXPORT(int, sceGxmShaderPatcherForceUnregisterProgram, SceGxmShaderPatcher *shad
                 while (frag_program->compile_threads_on.load(std::memory_order_acquire) > 0)
                     std::this_thread::yield();
 
-                free_callbacked(emuenv, thread_id, shaderPatcher, it->second.address());
+                free_callbacked(emuenv, thread, shaderPatcher, it->second.address());
                 it = shaderPatcher->fragment_program_cache.erase(it);
             } else {
                 ++it;
@@ -4755,7 +4747,7 @@ EXPORT(int, sceGxmShaderPatcherForceUnregisterProgram, SceGxmShaderPatcher *shad
     }
 
     rp->program.reset();
-    free_callbacked(emuenv, thread_id, shaderPatcher, programId);
+    free_callbacked(emuenv, thread, shaderPatcher, programId);
 
     return 0;
 }
@@ -4822,7 +4814,7 @@ EXPORT(int, sceGxmShaderPatcherRegisterProgram, SceGxmShaderPatcher *shaderPatch
     if (!shaderPatcher || !programHeader || !programId)
         return RET_ERROR(SCE_GXM_ERROR_INVALID_POINTER);
 
-    *programId = alloc_callbacked<SceGxmRegisteredProgram>(emuenv, thread_id, shaderPatcher);
+    *programId = alloc_callbacked<SceGxmRegisteredProgram>(emuenv, thread, shaderPatcher);
     assert(*programId);
     if (!*programId) {
         return RET_ERROR(SCE_GXM_ERROR_OUT_OF_MEMORY);
@@ -4851,7 +4843,7 @@ EXPORT(int, sceGxmShaderPatcherReleaseFragmentProgram, SceGxmShaderPatcher *shad
                 break;
             }
         }
-        free_callbacked(emuenv, thread_id, shaderPatcher, fragmentProgram);
+        free_callbacked(emuenv, thread, shaderPatcher, fragmentProgram);
     }
 
     return 0;
@@ -4874,7 +4866,7 @@ EXPORT(int, sceGxmShaderPatcherReleaseVertexProgram, SceGxmShaderPatcher *shader
                 break;
             }
         }
-        free_callbacked(emuenv, thread_id, shaderPatcher, vertexProgram);
+        free_callbacked(emuenv, thread, shaderPatcher, vertexProgram);
     }
 
     return 0;
@@ -4902,7 +4894,7 @@ EXPORT(int, sceGxmShaderPatcherUnregisterProgram, SceGxmShaderPatcher *shaderPat
     SceGxmRegisteredProgram *const rp = programId.get(emuenv.mem);
     rp->program.reset();
 
-    free_callbacked(emuenv, thread_id, shaderPatcher, programId);
+    free_callbacked(emuenv, thread, shaderPatcher, programId);
 
     return 0;
 }
@@ -4943,7 +4935,6 @@ EXPORT(int, sceGxmSyncObjectDestroy, Ptr<SceGxmSyncObject> syncObject) {
 
 EXPORT(int, sceGxmTerminate) {
     TRACY_FUNC(sceGxmTerminate);
-    GuestThread &thread = *emuenv.kernel.get_thread(thread_id);
     // The thread waits for the display queue thread's end, which runs every queued callback first
     const WaitTarget worker_end{ .type = SCE_KERNEL_WAITTYPE_WAITTHEND, .id = emuenv.gxm.display_queue_thread };
     std::unique_lock<std::mutex> add_lock(emuenv.gxm.display_queue_add_mutex, std::defer_lock);
@@ -5723,7 +5714,7 @@ EXPORT(int, sceGxmTransferFill, uint32_t fillColor, SceGxmTransferFormat destFor
 EXPORT(int, sceGxmTransferFinish) {
     TRACY_FUNC(sceGxmTransferFinish);
     // same as sceGxmFinish, but the thread shows no wait
-    const GuestThread::HostWait waiting(*emuenv.kernel.get_thread(thread_id), std::nullopt);
+    const GuestThread::HostWait waiting(thread, std::nullopt);
     renderer::finish(*emuenv.renderer, nullptr);
 
     return 0;
@@ -5765,7 +5756,7 @@ EXPORT(int, sceGxmUnmapMemory, Ptr<void> base) {
     }
 
     if (emuenv.renderer->features.enable_memory_mapping && ite->second.size > 0) {
-        const GuestThread::HostWait waiting(*emuenv.kernel.get_thread(thread_id), std::nullopt);
+        const GuestThread::HostWait waiting(thread, std::nullopt);
         renderer::send_single_command(*emuenv.renderer, nullptr, renderer::CommandOpcode::MemoryUnmap, true, aligned_base);
     }
 

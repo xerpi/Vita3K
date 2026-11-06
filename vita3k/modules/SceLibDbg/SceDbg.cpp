@@ -26,16 +26,11 @@ TRACY_MODULE_NAME(SceDbg);
 
 EXPORT(int, sceDbgAssertionHandler, const char *filename, int line, bool do_stop, const char *component, module::vargs messages) {
     TRACY_FUNC(sceDbgAssertionHandler, filename, line, do_stop, component);
-    const GuestThreadPtr thread = emuenv.kernel.get_thread(thread_id);
-
-    if (!thread) {
-        return SCE_KERNEL_ERROR_UNKNOWN_THREAD_ID;
-    }
 
     std::vector<char> buffer(KiB(1));
 
-    const char *main_message = messages.next<Ptr<const char>>(*(thread->cpu), emuenv.mem).get(emuenv.mem);
-    const int result = utils::snprintf(buffer.data(), buffer.size(), main_message, *(thread->cpu), emuenv.mem, messages);
+    const char *main_message = messages.next<Ptr<const char>>(*(thread.cpu), emuenv.mem).get(emuenv.mem);
+    const int result = utils::snprintf(buffer.data(), buffer.size(), main_message, *(thread.cpu), emuenv.mem, messages);
 
     LOG_INFO("file {}, line {}, {}", filename, line, buffer.data());
 
@@ -51,11 +46,6 @@ EXPORT(int, sceDbgAssertionHandler, const char *filename, int line, bool do_stop
 
 EXPORT(int, sceDbgLoggingHandler, const char *pFile, int line, int severity, const char *pComponent, module::vargs messages) {
     TRACY_FUNC(sceDbgLoggingHandler, pFile, line, severity, pComponent);
-    const GuestThreadPtr thread = emuenv.kernel.get_thread(thread_id);
-
-    if (!thread) {
-        return SCE_KERNEL_ERROR_UNKNOWN_THREAD_ID;
-    }
 
     std::string output = fmt::format("SCE libdbg LOG, LEVEL: {}", severity);
 
@@ -69,8 +59,8 @@ EXPORT(int, sceDbgLoggingHandler, const char *pFile, int line, int severity, con
 
     std::vector<char> buffer(KiB(1));
 
-    const char *main_message = messages.next<Ptr<const char>>(*(thread->cpu), emuenv.mem).get(emuenv.mem);
-    const int result = utils::snprintf(buffer.data(), buffer.size(), main_message, *(thread->cpu), emuenv.mem, messages);
+    const char *main_message = messages.next<Ptr<const char>>(*(thread.cpu), emuenv.mem).get(emuenv.mem);
+    const int result = utils::snprintf(buffer.data(), buffer.size(), main_message, *(thread.cpu), emuenv.mem, messages);
 
     if (result) {
         output += fmt::format(" {}", buffer.data());

@@ -120,9 +120,9 @@ std::string to_debug_str<SceNetSocketOption>(const MemState &mem, SceNetSocketOp
     return std::to_string(type);
 }
 
-static int ret_net_errno(EmuEnvState &emuenv, int thread_id, int ret) {
+static int ret_net_errno(EmuEnvState &emuenv, GuestThread &thread, int ret) {
     if (ret < 0) {
-        auto addr = emuenv.kernel.get_thread_tls_addr(emuenv.mem, thread_id, TLS_NET_ERRNO);
+        auto addr = thread.state.tls_addr(TLS_NET_ERRNO);
         if (addr) {
             auto inner_ptr = addr.get(emuenv.mem);
             if (inner_ptr)
@@ -133,10 +133,10 @@ static int ret_net_errno(EmuEnvState &emuenv, int thread_id, int ret) {
     return ret;
 }
 
-#define RET_NET_ERRNO(ret)                                \
-    do {                                                  \
-        int _r = ret_net_errno(emuenv, thread_id, (ret)); \
-        return (_r < 0 ? RET_ERROR(_r) : _r);             \
+#define RET_NET_ERRNO(ret)                             \
+    do {                                               \
+        int _r = ret_net_errno(emuenv, thread, (ret)); \
+        return (_r < 0 ? RET_ERROR(_r) : _r);          \
     } while (0)
 
 // A socket call that can block runs in a host wait with no target, so the thread counts as stopped
@@ -154,7 +154,7 @@ EXPORT(int, sceNetAccept, int sid, SceNetSockaddr *addr, unsigned int *addrlen) 
     unsigned int addrlen_copy = addrlen ? *addrlen : 0;
     SocketPtr newsock;
     {
-        const GuestThread::HostWait waiting(*emuenv.kernel.get_thread(thread_id), std::nullopt);
+        const GuestThread::HostWait waiting(thread, std::nullopt);
         newsock = sock->accept(addr ? &addr_copy : nullptr, addrlen ? &addrlen_copy : nullptr, err);
     }
     if (!newsock)
@@ -189,7 +189,7 @@ EXPORT(int, sceNetConnect, int sid, const SceNetSockaddr *addr, unsigned int add
         RET_NET_ERRNO(SCE_NET_ERROR_EBADF);
     int res;
     {
-        const GuestThread::HostWait waiting(*emuenv.kernel.get_thread(thread_id), std::nullopt);
+        const GuestThread::HostWait waiting(thread, std::nullopt);
         res = sock->connect(addr, addrlen);
     }
     RET_NET_ERRNO(res);
@@ -283,7 +283,7 @@ EXPORT(int, sceNetEpollWait, int eid, SceNetEpollEvent *events, int maxevents, i
         staging.resize(maxevents);
     int res;
     {
-        const GuestThread::HostWait waiting(*emuenv.kernel.get_thread(thread_id), std::nullopt);
+        const GuestThread::HostWait waiting(thread, std::nullopt);
         res = epoll->wait(staging.data(), maxevents, timeout);
     }
     if (res > 0)
@@ -299,7 +299,7 @@ EXPORT(int, sceNetEpollWaitCB) {
 EXPORT(Ptr<int>, sceNetErrnoLoc) {
     TRACY_FUNC(sceNetErrnoLoc);
     // TLS id was taken from disasm source
-    auto addr = emuenv.kernel.get_thread_tls_addr(emuenv.mem, thread_id, TLS_NET_ERRNO);
+    auto addr = thread.state.tls_addr(TLS_NET_ERRNO);
     return addr.cast<int>();
 }
 
@@ -455,7 +455,7 @@ EXPORT(Ptr<const char>, sceNetInetNtop, int af, const void *src, Ptr<char> dst, 
     const char *res = inet_ntop(af, src, dst_ptr, size);
 #endif
     if (res == nullptr) {
-        ret_net_errno(emuenv, thread_id, SCE_NET_ERROR_EAFNOSUPPORT);
+        ret_net_errno(emuenv, thread, SCE_NET_ERROR_EAFNOSUPPORT);
         return Ptr<char>();
     }
     return dst;
@@ -535,7 +535,7 @@ EXPORT(int, sceNetRecvfrom, int sid, void *buf, unsigned int len, int flags, Sce
     unsigned int fromlen_copy = fromlen ? *fromlen : 0;
     int res;
     {
-        const GuestThread::HostWait waiting(*emuenv.kernel.get_thread(thread_id), std::nullopt);
+        const GuestThread::HostWait waiting(thread, std::nullopt);
         res = sock->recv_packet(staging.data(), len, flags, from ? &from_copy : nullptr, fromlen ? &fromlen_copy : nullptr);
     }
     if (res > 0) {
@@ -605,7 +605,7 @@ EXPORT(int, sceNetSend, int sid, const void *msg, unsigned int len, int flags) {
         RET_NET_ERRNO(SCE_NET_ERROR_EBADF);
     int res;
     {
-        const GuestThread::HostWait waiting(*emuenv.kernel.get_thread(thread_id), std::nullopt);
+        const GuestThread::HostWait waiting(thread, std::nullopt);
         res = sock->send_packet(msg, len, flags, nullptr, 0);
     }
     RET_NET_ERRNO(res);
@@ -635,7 +635,7 @@ EXPORT(int, sceNetSendmsg, int sid, const SceNetMsghdr *msg, int flags) {
 
     int res;
     {
-        const GuestThread::HostWait waiting(*emuenv.kernel.get_thread(thread_id), std::nullopt);
+        const GuestThread::HostWait waiting(thread, std::nullopt);
         res = sock->send_packet(buf.data(), total_len, flags, msg->msg_name.get(emuenv.mem), msg->msg_namelen);
     }
     RET_NET_ERRNO(res);
@@ -654,7 +654,7 @@ EXPORT(int, sceNetSendto, int sid, const void *msg, unsigned int len, int flags,
 
     int res;
     {
-        const GuestThread::HostWait waiting(*emuenv.kernel.get_thread(thread_id), std::nullopt);
+        const GuestThread::HostWait waiting(thread, std::nullopt);
         res = sock->send_packet(msg, len, flags, (SceNetSockaddr *)&to_in, tolen);
     }
     RET_NET_ERRNO(res);

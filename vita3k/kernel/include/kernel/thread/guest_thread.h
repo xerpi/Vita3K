@@ -43,7 +43,7 @@ struct CallResult {
 };
 
 // A guest thread: its Vita OS state, its CPU and the run loop its host thread runs
-struct GuestThread final {
+struct GuestThread final : std::enable_shared_from_this<GuestThread> {
     // The thread's Vita OS facts. Outside the kernel only the fixed ones are read directly, the rest
     // through the methods below, with mutex held.
     ThreadState state;
@@ -101,7 +101,7 @@ struct GuestThread final {
     // Sends a signal to this thread. Fails if the previous one was not consumed yet.
     SceInt32 send_signal();
     // Blocks waiter until this thread becomes dormant, then writes its exit status to exit_status.
-    [[nodiscard]] WaitResult wait_for_thread_end(const GuestThreadPtr &waiter, SceInt32 *exit_status, Deadline deadline, bool callbacks);
+    [[nodiscard]] WaitResult wait_for_thread_end(GuestThread &waiter, SceInt32 *exit_status, Deadline deadline, bool callbacks);
     // Waits on target until a wake, a notified callback, the thread's end or the deadline. A
     // notified callback ends it with NOTIFY_CALLBACK.
     [[nodiscard]] WaitResult wait(WaitTarget target, Deadline deadline);

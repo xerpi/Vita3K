@@ -28,8 +28,9 @@
 
 #include <config/state.h>
 #include <emuenv/state.h>
+#include <kernel/thread/guest_thread.h>
 
-using ImportFn = CallResult (*)(EmuEnvState &emuenv, CPUState &cpu, SceUID thread_id);
+using ImportFn = CallResult (*)(EmuEnvState &emuenv, GuestThread &thread);
 using ImportVarFactory = std::function<Address(EmuEnvState &emuenv)>;
 using LibraryInitFn = std::function<void(EmuEnvState &emuenv)>;
 
@@ -46,23 +47,24 @@ Arg read_bridged_arg(CPUState &cpu, const MemState &mem) {
 
 // Creates a bridge function that reads arguments from the CPU state and calls the export function.
 template <auto ExportFn, typename Ret, typename... Args>
-ImportFn make_bridge(const char *name, Ret (*)(EmuEnvState &, SceUID, const char *, Args...)) {
+ImportFn make_bridge(const char *name, Ret (*)(EmuEnvState &, GuestThread &, const char *, Args...)) {
     static const char *export_name = name;
     static constexpr auto layout = lay_out<typename BridgeTypes<Args>::ArmType...>();
 
-    return [](EmuEnvState &emuenv, CPUState &cpu, SceUID thread_id) {
+    return [](EmuEnvState &emuenv, GuestThread &thread) {
 #ifdef TRACY_ENABLE
         ZoneNamedC(___tracy_scoped_zone, 0xFFF34C, emuenv.cfg.tracy_primitive_impl);
         ZoneNameV(___tracy_scoped_zone, export_name, strlen(export_name));
 #endif
         constexpr auto arr = std::get<0>(layout);
         constexpr auto vargs_state = std::get<1>(layout);
+        CPUState &cpu = *thread.cpu;
         return [&]<size_t... Is>(std::index_sequence<Is...>) -> CallResult {
             if constexpr (std::is_void_v<Ret>) {
-                ExportFn(emuenv, thread_id, export_name, read_bridged_arg<arr[Is], vargs_state, Args>(cpu, emuenv.mem)...);
+                ExportFn(emuenv, thread, export_name, read_bridged_arg<arr[Is], vargs_state, Args>(cpu, emuenv.mem)...);
                 return {};
             } else {
-                return call_result(ExportFn(emuenv, thread_id, export_name, read_bridged_arg<arr[Is], vargs_state, Args>(cpu, emuenv.mem)...));
+                return call_result(ExportFn(emuenv, thread, export_name, read_bridged_arg<arr[Is], vargs_state, Args>(cpu, emuenv.mem)...));
             }
         }(std::index_sequence_for<Args...>{});
     };

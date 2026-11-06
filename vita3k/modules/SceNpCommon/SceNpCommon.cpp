@@ -50,10 +50,9 @@ struct SceNpAuthRequestParameter {
 
 EXPORT(int, sceNpAuthCreateStartRequest, const SceNpAuthRequestParameter *param) {
     TRACY_FUNC(sceNpAuthCreateStartRequest, param);
-    const GuestThreadPtr thread = emuenv.kernel.get_thread(thread_id);
     // todo: this callback function should be called from sceNpCheckCallback
     STUBBED("Immediately call ticket callback");
-    thread->call_guest(param->ticketCb.address(), { 1, 1, param->cbArg.address() });
+    thread.call_guest(param->ticketCb.address(), { 1, 1, param->cbArg.address() });
     return 1;
 }
 

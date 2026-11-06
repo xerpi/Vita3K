@@ -94,7 +94,7 @@ struct PlayerRuntimeState : public ModuleRuntimeState {
 class PlayerModule : public Module {
 public:
     void set_default_preset(const MemState &mem, ModuleData &data) override;
-    bool process(KernelState &kern, const MemState &mem, const SceUID thread_id, ModuleData &data, std::unique_lock<std::recursive_mutex> &scheduler_lock, std::unique_lock<std::mutex> &voice_lock) override;
+    bool process(const MemState &mem, GuestThread &thread, ModuleData &data, std::unique_lock<std::recursive_mutex> &scheduler_lock, std::unique_lock<std::mutex> &voice_lock) override;
     uint32_t module_id() const override { return 0x5CE6; }
     uint32_t get_guest_state_size() const override { return sizeof(SceNgsPlayerStates); }
     std::unique_ptr<ModuleLogicalState> create_logical_state() const override;

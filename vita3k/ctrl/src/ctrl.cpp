@@ -22,7 +22,6 @@
 #include <config/state.h>
 #include <display/functions.h>
 #include <display/state.h>
-#include <kernel/state.h>
 #include <touch/functions.h>
 #include <util/log.h>
 
@@ -365,7 +364,7 @@ SceUInt32 ctrl_peek_buttons(EmuEnvState &emuenv, int port) {
     return buttons;
 }
 
-int ctrl_get(const SceUID thread_id, EmuEnvState &emuenv, int port, SceCtrlData2 *pData, SceUInt32 count, bool negative, bool is_peek, bool is_v2, bool from_ext) {
+int ctrl_get(GuestThread &thread, EmuEnvState &emuenv, int port, SceCtrlData2 *pData, SceUInt32 count, bool negative, bool is_peek, bool is_v2, bool from_ext) {
     if (port > 1 && !emuenv.cfg.current_config.pstv_mode) {
         const char *export_name = "sceCtrl*Buffer*";
         return RET_ERROR(SCE_CTRL_ERROR_NO_DEVICE);
@@ -382,8 +381,6 @@ int ctrl_get(const SceUID thread_id, EmuEnvState &emuenv, int port, SceCtrlData2
         const uint64_t current_vcount = emuenv.display.vblank_count.load();
         if (current_vcount <= state.last_vcount[port]) {
             // sceCtrlRead is blocking, wait for the next vsync for the buffer to be updated
-            auto thread = emuenv.kernel.get_thread(thread_id);
-
             wait_vblank(emuenv.display, thread, state.last_vcount[port] + 1, false);
         }
         uint64_t vblank_count = emuenv.display.vblank_count.load();

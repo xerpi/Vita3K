@@ -68,7 +68,7 @@ constexpr uint64_t lib_export_key(uint32_t library_nid, uint32_t nid) {
 }
 
 using NotFoundVars = std::map<Address, uint32_t>;
-using CallImportFunc = std::function<CallResult(CPUState &cpu, uint32_t nid, SceUID thread_id)>;
+using CallImportFunc = std::function<CallResult(GuestThread &thread, uint32_t nid)>;
 
 struct CodecEngineBlock {
     uint32_t size;
@@ -178,11 +178,10 @@ struct KernelState {
     GuestThreadPtr get_thread(SceUID thread_id);
 
     // Creates a callback owned by thread and returns its UID.
-    SceUID create_callback(const GuestThreadPtr &thread, const char *name, Ptr<SceKernelCallbackFunction> func, Ptr<void> common);
+    SceUID create_callback(GuestThread &thread, const char *name, Ptr<SceKernelCallbackFunction> func, Ptr<void> common);
     // Deletes the callback with this UID for the thread deleter, so it never runs again. Returns false
     // if there is none.
     bool delete_callback(SceUID id, SceUID deleter);
-    Ptr<Ptr<void>> get_thread_tls_addr(MemState &mem, SceUID thread_id, int key);
 
     // Whether the emulator pause holds every thread. Threads read it without mutex, under their own lock.
     bool is_threads_paused() const { return threads_paused; }

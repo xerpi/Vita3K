@@ -28,10 +28,9 @@
 #include <util/tracy.h>
 TRACY_MODULE_NAME(SceDisplay);
 
-static int display_wait(EmuEnvState &emuenv, SceUID thread_id, int vcount, const bool is_since_setbuf, const bool is_cb) {
-    const auto &thread = emuenv.kernel.get_thread(thread_id);
+static int display_wait(EmuEnvState &emuenv, GuestThread &thread, int vcount, const bool is_since_setbuf, const bool is_cb) {
     if (is_cb)
-        thread->process_callbacks();
+        thread.process_callbacks();
 
     if (emuenv.display.fps_hack)
         // a game can use a vcount of 2 to render as 30fps
@@ -45,7 +44,7 @@ static int display_wait(EmuEnvState &emuenv, SceUID thread_id, int vcount, const
         // the wait is considered starting from the last time the thread resumed
         // from a vblank wait (sceDisplayWait...) and not from the time this function was called
         // but we still need to wait at least for one vblank
-        target_vcount = thread->next_display_wait(emuenv.display.vblank_count + 1, vcount);
+        target_vcount = thread.next_display_wait(emuenv.display.vblank_count + 1, vcount);
     }
 
     wait_vblank(emuenv.display, thread, target_vcount, is_cb);
@@ -220,40 +219,40 @@ EXPORT(SceInt32, sceDisplayUnregisterVblankStartCallback, SceUID uid) {
 
 EXPORT(SceInt32, sceDisplayWaitSetFrameBuf) {
     TRACY_FUNC(sceDisplayWaitSetFrameBuf);
-    return display_wait(emuenv, thread_id, 1, true, false);
+    return display_wait(emuenv, thread, 1, true, false);
 }
 
 EXPORT(SceInt32, sceDisplayWaitSetFrameBufCB) {
     TRACY_FUNC(sceDisplayWaitSetFrameBufCB);
-    return display_wait(emuenv, thread_id, 1, true, true);
+    return display_wait(emuenv, thread, 1, true, true);
 }
 
 EXPORT(SceInt32, sceDisplayWaitSetFrameBufMulti, SceUInt vcount) {
     TRACY_FUNC(sceDisplayWaitSetFrameBufMulti, vcount);
-    return display_wait(emuenv, thread_id, static_cast<int>(vcount), true, false);
+    return display_wait(emuenv, thread, static_cast<int>(vcount), true, false);
 }
 
 EXPORT(SceInt32, sceDisplayWaitSetFrameBufMultiCB, SceUInt vcount) {
     TRACY_FUNC(sceDisplayWaitSetFrameBufMultiCB, vcount);
-    return display_wait(emuenv, thread_id, static_cast<int>(vcount), true, true);
+    return display_wait(emuenv, thread, static_cast<int>(vcount), true, true);
 }
 
 EXPORT(SceInt32, sceDisplayWaitVblankStart) {
     TRACY_FUNC(sceDisplayWaitVblankStart);
-    return display_wait(emuenv, thread_id, 1, false, false);
+    return display_wait(emuenv, thread, 1, false, false);
 }
 
 EXPORT(SceInt32, sceDisplayWaitVblankStartCB) {
     TRACY_FUNC(sceDisplayWaitVblankStartCB);
-    return display_wait(emuenv, thread_id, 1, false, true);
+    return display_wait(emuenv, thread, 1, false, true);
 }
 
 EXPORT(SceInt32, sceDisplayWaitVblankStartMulti, SceUInt vcount) {
     TRACY_FUNC(sceDisplayWaitVblankStartMulti, vcount);
-    return display_wait(emuenv, thread_id, static_cast<int>(vcount), false, false);
+    return display_wait(emuenv, thread, static_cast<int>(vcount), false, false);
 }
 
 EXPORT(SceInt32, sceDisplayWaitVblankStartMultiCB, SceUInt vcount) {
     TRACY_FUNC(sceDisplayWaitVblankStartMultiCB, vcount);
-    return display_wait(emuenv, thread_id, static_cast<int>(vcount), false, true);
+    return display_wait(emuenv, thread, static_cast<int>(vcount), false, true);
 }

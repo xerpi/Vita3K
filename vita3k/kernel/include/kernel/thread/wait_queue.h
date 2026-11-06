@@ -23,13 +23,11 @@
 
 #include <algorithm>
 #include <concepts>
-#include <memory>
 #include <mutex>
 #include <optional>
 
 // Only declared here so ThreadState can hold a WaitQueue. The template bodies need the full type.
 struct GuestThread;
-using GuestThreadPtr = std::shared_ptr<GuestThread>;
 
 // Threads blocked on a sync object, in FIFO or thread priority order.
 // Entry is the per-waiter data the object needs, such as a requested count.
@@ -39,7 +37,7 @@ template <typename Entry>
 class WaitQueue {
 public:
     struct Waiter {
-        GuestThreadPtr thread;
+        GuestThread &thread;
         // Taken when the wait starts, the queue is not reordered if it changes
         int priority = 0;
         Entry entry;
@@ -64,15 +62,15 @@ public:
     // Blocks thread on target until a waker gives it a result, it is being deleted, or the deadline passes.
     // thread must be the guest thread making this HLE call.
     // With target.callbacks, the thread runs its notified callbacks while it waits.
-    [[nodiscard]] WaitResult wait(std::unique_lock<std::mutex> &lock, const GuestThreadPtr &thread, WaitTarget target, Entry entry, Deadline deadline) {
+    [[nodiscard]] WaitResult wait(std::unique_lock<std::mutex> &lock, GuestThread &thread, WaitTarget target, Entry entry, Deadline deadline) {
         Waiter waiter{ .thread = thread, .entry = std::move(entry) };
-        waiter.priority = waiter.thread->get_priority();
+        waiter.priority = waiter.thread.get_priority();
         push(waiter);
         while (true) {
             lock.unlock();
-            WaitResult r = waiter.thread->wait(target, deadline);
+            WaitResult r = waiter.thread.wait(target, deadline);
             if (r && *r == SCE_KERNEL_ERROR_NOTIFY_CALLBACK)
-                r = waiter.thread->run_callbacks();
+                r = waiter.thread.run_callbacks();
             lock.lock();
             // A waker's result wins, it already handed over what the waiter asked for
             if (waiter.result)
@@ -128,7 +126,7 @@ public:
     void wake(Waiter &waiter, SceInt32 result = SCE_KERNEL_OK) {
         waiter.result = result;
         remove(waiter);
-        waiter.thread->wake();
+        waiter.thread.wake();
     }
 
     // Ends the wait of every waiter accepted by pick, in queue order. Returns how many were woken.
@@ -140,7 +138,7 @@ public:
                 continue;
             remove(waiter);
             waiter.result = result;
-            waiter.thread->wake();
+            waiter.thread.wake();
             ++woken;
         }
         return woken;

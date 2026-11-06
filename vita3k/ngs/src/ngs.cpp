@@ -16,7 +16,7 @@
 // 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
 #include <cpu/state.h>
-#include <kernel/state.h>
+#include <kernel/thread/guest_thread.h>
 
 #include <ngs/modules/atrac9.h>
 #include <ngs/state.h>
@@ -144,9 +144,9 @@ bool ModuleData::unlock_params(const MemState &mem) {
     return false;
 }
 
-void ModuleData::invoke_callback(KernelState &kernel, const MemState &mem, const SceUID thread_id, const uint32_t reason1,
+void ModuleData::invoke_callback(const MemState &mem, GuestThread &thread, const uint32_t reason1,
     const uint32_t reason2, Address reason_ptr) {
-    return parent->invoke_callback(kernel, mem, thread_id, callback, user_data, parent->rack->modules[index]->module_id(),
+    return parent->invoke_callback(mem, thread, callback, user_data, parent->rack->modules[index]->module_id(),
         reason1, reason2, reason_ptr);
 }
 
@@ -316,14 +316,13 @@ bool Voice::set_preset(const MemState &mem, const SceNgsVoicePreset *preset) {
     return true;
 }
 
-void Voice::invoke_callback(KernelState &kernel, const MemState &mem, const SceUID thread_id, Ptr<void> callback, Ptr<void> user_data,
+void Voice::invoke_callback(const MemState &mem, GuestThread &thread, Ptr<void> callback, Ptr<void> user_data,
     const uint32_t module_id, const uint32_t reason1, const uint32_t reason2, Address reason_ptr) {
     if (!callback) {
         return;
     }
 
-    const GuestThreadPtr thread = kernel.get_thread(thread_id);
-    const Address callback_info_addr = thread->stack_alloc(sizeof(SceNgsCallbackInfo));
+    const Address callback_info_addr = thread.stack_alloc(sizeof(SceNgsCallbackInfo));
 
     SceNgsCallbackInfo *info = Ptr<SceNgsCallbackInfo>(callback_info_addr).get(mem);
     info->rack_handle = Ptr<void>(rack, mem);
@@ -334,8 +333,8 @@ void Voice::invoke_callback(KernelState &kernel, const MemState &mem, const SceU
     info->callback_ptr = Ptr<void>(reason_ptr);
     info->userdata = user_data;
 
-    thread->call_guest(callback.address(), { callback_info_addr });
-    thread->stack_free(sizeof(SceNgsCallbackInfo));
+    thread.call_guest(callback.address(), { callback_info_addr });
+    thread.stack_free(sizeof(SceNgsCallbackInfo));
 }
 
 uint32_t System::get_required_memspace_size(SceNgsSystemInitParams *parameters) {

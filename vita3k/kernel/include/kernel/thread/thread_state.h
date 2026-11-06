@@ -62,6 +62,8 @@ struct ThreadState final {
 
     // A word of the thread's TLS, by its TLS_* index
     int &tls_slot(int index) const { return tls.get_ptr<int>().get(mem)[index]; }
+    // The guest address of TLS slot key, or null for a key out of range
+    Ptr<Ptr<void>> tls_addr(int key) const;
 
     // Whether the thread is ending
     bool exiting() const { return ending != Ending::none; }

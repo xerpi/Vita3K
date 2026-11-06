@@ -21,13 +21,13 @@
 #include <module/bridge.h>
 #include <util/types.h>
 
-struct CPUState;
 struct EmuEnvState;
+struct GuestThread;
 struct KernelState;
 
 void init_libraries(EmuEnvState &emuenv);
 void init_exported_vars(EmuEnvState &emuenv);
-CallResult call_import(EmuEnvState &emuenv, CPUState &cpu, uint32_t nid, SceUID thread_id);
+CallResult call_import(EmuEnvState &emuenv, GuestThread &thread, uint32_t nid);
 
 // Returns true if the NID has an HLE (C++) implementation in nids.inc.
 // Used to determine if an LLE export should be overridden with HLE dispatch.

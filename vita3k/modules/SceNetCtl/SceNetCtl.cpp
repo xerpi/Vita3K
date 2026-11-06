@@ -136,7 +136,9 @@ struct SceNetCtlIfStat {
     SceUInt32 reserved[8];
 };
 
-static void adhoc_thread(EmuEnvState &emuenv, int thread_id) {
+// Calls exports for the guest thread that called sceNetCtlInit, which it keeps alive
+static void adhoc_thread(EmuEnvState &emuenv, GuestThreadPtr caller) {
+    GuestThread &thread = *caller;
     LOG_INFO("Adhoc thread started");
     constexpr uint16_t AUTH_RECV_VPORT = 0x8235;
     constexpr uint16_t AUTH_SEND_VPORT = 0x8236;
@@ -489,13 +491,11 @@ EXPORT(int, sceNetCtlCheckCallback) {
         return RET_ERROR(SCE_NET_CTL_ERROR_NOT_INITIALIZED);
     }
 
-    const GuestThreadPtr thread = emuenv.kernel.get_thread(thread_id);
-
     // TODO: Check if the network is connected
     if (emuenv.net.state != 1) {
         for (auto &callback : emuenv.netctl.callbacks) {
             if (callback.pc != 0) {
-                thread->call_guest(callback.pc, { SCE_NET_CTL_EVENT_TYPE_DISCONNECTED, callback.arg });
+                thread.call_guest(callback.pc, { SCE_NET_CTL_EVENT_TYPE_DISCONNECTED, callback.arg });
             }
         }
         emuenv.net.state = 1;
@@ -505,7 +505,7 @@ EXPORT(int, sceNetCtlCheckCallback) {
     if ((emuenv.netctl.adhocEvent != SCE_NET_CTL_EVENT_TYPE_NONE) && (emuenv.netctl.adhocEvent != emuenv.netctl.lastNotifiedAdhocEvent)) {
         for (auto &callback : emuenv.netctl.adhocCallbacks) {
             if (callback.pc != 0)
-                thread->call_guest(callback.pc, { emuenv.netctl.adhocEvent, callback.arg });
+                thread.call_guest(callback.pc, { emuenv.netctl.adhocEvent, callback.arg });
         }
 
         // Update the last notified adhoc event
@@ -747,7 +747,7 @@ EXPORT(int, sceNetCtlInit) {
 
     emuenv.netctl.inited = true;
     emuenv.netctl.adhocThreadRun = true;
-    emuenv.netctl.adhocThread = std::thread(adhoc_thread, std::ref(emuenv), thread_id);
+    emuenv.netctl.adhocThread = std::thread(adhoc_thread, std::ref(emuenv), thread.shared_from_this());
 
     return STUBBED("Stub");
 }
