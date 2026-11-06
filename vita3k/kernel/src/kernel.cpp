@@ -191,8 +191,9 @@ Ptr<Ptr<void>> KernelState::get_thread_tls_addr(MemState &mem, SceUID thread_id,
     Ptr<Ptr<void>> address(0);
     // magic numbers taken from decompiled source. There is 0x400 unused bytes of unknown usage
     if (key <= 0x100 && key >= 0) {
-        const GuestThreadPtr thread = get_thread(thread_id);
-        address = thread->state.tls.get_ptr<Ptr<void>>() + key;
+        // A thread that doesn't exist has no TLS
+        if (const GuestThreadPtr thread = get_thread(thread_id))
+            address = thread->state.tls.get_ptr<Ptr<void>>() + key;
     } else {
         LOG_ERROR("Wrong tls slot index. TID:{} index:{}", thread_id, key);
     }
