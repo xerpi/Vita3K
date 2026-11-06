@@ -17,6 +17,7 @@
 
 #pragma once
 
+#include <cpu/disasm/state.h>
 #include <gui-qt/custom_dock_widget.h>
 
 #include <QTimer>
@@ -89,4 +90,6 @@ private:
     QLineEdit *m_disasm_address = nullptr;
     QSpinBox *m_disasm_count = nullptr;
     QComboBox *m_disasm_arch = nullptr;
+    // Its own disassembler, not shared with a running thread
+    DisasmState m_disasm{};
 };

@@ -25,12 +25,14 @@
 
 #include <cpu/state.h>
 
+#include <array>
 #include <bit>
 #include <cerrno>
 #include <iterator>
 #include <kernel/state.h>
 #include <mem/state.h>
 #include <optional>
+#include <span>
 #include <sstream>
 
 // Sockets
@@ -284,37 +286,6 @@ static std::string cmd_get_current_thread(EmuEnvState &state, PacketCommand &com
     return "QC" + to_hex(state.gdb.current_thread);
 }
 
-static void modify_reg(CPUState &state, uint32_t reg, uint32_t value) {
-    if (reg <= 12) {
-        state.set_reg(reg, value);
-        return;
-    }
-
-    if (reg == 13) {
-        state.set_sp(value);
-        return;
-    }
-    if (reg == 14) {
-        state.set_lr(value);
-        return;
-    }
-    if (reg == 15) {
-        state.set_pc(value);
-        return;
-    }
-
-    if (reg == REG_FPSCR) {
-        state.set_fpscr(value);
-        return;
-    }
-    if (reg == REG_CPSR) {
-        state.set_cpsr(value);
-        return;
-    }
-
-    LOG_GDB("GDB Server Modified Invalid Register {}", reg);
-}
-
 // How many 32-bit words a register has in p and P packets
 static size_t reg_words(uint32_t reg) {
     if (reg >= REG_D0 && reg < REG_D0 + VFP_DOUBLE_REGS)
@@ -339,18 +310,20 @@ static std::optional<uint32_t> reg_first_word(uint32_t reg) {
     return std::nullopt;
 }
 
-static void write_float_regs(CPUState &cpu, size_t first, size_t count, const std::string &hex) {
-    for (size_t i = 0; i < count; i++)
-        cpu.set_float_reg(first + i, std::bit_cast<float>(parse_reg(hex.substr(i * 8, 8))));
+// The thread gdb selected, or null
+static GuestThreadPtr selected_thread(EmuEnvState &state) {
+    const auto guard = std::lock_guard(state.kernel.mutex);
+    const auto it = state.kernel.threads.find(state.gdb.current_thread);
+    return it == state.kernel.threads.end() ? nullptr : it->second;
 }
 
 static std::string cmd_read_registers(EmuEnvState &state, PacketCommand &command) {
-    const auto guard = std::lock_guard(state.kernel.mutex);
-    if (state.gdb.current_thread == -1
-        || !state.kernel.threads.contains(state.gdb.current_thread))
+    const GuestThreadPtr thread = selected_thread(state);
+    if (!thread)
         return "E00";
-
-    const CPUContext context = state.kernel.threads[state.gdb.current_thread]->cpu->save_context();
+    CPUContext context;
+    if (!thread->debugger_context(context))
+        return "E01";
 
     // gdb reads the registers after cpsr one by one with p
     std::string str;
@@ -361,28 +334,28 @@ static std::string cmd_read_registers(EmuEnvState &state, PacketCommand &command
 }
 
 static std::string cmd_write_registers(EmuEnvState &state, PacketCommand &command) {
-    const auto guard = std::lock_guard(state.kernel.mutex);
-    if (state.gdb.current_thread == -1
-        || !state.kernel.threads.contains(state.gdb.current_thread))
+    const GuestThreadPtr thread = selected_thread(state);
+    if (!thread)
         return "E00";
 
-    CPUState &cpu = *state.kernel.threads[state.gdb.current_thread]->cpu.get();
-
+    // r0 to r15 and cpsr, as many as the packet has
     const std::string content = content_string(command).substr(1);
-
-    for (uint32_t a = 0; a <= REG_CPSR && a < content.size() / 8; a++)
-        modify_reg(cpu, a, parse_reg(content.substr(a * 8, 8)));
-
+    std::array<uint32_t, CPUContext::WORD_CPSR + 1> words;
+    const size_t count = std::min(words.size(), content.size() / 8);
+    for (size_t i = 0; i < count; i++)
+        words[i] = parse_reg(content.substr(i * 8, 8));
+    if (!thread->set_debugger_regs(0, std::span(words).first(count)))
+        return "E01";
     return "OK";
 }
 
 static std::string cmd_read_register(EmuEnvState &state, PacketCommand &command) {
-    const auto guard = std::lock_guard(state.kernel.mutex);
-    if (state.gdb.current_thread == -1
-        || !state.kernel.threads.contains(state.gdb.current_thread))
+    const GuestThreadPtr thread = selected_thread(state);
+    if (!thread)
         return "E00";
-
-    const CPUContext context = state.kernel.threads[state.gdb.current_thread]->cpu->save_context();
+    CPUContext context;
+    if (!thread->debugger_context(context))
+        return "E01";
 
     const std::string content = content_string(command);
     const uint32_t reg = parse_hex(content.substr(1));
@@ -399,43 +372,36 @@ static std::string cmd_read_register(EmuEnvState &state, PacketCommand &command)
 }
 
 static std::string cmd_write_register(EmuEnvState &state, PacketCommand &command) {
-    const auto guard = std::lock_guard(state.kernel.mutex);
-    if (state.gdb.current_thread == -1
-        || !state.kernel.threads.contains(state.gdb.current_thread))
+    const GuestThreadPtr thread = selected_thread(state);
+    if (!thread)
         return "E00";
-
-    CPUState &cpu = *state.kernel.threads[state.gdb.current_thread]->cpu.get();
 
     const std::string content = content_string(command);
     const size_t equal_index = content.find('=');
     const uint32_t reg = parse_hex(content.substr(1, equal_index - 1));
     const std::string value = content.substr(equal_index + 1);
-    if (value.size() != reg_words(reg) * 8)
+    const size_t count = reg_words(reg);
+    if (value.size() != count * 8)
         return "E00";
-    if (reg >= REG_D0 && reg < REG_D0 + VFP_DOUBLE_REGS)
-        write_float_regs(cpu, (reg - REG_D0) * 2, 2, value);
-    else if (reg >= REG_Q0 && reg < REG_Q0 + NEON_QUAD_REGS)
-        write_float_regs(cpu, (reg - REG_Q0) * 4, 4, value);
-    else
-        modify_reg(cpu, reg, parse_reg(value));
-
+    const std::optional<uint32_t> first = reg_first_word(reg);
+    if (!first) {
+        LOG_GDB("GDB Server Modified Invalid Register {}", reg);
+        return "OK";
+    }
+    // A double or quad register is written whole, the low word first
+    std::array<uint32_t, 4> words;
+    for (size_t i = 0; i < count; i++)
+        words[i] = parse_reg(value.substr(i * 8, 8));
+    if (!thread->set_debugger_regs(*first, std::span(words).first(count)))
+        return "E01";
     return "OK";
 }
 
 static bool check_memory_region(Address address, Address length, MemState &mem) {
-    if (!address) {
-        return false;
-    }
-
-    Address it = address;
-    bool valid = true;
-    for (; it < address + length; it += mem.host_page_size) {
-        if (!is_valid_addr(mem, it)) {
-            valid = false;
-            break;
-        }
-    }
-    return valid;
+    // Every page the range touches, with the end in 64 bits so a range at the top of the address
+    // space doesn't wrap around to an empty one
+    const uint64_t end = static_cast<uint64_t>(address) + length;
+    return address && end < (uint64_t{ 1 } << 32) && is_valid_addr_range(mem, address, static_cast<Address>(end));
 }
 
 static std::string cmd_read_memory(EmuEnvState &state, PacketCommand &command) {
@@ -506,9 +472,8 @@ static std::string cmd_write_binary(EmuEnvState &state, PacketCommand &command) 
 
 static std::string cmd_detach(EmuEnvState &state, PacketCommand &command) { return "OK"; }
 
-static std::string log_stack_traceback(EmuEnvState &state, CPUState &cpu) {
+static std::string log_stack_traceback(EmuEnvState &state, Address sp) {
     std::string str;
-    const Address sp = cpu.get_sp();
     for (Address addr = sp; addr <= sp + 1024; addr += 4) {
         if (!Ptr<uint32_t>(addr).valid(state.mem))
             continue;
@@ -519,9 +484,11 @@ static std::string log_stack_traceback(EmuEnvState &state, CPUState &cpu) {
     return str;
 }
 
-// The stop reply for a thread that stopped on a trap
-static std::string stop_reply(SceUID thread_id) {
-    return "T05thread:" + to_hex(thread_id) + ";";
+// The stop reply for thread, or an error once it is deleted
+static std::string stop_reply(const GuestThread &thread) {
+    if (thread.get_status() == ThreadStatus::deleted)
+        return "E01";
+    return "T05thread:" + to_hex(thread.state.id) + ";";
 }
 
 static std::vector<GuestThreadPtr> list_threads(EmuEnvState &state) {
@@ -555,28 +522,29 @@ static std::string cmd_continue(EmuEnvState &state, PacketCommand &command) {
             if (!thread)
                 return "E00";
 
-            // A thread something else holds can't step, and gdb takes the error as a stop
-            // TODO: a step into a call that waits on a thread the debugger holds never returns
+            // A thread that isn't at a stop, or that something else holds, can't step, and gdb takes
+            // the error as a stop
             if (!thread->step())
                 return "E01";
 
             state.gdb.current_thread = thread_id;
-            return stop_reply(thread_id);
+            return stop_reply(*thread);
         }
         case 'c':
         case 'C': {
             // Resume the world. A thread something else holds stays stopped.
             state.kernel.set_threads_suspended(false);
 
-            // Wait until some thread hits a breakpoint
+            // Wait until some thread hits a breakpoint, and copy its registers while it's stopped
             GuestThreadPtr stopped;
+            CPUContext context;
             while (!stopped) {
                 auto lock = std::unique_lock(state.kernel.mutex);
 
                 if (state.gdb.server_die)
                     return "";
                 for (const auto &[_, thread] : state.kernel.threads) {
-                    if (thread->stopped_at_breakpoint()) {
+                    if (thread->debugger_context(context)) {
                         stopped = thread;
                         break;
                     }
@@ -588,16 +556,16 @@ static std::string cmd_continue(EmuEnvState &state, PacketCommand &command) {
             }
 
             LOG_INFO("GDB Breakpoint trigger (thread name: {}, thread_id: {})", stopped->state.name, stopped->state.id);
-            LOG_INFO("PC: {} LR: {}", stopped->cpu->get_pc(), stopped->cpu->get_lr());
-            LOG_INFO("{}", log_stack_traceback(state, *stopped->cpu));
+            LOG_INFO("PC: {} LR: {}", context.get_pc(), context.get_lr());
+            LOG_INFO("{}", log_stack_traceback(state, context.get_sp()));
 
-            // Stop the world. A thread inside a kernel call stops when the call returns.
+            // Hold every thread for the debugger and wait until each one is at a stop or ended
             state.kernel.set_threads_suspended(true);
             for (const GuestThreadPtr &thread : list_threads(state))
-                thread->wait_until_not_running();
+                thread->wait_for_debugger_stop();
 
             state.gdb.current_thread = stopped->state.id;
-            return stop_reply(stopped->state.id);
+            return stop_reply(*stopped);
         }
         default:
             LOG_GDB("Unsupported vCont command '{}'", cmd);
@@ -619,8 +587,9 @@ static std::string cmd_thread_alive(EmuEnvState &state, PacketCommand &command) 
     const std::string content = content_string(command);
     const int32_t thread_id = parse_hex(content.substr(1));
 
-    // Assuming a thread is removed from the map when it closes or is killed.
-    if (state.kernel.threads.contains(thread_id))
+    // A deleted thread stays in the map until its host thread ends
+    const auto it = state.kernel.threads.find(thread_id);
+    if (it != state.kernel.threads.end() && it->second->get_status() != ThreadStatus::deleted)
         return "OK";
 
     return "E00";
@@ -641,29 +610,26 @@ static std::string cmd_thread_status(EmuEnvState &state, PacketCommand &command)
 
 static std::string cmd_reason(EmuEnvState &state, PacketCommand &command) { return "S05"; }
 
-static std::string cmd_get_first_thread(EmuEnvState &state, PacketCommand &command) {
+// The thread list reply for thread_info_index, without the deleted threads that wait for their host
+// thread to end
+static std::string thread_info_reply(EmuEnvState &state) {
     const auto guard = std::lock_guard(state.kernel.mutex);
-    state.gdb.thread_info_index = 0;
+    int index = state.gdb.thread_info_index;
+    for (const auto &[id, thread] : state.kernel.threads) {
+        if (thread->get_status() != ThreadStatus::deleted && index-- == 0)
+            return 'm' + to_hex(id);
+    }
+    return "l";
+}
 
-    return 'm' + to_hex(state.kernel.threads.begin()->first);
+static std::string cmd_get_first_thread(EmuEnvState &state, PacketCommand &command) {
+    state.gdb.thread_info_index = 0;
+    return thread_info_reply(state);
 }
 
 static std::string cmd_get_next_thread(EmuEnvState &state, PacketCommand &command) {
-    const auto guard = std::lock_guard(state.kernel.mutex);
-    std::string str;
-
     ++state.gdb.thread_info_index;
-    if (state.gdb.thread_info_index == state.kernel.threads.size()) {
-        str += 'l';
-    } else {
-        auto iter = state.kernel.threads.begin();
-        std::advance(iter, state.gdb.thread_info_index);
-
-        str += 'm';
-        str += to_hex(iter->first);
-    }
-
-    return str;
+    return thread_info_reply(state);
 }
 
 static std::string cmd_add_breakpoint(EmuEnvState &state, PacketCommand &command) {

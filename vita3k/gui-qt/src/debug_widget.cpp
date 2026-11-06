@@ -17,6 +17,7 @@
 
 #include <gui-qt/debug_widget.h>
 
+#include <cpu/disasm/functions.h>
 #include <cpu/state.h>
 #include <emuenv/state.h>
 #include <kernel/state.h>
@@ -44,6 +45,7 @@
 DebugWidget::DebugWidget(EmuEnvState &emuenv, QWidget *parent)
     : custom_dock_widget(tr("Debug"), parent)
     , emuenv(emuenv) {
+    init(m_disasm);
     setup_ui();
 
     m_refresh_timer = new QTimer(this);
@@ -378,11 +380,12 @@ void DebugWidget::on_thread_double_clicked(QTreeWidgetItem *item, int /*column*/
         return;
     }
 
-    CPUState &cpu = *thread->cpu;
-
-    const uint32_t pc = cpu.get_pc();
-    const uint32_t sp = cpu.get_sp();
-    const uint32_t lr = cpu.get_lr();
+    // Registers and status from one copy, taken only at a stop
+    CPUContext context;
+    const std::optional<ThreadStatus> stopped = thread->snapshot_context(context);
+    const uint32_t pc = context.get_pc();
+    const uint32_t sp = context.get_sp();
+    const uint32_t lr = context.get_lr();
 
     auto *dlg = new QDialog(this);
     dlg->setWindowTitle(tr("Thread: %1 (0x%2)")
@@ -401,15 +404,25 @@ void DebugWidget::on_thread_double_clicked(QTreeWidgetItem *item, int /*column*/
     };
 
     form->addRow(tr("Name:"), new QLabel(QString::fromStdString(thread->state.name), dlg));
-    form->addRow(tr("Status:"), new QLabel(thread_status_string(thread->get_status()), dlg));
+    form->addRow(tr("Status:"), new QLabel(thread_status_string(stopped.value_or(thread->get_status())), dlg));
+    if (!stopped) {
+        form->addRow(tr("Registers:"), new QLabel(tr("unavailable while the thread runs"), dlg));
+        layout->addLayout(form);
+        auto *buttons = new QDialogButtonBox(QDialogButtonBox::Close, dlg);
+        connect(buttons, &QDialogButtonBox::rejected, dlg, &QDialog::close);
+        layout->addWidget(buttons);
+        dlg->show();
+        return;
+    }
     form->addRow(tr("PC:"), new QLabel(make_hex(pc), dlg));
     form->addRow(tr("SP:"), new QLabel(make_hex(sp), dlg));
     form->addRow(tr("LR:"), new QLabel(make_hex(lr), dlg));
-    form->addRow(tr("Executing:"), new QLabel(QString::fromStdString(cpu.disassemble(pc)), dlg));
+    const uint8_t *const code = Ptr<const uint8_t>(pc).get(emuenv.mem);
+    form->addRow(tr("Executing:"), new QLabel(QString::fromStdString(disassemble(m_disasm, code, GiB(4) - pc, pc, context.thumb())), dlg));
 
     layout->addLayout(form);
 
-    auto *reg_label = new QLabel(tr("Registers"), dlg);
+    auto *reg_label = new QLabel(tr("Registers (snapshot)"), dlg);
     reg_label->setProperty("themeRole", QStringLiteral("sectionHeader"));
     layout->addWidget(reg_label);
 
@@ -422,7 +435,7 @@ void DebugWidget::on_thread_double_clicked(QTreeWidgetItem *item, int /*column*/
     for (int i = 0; i < 13; i++) {
         auto *row = new QTreeWidgetItem(reg_tree);
         row->setText(0, QStringLiteral("r%1").arg(i));
-        row->setText(1, make_hex(cpu.get_reg(i)));
+        row->setText(1, make_hex(context.cpu_registers[i]));
     }
     {
         auto *row = new QTreeWidgetItem(reg_tree);
@@ -490,8 +503,6 @@ void DebugWidget::on_disassembly_evaluate() {
     const uint32_t count = static_cast<uint32_t>(m_disasm_count->value());
     const bool thumb = m_disasm_arch->currentText() == QStringLiteral("THUMB");
 
-    CPUState &cpu = *emuenv.kernel.threads.begin()->second->cpu;
-
     QString output;
     uint16_t size = 1;
     uint32_t addr = address;
@@ -503,8 +514,9 @@ void DebugWidget::on_disassembly_evaluate() {
             break;
         }
 
+        const uint8_t *const code = Ptr<const uint8_t>(addr).get(emuenv.mem);
         std::string disasm = fmt::format("{:0>8X}: {}",
-            addr, cpu.disassemble(addr, thumb, &size));
+            addr, disassemble(m_disasm, code, GiB(4) - addr, addr, thumb, &size));
         output += QString::fromStdString(disasm);
         output += QLatin1Char('\n');
         addr += size;

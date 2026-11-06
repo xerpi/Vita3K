@@ -65,6 +65,7 @@ struct ThreadState final {
 
     // Whether the thread is ending
     bool exiting() const { return ending != Ending::none; }
+    bool ended() const { return status == ThreadStatus::dormant || status == ThreadStatus::deleted; }
     // Whether a callback of this thread was notified and hasn't run yet
     bool callbacks_notified() const { return notified_callbacks > 0; }
     // Whether a notified callback ends the current wait. Callbacks don't nest, so a wait inside a

@@ -191,7 +191,7 @@ bool GuestThread::finish_run(std::unique_lock<std::mutex> &lock) {
             // handler must not change the exit status.
             const uint32_t old_returned_value = state.returned_value;
             const Ending old_ending = state.ending;
-            set_ending(Ending::none);
+            state.ending = Ending::none;
             lock.unlock();
             // A thread event handler starts with the VFP state of a new thread, like a callback
             const int ret = call_guest(kernel.thread_event_end.address(), { SCE_KERNEL_THREAD_EVENT_TYPE_END, static_cast<uint32_t>(state.id), 0, kernel.thread_event_end_arg }, true);
@@ -221,7 +221,7 @@ bool GuestThread::finish_run(std::unique_lock<std::mutex> &lock) {
     if (state.ending != Ending::exit)
         return false;
     // The thread is dormant now, and the next run_guest parks it until a start or a delete
-    set_ending(Ending::none);
+    state.ending = Ending::none;
     return true;
 }
 
@@ -261,16 +261,19 @@ std::optional<uint32_t> GuestThread::run_guest(std::unique_lock<std::mutex> &loc
         cv.notify_all();
         if (step) {
             // A stop request made before the step ends it before its instruction, so the step goes
-            // again after the holds, unless the debugger lets the thread go meanwhile
+            // again after the holds
             if (exit.kind == GuestExit::Kind::stopped && !exit.debugger_stop)
                 continue;
             // The step is taken, so a call that a stepped import makes doesn't step too
             step_requested = false;
+        } else if (exit.debugger_stop) {
+            // A breakpoint holds the thread, also before a pending abort handler
+            debugger_hold = true;
         }
         lock.unlock();
 
         // In this order, also when the import ended the thread: the import, the holds at its end,
-        // its result, the exclusive monitor, the abort handler, then the debugger's hold
+        // its result, the exclusive monitor, then the abort handler
         if (exit.kind == GuestExit::Kind::import) {
             const CallResult result = kernel.call_import(*cpu, exit.value, state.id);
             // A hold here shows the registers before the call result is written
@@ -284,8 +287,6 @@ std::optional<uint32_t> GuestThread::run_guest(std::unique_lock<std::mutex> &loc
         if (const std::optional<Address> fault = cpu->take_abort())
             dispatch_abort(*fault);
         lock.lock();
-        if (exit.debugger_stop)
-            debugger_hold = true;
         if (exit.kind == GuestExit::Kind::returned)
             return exit.value;
     }
@@ -469,14 +470,9 @@ ThreadStatus GuestThread::shown_status() const {
     return state.status;
 }
 
-void GuestThread::set_ending(Ending how) {
-    state.ending = how;
-    if (how != Ending::none)
-        step_requested = false;
-}
-
 bool GuestThread::held() const {
-    return !state.exiting() && (debugger_hold || state.vm_suspend_count > 0 || kernel.is_threads_paused());
+    // A step lets the debugger's hold through until the thread's next stop
+    return !state.exiting() && ((debugger_hold && !step_requested) || state.vm_suspend_count > 0 || kernel.is_threads_paused());
 }
 
 void GuestThread::stop_for_holds(std::unique_lock<std::mutex> &lock, bool in_call) {
@@ -488,6 +484,9 @@ void GuestThread::stop_for_holds(std::unique_lock<std::mutex> &lock, bool in_cal
     // The holds can change while the thread waits
     cv.wait(lock, [&] { return !held(); });
     stopped = false;
+    // A step from inside a call runs no instruction, it ends at the next stop
+    if (in_call)
+        step_requested = false;
 }
 
 int GuestThread::stack_free_size() const {
@@ -512,7 +511,9 @@ GuestThread::HostWait::HostWait(GuestThread &thread, std::optional<WaitTarget> s
 }
 
 GuestThread::HostWait::~HostWait() {
-    const std::lock_guard<std::mutex> lock(thread.mutex);
+    std::unique_lock<std::mutex> lock(thread.mutex);
+    // The rest of the call runs once the debugger lets go
+    thread.cv.wait(lock, [&] { return !thread.debugger_freezes(); });
     thread.host_waiting = false;
     if (thread.state.status == ThreadStatus::waiting) {
         thread.state.wait_target = {};
@@ -541,15 +542,17 @@ WaitResult GuestThread::wait_for_thread_end(const GuestThreadPtr &waiter, SceInt
 
 WaitResult GuestThread::wait(WaitTarget target, Deadline deadline) {
     std::unique_lock<std::mutex> lock(mutex);
-    const auto woken = [&] { return state.wait_over(); };
     state.wait_target = target;
     state.status = ThreadStatus::waiting;
     cv.notify_all();
-    bool satisfied = true;
-    if (deadline == Deadline::max())
-        cv.wait(lock, woken);
-    else
-        satisfied = cv.wait_until(lock, deadline, woken);
+    // Ends at a wake, a callback, the thread's end or the deadline, but not while the debugger holds it
+    while (debugger_freezes() || (!state.wait_over() && std::chrono::steady_clock::now() < deadline)) {
+        if (debugger_freezes() || deadline == Deadline::max())
+            cv.wait(lock);
+        else
+            cv.wait_until(lock, deadline);
+    }
+    const bool satisfied = state.wait_over();
     // Before the call writes its result to the registers. A thread something holds goes on to its
     // holds, which keep it from its callbacks and its code.
     state.status = ThreadStatus::running;
@@ -681,8 +684,6 @@ SceInt32 GuestThread::change_affinity_mask(SceInt32 new_affinity_mask) {
 void GuestThread::set_suspended(bool suspended) {
     const std::lock_guard<std::mutex> lock(mutex);
     debugger_hold = suspended;
-    // A step the thread didn't take doesn't outlive the debugger's next call
-    step_requested = false;
     if (suspended && running_guest)
         cpu->request_stop();
     cv.notify_all();
@@ -690,17 +691,13 @@ void GuestThread::set_suspended(bool suspended) {
 
 bool GuestThread::step() {
     std::unique_lock<std::mutex> lock(mutex);
-    // A pause or a ForVM suspend holds the thread, so it doesn't step. One that comes after this
-    // check delays the step until it ends.
-    if (kernel.is_threads_paused() || state.vm_suspend_count > 0)
+    // Only a live stop at the guest code or inside a call has a next instruction. A wait, a host
+    // wait, a pause or a ForVM suspend would keep holding the thread, so it doesn't step.
+    if (!debugger_hold || !(parked || held_in_call) || state.exiting() || state.vm_suspend_count > 0 || kernel.is_threads_paused())
         return false;
-    // A thread with no run, or one that is ending, has no instruction to step, and the wait ends
-    // once it is dormant or deleted
-    step_requested = (state.status == ThreadStatus::running || state.status == ThreadStatus::waiting) && !state.exiting();
-    debugger_hold = false;
+    step_requested = true;
     cv.notify_all();
-    // The thread holds for the debugger again after the instruction
-    cv.wait(lock, [&] { return (debugger_hold && parked) || state.status == ThreadStatus::dormant || state.status == ThreadStatus::deleted; });
+    cv.wait(lock, [&] { return !step_requested && stopped_for_debugger(); });
     return true;
 }
 
@@ -716,14 +713,36 @@ bool GuestThread::hold_before_wait(std::unique_lock<std::mutex> &object_lock) {
     return true;
 }
 
-void GuestThread::wait_until_not_running() {
+void GuestThread::wait_for_debugger_stop() {
     std::unique_lock<std::mutex> lock(mutex);
-    cv.wait(lock, [&] { return !runs(); });
+    cv.wait(lock, [&] { return stopped_for_debugger(); });
 }
 
-bool GuestThread::stopped_at_breakpoint() const {
+bool GuestThread::debugger_context(CPUContext &context) const {
     const std::lock_guard<std::mutex> lock(mutex);
-    return debugger_hold && parked;
+    if (!stopped_for_debugger())
+        return false;
+    context = cpu->save_context();
+    return true;
+}
+
+bool GuestThread::set_debugger_regs(uint32_t first, std::span<const uint32_t> words) {
+    const std::lock_guard<std::mutex> lock(mutex);
+    if (!debugger_hold || !parked || state.exiting())
+        return false;
+    CPUContext context = cpu->save_context();
+    for (size_t i = 0; i < words.size(); i++)
+        context.set_word(first + static_cast<uint32_t>(i), words[i]);
+    cpu->load_context(context);
+    return true;
+}
+
+std::optional<ThreadStatus> GuestThread::snapshot_context(CPUContext &context) const {
+    const std::lock_guard<std::mutex> lock(mutex);
+    if (!at_stop())
+        return std::nullopt;
+    context = cpu->save_context();
+    return shown_status();
 }
 
 void GuestThread::pause_changed() {

@@ -27,6 +27,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <span>
 
 struct KernelState;
 class Callback;
@@ -140,20 +141,24 @@ struct GuestThread final {
     void remove_notified_callback();
 
     // Holds: the debugger, the emulator pause and the ForVM suspend
-    // Stops the thread for the debugger the next time it would run guest code, or lets it run again.
-    // A pause or a ForVM suspend may still hold it after the debugger lets go.
+    // Holds the thread for the debugger at its next stop, or lets it go on. A pause or a ForVM
+    // suspend may still hold it after.
     void set_suspended(bool suspended);
-    // Lets a thread the debugger stopped run one instruction, then waits until it stops again or is
-    // dormant or deleted. Returns false and doesn't step while something else holds the thread.
+    // Lets a thread the debugger stopped go on to its next stop, one instruction later from a stop at
+    // guest code. Returns false for a thread at no stop or that something else holds.
     bool step();
-    // Waits until the thread doesn't run guest code
-    void wait_until_not_running();
+    // Waits until the thread stopped for the debugger or ended
+    void wait_for_debugger_stop();
     // Stops for a ForVM suspend before a new object wait, with object_lock released until nothing
     // holds the thread. Called with object_lock held. Returns whether it stopped.
     bool hold_before_wait(std::unique_lock<std::mutex> &object_lock);
-    // Whether the debugger holds the thread and it has stopped. Once the debugger has let every
-    // thread go, only a breakpoint or a finished step holds a thread for it again.
-    bool stopped_at_breakpoint() const;
+    // Copies the registers into context if the thread stopped for the debugger, else returns false
+    bool debugger_context(CPUContext &context) const;
+    // Writes words into the context from word first on, only at a debugger stop at guest code, since a
+    // call writes its result when it returns. Returns false, writing nothing, otherwise.
+    bool set_debugger_regs(uint32_t first, std::span<const uint32_t> words);
+    // Copies the registers at any stop and returns the shown status, or nothing while it runs
+    std::optional<ThreadStatus> snapshot_context(CPUContext &context) const;
     // Stops the thread's guest code when the emulator pause starts, or lets it run when it ends
     void pause_changed();
 
@@ -176,9 +181,6 @@ private:
     void end_as(ThreadStatus status);
     // The status the guest sees: SUSPENDED for a thread a ForVM suspend holds at its stop
     ThreadStatus shown_status() const;
-    // Sets how the thread ends, which stops its guest code for good and drops a step it didn't take
-    // unless it's none
-    void set_ending(Ending how);
     // Whether the debugger, the emulator pause or a ForVM suspend holds the thread
     bool held() const;
     // Waits with mutex held through lock until nothing holds the thread. in_call marks a stop
@@ -186,8 +188,17 @@ private:
     void stop_for_holds(std::unique_lock<std::mutex> &lock, bool in_call);
     // Whether the thread may run guest code now, or kernel code that changes its registers
     bool runs() const { return state.status == ThreadStatus::running && !parked && !held_in_call && !host_waiting; }
-    // Asks the thread to end, keeping a stronger request already made
-    void request_ending(Ending how) { set_ending(std::max(state.ending, how)); }
+    // Whether the debugger keeps the thread in its wait or host wait. An ending thread goes on.
+    bool debugger_freezes() const { return debugger_hold && !state.exiting(); }
+    // At a stop the thread itself published, where its registers hold still, or ended. Ending
+    // withdraws the stop of a live thread, since its teardown still changes its registers.
+    bool at_stop() const { return state.ended() || (!state.exiting() && !runs()); }
+    bool stopped_for_debugger() const { return debugger_hold && at_stop(); }
+    // Asks the thread to end, keeping a stronger request, and drops a step it didn't take
+    void request_ending(Ending how) {
+        state.ending = std::max(state.ending, how);
+        step_requested = false;
+    }
 
     // A call of guest code from inside a kernel call
     struct GuestCall {
@@ -224,7 +235,7 @@ private:
     // Host flags, guarded by mutex. The guest never sees them.
     // The debugger holds the thread, also after a breakpoint or a finished step
     bool debugger_hold = false;
-    // The debugger asked for one instruction, which the next run of guest code takes
+    // The debugger asked for a step, which ends at the thread's next stop
     bool step_requested = false;
     // The thread waits for its holds before guest code, with its registers still
     bool parked = false;

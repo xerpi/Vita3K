@@ -48,8 +48,7 @@ struct GuestExit {
     };
     Kind kind;
     uint32_t value = 0;
-    // A breakpoint or a step that ran its instruction, so the debugger holds the thread. A stepped
-    // import has it too.
+    // A stopped exit from a breakpoint or a finished step, so the debugger holds the thread
     bool debugger_stop = false;
 };
 
@@ -73,6 +72,18 @@ struct CPUContext {
         if (i < WORD_FPSCR)
             return std::bit_cast<uint32_t>(fpu_registers[i - WORD_S0]);
         return fpscr;
+    }
+
+    // A pc write leaves the Thumb bit in cpsr as it is
+    void set_word(uint32_t i, uint32_t value) {
+        if (i < WORD_CPSR)
+            cpu_registers[i] = value;
+        else if (i == WORD_CPSR)
+            cpsr = value;
+        else if (i < WORD_FPSCR)
+            fpu_registers[i - WORD_S0] = std::bit_cast<float>(value);
+        else
+            fpscr = value;
     }
 
     bool thumb() const {

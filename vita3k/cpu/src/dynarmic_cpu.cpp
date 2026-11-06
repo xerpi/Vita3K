@@ -312,9 +312,8 @@ DynarmicCPU::DynarmicCPU(MemState &mem, SceUID thread_id, std::size_t processor_
 DynarmicCPU::~DynarmicCPU() = default;
 
 GuestExit DynarmicCPU::run(RunMode mode) {
-    const bool step = mode == RunMode::single_step;
     Dynarmic::HaltReason reason;
-    if (step) {
+    if (mode == RunMode::single_step) {
         reason = jit->Step();
     } else {
         // Run until the JIT stops for something other than a step or a cache invalidation
@@ -322,11 +321,11 @@ GuestExit DynarmicCPU::run(RunMode mode) {
             reason = jit->Run();
         } while (reason == Dynarmic::HaltReason::Step || reason == Dynarmic::HaltReason::CacheInvalidation);
     }
-    // The NID is the word after the SVC. A stepped SVC reports the debugger stop with it.
+    // The NID is the word after the SVC
     if (Dynarmic::Has(reason, HALT_IMPORT))
-        return { GuestExit::Kind::import, *Ptr<uint32_t>(get_pc() + 4).get(mem), step };
-    // A run that halted stopped at the return address, and a step never returns
-    if (!step && Dynarmic::Has(reason, HALT_RETURN))
+        return { GuestExit::Kind::import, *Ptr<uint32_t>(get_pc() + 4).get(mem) };
+    // A run or a step that reached the return trap returns
+    if (Dynarmic::Has(reason, HALT_RETURN))
         return { GuestExit::Kind::returned, get_reg(0) };
     // A breakpoint, or a step that ran its instruction. A step that a pending stop request ended
     // before its instruction has neither.

@@ -69,10 +69,8 @@ struct CPUState {
     // protected guest memory, so the kernel code after an exit can note one too.
     std::optional<Address> take_abort();
 
-    // Called by the executor, or by another thread under the GuestThread's mutex while the thread
-    // has no run or is parked, or is waiting for a read. A thread that stopped before may run
-    // again, so that alone isn't enough.
-    // TODO: the gdb stub doesn't take the mutex for them yet.
+    // Called by the executor, or by another thread under the GuestThread's mutex while the thread is
+    // at a stop
     virtual uint32_t get_reg(uint8_t idx) = 0;
     virtual void set_reg(uint8_t idx, uint32_t val) = 0;
 
