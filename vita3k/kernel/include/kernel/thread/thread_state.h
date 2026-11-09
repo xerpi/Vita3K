@@ -24,6 +24,7 @@
 #include <mem/ptr.h>
 
 #include <algorithm>
+#include <array>
 #include <condition_variable>
 #include <initializer_list>
 #include <memory>
@@ -102,8 +103,14 @@ struct ThreadState final {
     // Priority and affinity
     // The priority the thread runs at
     int get_priority() const;
-    // Changes the priority the thread runs at, and the one its TLS shows. Returns the old priority.
+    // The priority the thread was started or last set to
+    int get_base_priority() const;
+    // Sets the base priority, requeues the thread where it waits and returns the old priority
     int change_priority(int new_priority);
+    // Raises the thread to the ceiling of a heavy mutex it took, with the mutex lock held
+    void hold_mutex(int ceiling);
+    // Drops the ceiling of a heavy mutex the thread freed, with the mutex lock held
+    void free_mutex(int ceiling);
     // Changes the cores the thread may run on, and the ones its TLS shows. Returns the old mask.
     SceInt32 change_affinity_mask(SceInt32 new_affinity_mask);
 
@@ -229,6 +236,10 @@ private:
     // Exits the thread as how with status, or ends the app inside a callback or a thread event
     // handler. Without mutex held.
     void request_exit(Ending how, SceInt32 status);
+    // Sets the priority the thread runs at and the one its TLS shows
+    void set_priority(int value);
+    // The highest ceiling of the heavy mutexes the thread holds, as a priority, or 256 for none
+    int ceiling_bound() const;
 
     // Fixed when the thread is created
     KernelState &kernel;
@@ -253,7 +264,12 @@ private:
     bool running_event_handlers = false;
 
     // Priority and affinity
+    // The priority the thread runs at, the one its TLS shows
     int priority;
+    // The priority the thread was started or last set to
+    int base_priority;
+    // How many heavy mutexes the thread holds at each ceiling
+    std::array<uint16_t, 256> held_ceilings{};
     SceInt32 affinity_mask;
 
     // Waits

@@ -37,8 +37,15 @@ public:
     const SceUInt32 attr;
     const std::string name;
 
+    // Moves a waiting thread whose priority changed to its new place in the object's queues, then
+    // gives what the object has to the waiters in their new order
+    void requeue(const ThreadState &thread);
+
 protected:
     SyncPrimitive(SceUInt32 attr, const char *name);
+
+    // Moves the waiter of thread to its place for its current priority. The lock must be held.
+    virtual void requeue_waiter(const ThreadState &thread) {}
 
     // Wakes the waiters that can now get what they wait for, in queue order. Called with the lock
     // held when the object gets something new to give, and by wait_loop() when a waiter leaves the
@@ -183,6 +190,7 @@ protected:
     void fire(SceUInt32 set_pattern, SceUInt64 user_data, bool is_set);
     // Gives the event's bits to the waits they match.
     void serve() override;
+    void requeue_waiter(const ThreadState &thread) override { waiters.requeue(thread); }
 
     // Guarded by the lock
     WaitQueue<WaitEntry> waiters;
@@ -292,6 +300,7 @@ private:
     bool try_take(const ThreadStatePtr &thread, SceInt32 need_count);
     // Gives the count to the waits it covers, in queue order up to the first it doesn't.
     void serve() override;
+    void requeue_waiter(const ThreadState &thread) override { waiters.requeue(thread); }
 
     // Guarded by the lock
     WaitQueue<WaitEntry> waiters;
@@ -304,11 +313,12 @@ class Mutex : public SyncPrimitive {
 public:
     const SceInt32 init_count;
     const Ptr<SceKernelLwMutexWork> workarea;
+    // The priority a heavy mutex's owner runs at least at, SCE_KERNEL_LOWEST_PRIORITY_KERNEL for none
+    const int ceiling;
 
-    Mutex(SceUInt32 attr, const char *name, SceInt32 init_count, ThreadStatePtr thread, Ptr<SceKernelLwMutexWork> workarea = {});
-    // Returns the error for a name, attributes or count the caller can't use, or 0. Kernel callers may
-    // use attributes games can't.
-    static SceInt32 check_create(const char *name, SceUInt32 attr, SceInt32 init_count, bool kernel);
+    Mutex(SceUInt32 attr, const char *name, SceInt32 init_count, ThreadStatePtr thread, int ceiling, Ptr<SceKernelLwMutexWork> workarea = {});
+    // Returns the error for arguments the caller can't use, or 0. Kernel callers may use more attributes.
+    static SceInt32 check_create(const char *name, SceUInt32 attr, SceInt32 init_count, const SceKernelMutexOptParam *opt, bool kernel);
 
     SceInt32 acquire(MemState &mem, const ThreadStatePtr &thread, SceInt32 count, SceUInt32 *timeout, bool callbacks);
     // Relocks the mutex after a condition variable wait. No timeout, and target is the reported wait.
@@ -331,7 +341,15 @@ protected:
     // stays locked by an owner that ended and was deleted.
     SceUID owner;
 
+    // Makes thread the owner, which a heavy mutex raises to its ceiling. The lock must be held.
+    void set_owner(const ThreadStatePtr &thread);
+
 private:
+    // The owner of a heavy mutex, so a cancel or delete from another thread reaches it
+    std::weak_ptr<ThreadState> holder;
+
+    // Leaves the mutex with no owner, which takes a heavy mutex's owner off its ceiling. The lock must be held.
+    void clear_owner();
     void on_delete(SceUID deleter) override;
     bool lightweight() const { return get_uid_class() == UidClass::lw_mutex; }
     // Returns ILLEGAL_COUNT for a lock or unlock count the mutex can't take, or SCE_KERNEL_OK
@@ -343,6 +361,7 @@ private:
     std::optional<SceInt32> take_if_free(MemState &mem, const ThreadStatePtr &thread, SceInt32 count);
     // Gives a free mutex to the first waiter, if there is one.
     void serve() override;
+    void requeue_waiter(const ThreadState &thread) override { waiters.requeue(thread); }
     // Writes the owner and lock count to a lightweight mutex's work area, which the guest reads. The lock must be held.
     void update_workarea(MemState &mem);
 };
@@ -358,7 +377,7 @@ public:
 
 class HeavyMutex final : public WithUidClass<Mutex, UidClass::mutex> {
 public:
-    using WithUidClass::WithUidClass;
+    HeavyMutex(SceUInt32 attr, const char *name, SceInt32 init_count, ThreadStatePtr thread, int ceiling);
 
     // Fills info with what the mutex's info reports, or returns UNKNOWN_MUTEX_ID if it was deleted.
     SceInt32 info(SceKernelMutexInfo &info) const;
@@ -420,6 +439,7 @@ private:
     // Gives the lock to the waiters that get it next: every waiting reader while no writer holds or
     // waits for it, or else the first waiting writer once nobody holds it.
     void serve() override;
+    void requeue_waiter(const ThreadState &thread) override { waiters.requeue(thread); }
 
     // Guarded by the lock
     // The read locks of every reader, or the writer's count. Readers aren't tracked one by one, like
@@ -472,6 +492,7 @@ private:
     bool take(const WaitEntry &wait);
     // Gives the flags to the waits they match, in queue order.
     void serve() override;
+    void requeue_waiter(const ThreadState &thread) override { waiters.requeue(thread); }
     // Gives the wait that timed out the flag's bits and gives back its hold.
     void timed_out(const ThreadStatePtr &thread) override;
     // Gives back one hold of the holder, the wait that took it ended. The lock must be held.
@@ -525,6 +546,7 @@ protected:
 
 private:
     void on_delete(SceUID deleter) override;
+    void requeue_waiter(const ThreadState &thread) override { waiters.requeue(thread); }
     bool lightweight() const { return get_uid_class() == UidClass::lw_cond; }
 };
 
@@ -615,6 +637,10 @@ private:
     void on_delete(SceUID deleter) override;
     // Carries on the first receiver's and the first sender's transfers until neither ends
     void serve() override;
+    void requeue_waiter(const ThreadState &thread) override {
+        senders.requeue(thread);
+        receivers.requeue(thread);
+    }
     // Moves the sender's bytes to the waiting receivers, then puts the rest into the pipe. Returns
     // whether the sender is done.
     bool give(Sender &sender);

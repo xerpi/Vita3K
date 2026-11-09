@@ -81,6 +81,7 @@ ThreadState::ThreadState(SceUID id, KernelState &kernel, MemState &mem, CPUState
     , kernel(kernel)
     , mem(mem)
     , priority(this->init_priority)
+    , base_priority(this->init_priority)
     , affinity_mask(affinity_mask)
     , end(std::make_shared<ThreadEnd>(id)) {
     memset(stack.get_ptr<void>().get(mem), 0xcc, this->stack_size);
@@ -114,9 +115,9 @@ int ThreadState::start(SceSize arglen, const Ptr<void> argp, bool run_entry_call
     returned_value = SCE_KERNEL_ERROR_NOT_DORMANT;
     // Each run starts at the priority and on the cores the thread was created with, and its TLS
     // shows them
-    priority = init_priority;
+    base_priority = init_priority;
+    set_priority(init_priority);
     affinity_mask = init_affinity_mask;
-    tls_slot(TLS_CURRENT_PRIORITY) = priority;
     tls_slot(TLS_CPU_AFFINITY_MASK) = affinity_mask;
     cpu->load_context(initial_context(stack.get() + stack_size));
     // A thread starts with TPIDRURW at 0, also when it starts again
@@ -628,9 +629,51 @@ int ThreadState::get_priority() const {
 }
 
 int ThreadState::change_priority(int new_priority) {
+    std::unique_lock<std::mutex> lock(mutex);
+    const int old_priority = priority;
+    base_priority = new_priority;
+    // A held ceiling keeps a lower priority from taking effect until its mutex is freed
+    if (new_priority > ceiling_bound())
+        return old_priority;
+    set_priority(new_priority);
+    // A signal wait has no object, and its ID could match another UID
+    const SceUID waited_on = status == ThreadStatus::waiting && wait_target.type != SCE_KERNEL_WAITTYPE_SIGNAL ? wait_target.id : SCE_UID_INVALID_UID;
+    lock.unlock();
+    // A waiter goes behind the waiters at its new priority, also when the priority stays the same
+    if (const auto object = std::dynamic_pointer_cast<SyncPrimitive>(kernel.objects.find(waited_on)))
+        object->requeue(*this);
+    return old_priority;
+}
+
+void ThreadState::set_priority(int value) {
+    priority = value;
+    tls_slot(TLS_CURRENT_PRIORITY) = value;
+}
+
+int ThreadState::get_base_priority() const {
     const std::lock_guard<std::mutex> lock(mutex);
-    tls_slot(TLS_CURRENT_PRIORITY) = new_priority;
-    return std::exchange(priority, new_priority);
+    return base_priority;
+}
+
+void ThreadState::hold_mutex(int ceiling) {
+    const std::lock_guard<std::mutex> lock(mutex);
+    ++held_ceilings[ceiling];
+    // The owner rises to the ceiling at once and keeps its place in any queue
+    if (priority > ceiling)
+        set_priority(ceiling);
+}
+
+void ThreadState::free_mutex(int ceiling) {
+    const std::lock_guard<std::mutex> lock(mutex);
+    --held_ceilings[ceiling];
+    // Every heavy mutex free goes back to the base priority, or to the highest ceiling still held
+    set_priority(std::min(base_priority, ceiling_bound()));
+}
+
+int ThreadState::ceiling_bound() const {
+    // The highest ceiling is the lowest value
+    const auto held = std::ranges::find_if(held_ceilings, [](uint16_t count) { return count > 0; });
+    return static_cast<int>(held - held_ceilings.begin());
 }
 
 SceInt32 ThreadState::change_affinity_mask(SceInt32 new_affinity_mask) {

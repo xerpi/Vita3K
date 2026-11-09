@@ -28,6 +28,16 @@ SyncPrimitive::SyncPrimitive(SceUInt32 attr, const char *name)
     : attr(attr)
     , name(name, strnlen(name, KERNELOBJECT_MAX_NAME_LENGTH)) {}
 
+void SyncPrimitive::requeue(const ThreadState &thread) {
+    const auto guard = lock();
+    if (!guard)
+        return;
+    requeue_waiter(thread);
+    // Every queue is served after a change, FIFO ones too, so a head that dropped back lets the
+    // next one take
+    serve();
+}
+
 SceInt32 SyncPrimitive::check_name(const char *name, SceUInt32 attr) {
     if (!name)
         return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
@@ -515,10 +525,11 @@ SceInt32 Timer::cancel(SceUInt32 *num_wait_threads) {
 // * Mutex *
 // *********
 
-Mutex::Mutex(SceUInt32 attr, const char *name, SceInt32 init_count, ThreadStatePtr thread, Ptr<SceKernelLwMutexWork> workarea)
+Mutex::Mutex(SceUInt32 attr, const char *name, SceInt32 init_count, ThreadStatePtr thread, int ceiling, Ptr<SceKernelLwMutexWork> workarea)
     : SyncPrimitive(attr, name)
     , init_count(init_count)
     , workarea(workarea)
+    , ceiling(ceiling)
     , waiters(attr)
     , lock_count(init_count)
     , owner(init_count > 0 && thread ? thread->id : 0) {}
@@ -556,11 +567,37 @@ void ThreadEnd::started() {
     exit_status.reset();
 }
 
-SceInt32 Mutex::check_create(const char *name, SceUInt32 attr, SceInt32 init_count, bool kernel) {
+HeavyMutex::HeavyMutex(SceUInt32 attr, const char *name, SceInt32 init_count, ThreadStatePtr thread, int ceiling)
+    : WithUidClass(attr, name, init_count, thread, ceiling) {
+    // The creator holds a mutex created locked, like a take
+    if (owner)
+        set_owner(thread);
+}
+
+void Mutex::set_owner(const ThreadStatePtr &thread) {
+    owner = thread->id;
+    if (lightweight())
+        return;
+    holder = thread;
+    thread->hold_mutex(ceiling);
+}
+
+void Mutex::clear_owner() {
+    owner = 0;
+    if (const ThreadStatePtr thread = std::exchange(holder, {}).lock())
+        thread->free_mutex(ceiling);
+}
+
+SceInt32 Mutex::check_create(const char *name, SceUInt32 attr, SceInt32 init_count, const SceKernelMutexOptParam *opt, bool kernel) {
     if (const SceInt32 error = check_name(name, attr))
         return error;
     if (!kernel && attr & ~(SCE_KERNEL_MUTEX_ATTR_RECURSIVE | SCE_KERNEL_MUTEX_ATTR_CEILING | SCE_KERNEL_ATTR_TH_PRIO | SCE_KERNEL_ATTR_OPENABLE))
         return SCE_KERNEL_ERROR_ILLEGAL_ATTR;
+    // A smaller option struct is still read whole
+    if (opt && opt->size > sizeof(*opt))
+        return SCE_KERNEL_ERROR_ILLEGAL_SIZE;
+    if (!opt && (attr & SCE_KERNEL_MUTEX_ATTR_CEILING))
+        return SCE_KERNEL_ERROR_INVALID_ARGUMENT;
     if (init_count < 0)
         return SCE_KERNEL_ERROR_ILLEGAL_COUNT;
     if (init_count > 1 && !(attr & SCE_KERNEL_MUTEX_ATTR_RECURSIVE))
@@ -576,7 +613,7 @@ SceInt32 Mutex::check_count(SceInt32 count) const {
 
 void Mutex::on_delete(SceUID) {
     waiters.wake_all(SCE_KERNEL_ERROR_WAIT_DELETE);
-    owner = 0;
+    clear_owner();
 }
 
 SceInt32 Mutex::try_take(MemState &mem, const ThreadStatePtr &thread, SceInt32 count) {
@@ -617,7 +654,7 @@ SceInt32 Mutex::try_take(MemState &mem, const ThreadStatePtr &thread, SceInt32 c
     // Take ownership!
 
     lock_count += count;
-    owner = thread->id;
+    set_owner(thread);
     update_workarea(mem);
 
     return SCE_KERNEL_OK;
@@ -698,7 +735,7 @@ SceInt32 Mutex::release(MemState &mem, const ThreadStatePtr &thread, SceInt32 un
 
     lock_count -= unlock_count;
     if (lock_count == 0)
-        owner = 0;
+        clear_owner();
     serve();
     update_workarea(mem);
 
@@ -710,7 +747,7 @@ void Mutex::release_ended_owner(const ThreadState &thread) {
     if (!guard || owner != thread.id)
         return;
     lock_count = 0;
-    owner = 0;
+    clear_owner();
     serve();
 }
 
@@ -719,7 +756,7 @@ void Mutex::serve() {
         return;
     if (auto *waiter = waiters.front()) {
         lock_count = waiter->entry.lock_count;
-        owner = waiter->thread->id;
+        set_owner(waiter->thread);
         waiters.wake(*waiter);
     }
 }
@@ -735,9 +772,11 @@ SceInt32 Mutex::cancel(const ThreadStatePtr &thread, SceInt32 new_count, SceUInt
     if (new_count > 1 && !(attr & SCE_KERNEL_MUTEX_ATTR_RECURSIVE))
         return SCE_KERNEL_ERROR_ILLEGAL_COUNT;
 
+    clear_owner();
     const auto nb_threads = static_cast<SceUInt32>(waiters.wake_all(SCE_KERNEL_ERROR_WAIT_CANCEL));
     lock_count = new_count;
-    owner = new_count > 0 ? thread->id : 0;
+    if (new_count > 0)
+        set_owner(thread);
     if (num_wait_threads)
         *num_wait_threads = nb_threads;
 
@@ -774,6 +813,8 @@ SceInt32 HeavyMutex::info(SceKernelMutexInfo &info) const {
     info.currentCount = lock_count;
     info.currentOwnerId = owner;
     info.numWaitThreads = static_cast<SceUInt32>(waiters.size());
+    if (attr & SCE_KERNEL_MUTEX_ATTR_CEILING)
+        info.ceilingPriority = ceiling;
     return SCE_KERNEL_OK;
 }
 

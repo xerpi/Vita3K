@@ -149,6 +149,16 @@ public:
         waiters.remove(waiter);
     }
 
+    // Moves the waiter of thread behind the waiters at its current priority, in a priority queue
+    void requeue(const ThreadState &thread) {
+        Waiter *const waiter = by_priority ? find_if([&](Waiter &w) { return w.thread.get() == &thread; }) : nullptr;
+        if (!waiter)
+            return;
+        remove(*waiter);
+        waiter->priority = waiter->thread->get_priority();
+        push(*waiter);
+    }
+
 private:
     // Returns whether a waiter at the head stays there when another one would go in front of it, for
     // entries that can say so
