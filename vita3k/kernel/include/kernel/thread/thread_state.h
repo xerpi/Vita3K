@@ -224,9 +224,11 @@ private:
     bool finish_run(std::unique_lock<std::mutex> &lock);
     // Calls the guest's data abort handler with the abort context on the stack, without mutex held
     void dispatch_abort(Address fault_addr);
-    // Runs the thread's event handlers for type in registration order, releasing mutex through lock
-    // while they run
+    // Runs the thread's event handlers for type, releasing mutex through lock while they run
     void run_event_handlers(std::unique_lock<std::mutex> &lock, SceUInt32 type);
+    // Exits the thread as how with status, or ends the app inside a callback or a thread event
+    // handler. Without mutex held.
+    void request_exit(Ending how, SceInt32 status);
 
     // Fixed when the thread is created
     KernelState &kernel;
@@ -267,6 +269,8 @@ private:
     // Callbacks
     // A callback of this thread was notified since the start of the last callback pass
     bool callback_pending = false;
+    // The callback runs going on, nested ones too. Only the thread itself uses it, without mutex.
+    int callback_depth = 0;
 
     // ForVM suspend
     // The sceKernelSuspendThreadForVM calls no sceKernelResumeThreadForVM undid yet

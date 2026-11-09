@@ -135,14 +135,21 @@ int ThreadState::start(SceSize arglen, const Ptr<void> argp, bool run_entry_call
 }
 
 void ThreadState::exit(SceInt32 status) {
-    const std::lock_guard<std::mutex> lock(mutex);
-    request_ending(Ending::exit);
-    returned_value = static_cast<uint32_t>(status);
+    request_exit(Ending::exit, status);
 }
 
 void ThreadState::exit_delete(SceInt32 status) {
+    request_exit(Ending::exit_delete, status);
+}
+
+void ThreadState::request_exit(Ending how, SceInt32 status) {
+    if (callback_depth > 0 || in_event_handler()) {
+        LOG_CRITICAL("Thread {} exited inside a callback or a thread event handler, ending the app", id);
+        kernel.request_process_exit(0);
+        return;
+    }
     const std::lock_guard<std::mutex> lock(mutex);
-    request_ending(Ending::exit_delete);
+    request_ending(how);
     returned_value = static_cast<uint32_t>(status);
 }
 
@@ -279,6 +286,10 @@ std::optional<uint32_t> ThreadState::run_guest(std::unique_lock<std::mutex> &loc
             after_kernel_call = false;
             break;
         case GuestExit::Kind::returned:
+            break;
+        case GuestExit::Kind::fault:
+            // A fault in guest code ends the app, and the loop top then ends this thread
+            kernel.request_process_exit(0);
             break;
         }
         // A host fault on protected guest memory, in guest code or in the import's host code
@@ -543,8 +554,10 @@ SceUInt32 ThreadState::process_callbacks() {
         const std::optional<Callback::Notification> notification = cb->start_run();
         if (!notification)
             continue;
+        ++callback_depth;
         const uint32_t ret = call_guest(cb->cb_func.address(),
             { static_cast<uint32_t>(notification->notifier_id), notification->count, static_cast<uint32_t>(notification->arg), cb->userdata.address() }, true);
+        --callback_depth;
         ++processed;
         // A callback that returns nonzero deletes itself. A delete during the run takes effect once
         // its outermost run ends.
