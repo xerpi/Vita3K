@@ -19,6 +19,7 @@
 #include <kernel/thread/thread_state.h>
 
 #include <mutex>
+#include <utility>
 
 Callback::Callback(const ThreadStatePtr &owner, const std::string &name, Ptr<SceKernelCallbackFunction> cb_func, Ptr<void> pCommon)
     : thread_id(owner->id)
@@ -27,25 +28,16 @@ Callback::Callback(const ThreadStatePtr &owner, const std::string &name, Ptr<Sce
     , userdata(pCommon)
     , owner(owner) {}
 
-void Callback::notify(SceUID notifier_id, SceInt32 notify_arg) {
+void Callback::direct_notify(SceInt32 notify_arg) {
     const auto guard = lock();
     if (!guard)
         return;
-    this->notifier_id = notifier_id;
+    this->notifier_id = SCE_UID_INVALID_UID;
     this->notification_arg = notify_arg;
-    // The owner already counts a callback with notifications, and only the first one wakes it
-    if (this->num_notifications++ == 0) {
-        if (const ThreadStatePtr thread = owner.lock())
-            thread->add_notified_callback();
-    }
-}
-
-void Callback::event_notify(SceUID notifier_id) {
-    this->notify(notifier_id, 0);
-}
-
-void Callback::direct_notify(SceInt32 notify_arg) {
-    this->notify(SCE_UID_INVALID_UID, notify_arg);
+    ++this->num_notifications;
+    // Every notify reaches the owner
+    if (const ThreadStatePtr thread = owner.lock())
+        thread->notify_callback();
 }
 
 void Callback::cancel() {
@@ -73,22 +65,38 @@ uint32_t Callback::get_num_notifications() {
     return guard ? this->num_notifications : 0;
 }
 
-std::optional<Callback::Notification> Callback::take_notification() {
+std::optional<Callback::Notification> Callback::start_run() {
     const auto guard = lock();
-    if (!guard || this->num_notifications == 0)
+    if (!guard || delete_pending || this->num_notifications == 0)
         return std::nullopt;
 
     const Notification notification{ this->notifier_id, this->num_notifications, this->notification_arg };
     this->reset();
+    ++runs;
     return notification;
 }
 
+bool Callback::end_run(bool delete_it) {
+    const auto guard = lock();
+    if (!guard)
+        return false;
+    --runs;
+    delete_pending = delete_pending || delete_it;
+    return delete_pending && runs == 0;
+}
+
+bool Callback::mark_for_delete() {
+    const auto guard = lock();
+    return guard && !std::exchange(delete_pending, true);
+}
+
+bool Callback::running() {
+    const auto guard = lock();
+    return guard && runs > 0;
+}
+
 void Callback::reset() {
-    if (this->num_notifications != 0) {
-        if (const ThreadStatePtr thread = owner.lock())
-            thread->remove_notified_callback();
-    }
     this->num_notifications = 0;
     this->notification_arg = 0;
-    this->notifier_id = SCE_UID_INVALID_UID;
+    this->notifier_id = 0;
 }

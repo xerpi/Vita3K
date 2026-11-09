@@ -39,9 +39,6 @@ public:
 
     Callback(const ThreadStatePtr &owner, const std::string &name, Ptr<SceKernelCallbackFunction> cb_func, Ptr<void> pCommon);
 
-    void notify(SceUID notifier_id, SceInt32 notify_arg);
-    // Notifies from an event, without notification argument
-    void event_notify(SceUID notifier_id);
     // Notifies directly, not from an event
     void direct_notify(SceInt32 notify_arg);
     // Cancels every notification sent to this callback
@@ -54,8 +51,14 @@ public:
     // Number of times the callback has been notified since it last ran
     uint32_t get_num_notifications();
 
-    // Takes the pending notifications, so new ones are kept for the next run. Returns nothing if the callback was not notified.
-    std::optional<Notification> take_notification();
+    // Takes the pending notifications for a run, or nothing if there are none or it's to be deleted
+    std::optional<Notification> start_run();
+    // Ends a run, marking the callback to be deleted if delete_it, and returns whether it should be deleted now
+    bool end_run(bool delete_it);
+    // Marks the callback to be deleted. Returns false if it already was.
+    bool mark_for_delete();
+    // Whether a run of the callback is going on
+    bool running();
 
     const SceUID thread_id; // UID of the thread that created this callback
     const std::string name;
@@ -65,14 +68,19 @@ public:
 private:
     // Drops the pending notifications, so the callback never runs again
     void on_delete(SceUID deleter) override;
-    // Clears the notifications and tells the owner if there were any. The lock must be held.
+    // Clears the notifications, with the lock held
     void reset();
 
     const std::weak_ptr<ThreadState> owner; // Thread that created this callback, woken when it is notified
 
     uint32_t num_notifications = 0; // Number of times this callback has been notified - reset every time it is run
     SceInt32 notification_arg = 0; // User-specified argument passed by sceKernelNotifyCallback
-    SceUID notifier_id = SCE_UID_INVALID_UID; // UID of the last event that notified this thread - SCE_UID_INVALID_UID if not an event
+    // UID of the last notifier, SCE_UID_INVALID_UID for a direct notify, 0 when nothing is pending
+    SceUID notifier_id = 0;
+    // The runs of this callback going on, more than one when it runs inside its own run
+    int runs = 0;
+    // The callback was deleted or returned nonzero while it ran, and goes once its last run ends
+    bool delete_pending = false;
 };
 
 using CallbackPtr = std::shared_ptr<Callback>;

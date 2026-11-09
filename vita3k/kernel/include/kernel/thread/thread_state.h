@@ -26,7 +26,6 @@
 #include <algorithm>
 #include <condition_variable>
 #include <initializer_list>
-#include <list>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -83,9 +82,9 @@ struct ThreadState final {
     // ends it, until it's deleted
     void run_loop();
     // Calls a guest function on the thread's CPU from inside a kernel call, usually one the thread
-    // itself made, and returns its r0, or the exit status if the thread ends during it. With
-    // fresh_vfp_state, the call starts with the FPSCR and VFP exception setting of a new thread.
-    uint32_t call_guest(Address fn, std::initializer_list<uint32_t> args, bool fresh_vfp_state = false);
+    // itself made, and returns its r0, or the exit status if the thread ends during it. A callback
+    // or a thread event handler starts with the registers of a new thread on the caller's stack.
+    uint32_t call_guest(Address fn, std::initializer_list<uint32_t> args, bool callback = false);
     // Starts the dormant thread from another thread and returns its exit status once it ends. Used
     // for module start and stop and the GXM display queue.
     uint32_t start_and_wait(SceSize args, const Ptr<void> argp = Ptr<void>{});
@@ -146,14 +145,10 @@ struct ThreadState final {
     // Callbacks
     // Runs the notified callbacks of this thread and returns how many ran. Called by the thread itself.
     SceUInt32 process_callbacks();
-    // Returns whether a notified callback would run now, which none does inside a callback. Takes mutex.
+    // Returns whether a callback of this thread was notified since its last callback pass. Takes mutex.
     bool has_pending_callbacks();
-    // Adds a callback this thread created. Called by the thread itself.
-    void add_callback(const CallbackPtr &cb) { callbacks.push_back(cb); }
-    // Counts a callback of this thread that was notified and hasn't run for it yet, waking a wait
-    // with callbacks, and stops counting it. Called by the callback with its lock held.
-    void add_notified_callback();
-    void remove_notified_callback();
+    // Marks a callback notified and wakes a wait with callbacks, under the callback's lock.
+    void notify_callback();
 
     // Holds: the debugger, the emulator pause and the ForVM suspend
     // Stops the thread for the debugger the next time it would run guest code, or lets it run again.
@@ -217,11 +212,8 @@ private:
     bool runs() const { return status == ThreadStatus::running && !parked && !host_waiting; }
     // Asks the thread to end, keeping a stronger request already made
     void request_ending(Ending how) { set_ending(std::max(ending, how)); }
-    // Whether a callback of this thread was notified and hasn't run yet
-    bool callbacks_notified() const { return notified_callbacks > 0; }
-    // Whether a notified callback ends the current wait. Callbacks don't nest, so a wait inside a
-    // callback runs none. With mutex held.
-    bool callback_ends_wait() const { return wait_target.callbacks && !is_processing_callbacks && callbacks_notified(); }
+    // Whether a notified callback ends the current wait. With mutex held.
+    bool callback_ends_wait() const { return wait_target.callbacks && callback_pending; }
     // Whether the thread's current wait is over, by a wake, its end or a callback it runs, though
     // the thread hasn't gone on yet. With mutex held.
     bool wait_over() const { return exiting() || wake_pending || callback_ends_wait(); }
@@ -271,13 +263,8 @@ private:
     uint64_t last_vblank_waited = 0;
 
     // Callbacks
-    // Callbacks of this thread with notifications they haven't run for.
-    SceUInt32 notified_callbacks = 0;
-    // Set while the thread runs its callbacks. They don't nest. With mutex held.
-    bool is_processing_callbacks = false;
-    // Callbacks this thread created, in creation order. The kernel owns them. Only this thread
-    // touches the list.
-    std::list<std::weak_ptr<Callback>> callbacks;
+    // A callback of this thread was notified since the start of the last callback pass
+    bool callback_pending = false;
 
     // ForVM suspend
     // The sceKernelSuspendThreadForVM calls no sceKernelResumeThreadForVM undid yet

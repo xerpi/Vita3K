@@ -78,7 +78,7 @@ static void vblank_sync_thread(EmuEnvState &emuenv) {
 
             // Notify Vblank callback in each VBLANK start
             for (auto &[_, cb] : display.vblank_callbacks)
-                cb->event_notify(cb->get_notifier_id());
+                cb->direct_notify(0);
 
             display.vblank_waiters.wake_if([&](auto &waiter) {
                 return waiter.entry.target_vcount <= display.vblank_count;

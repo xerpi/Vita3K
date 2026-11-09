@@ -335,23 +335,26 @@ EXPORT(int, _sceKernelDeleteLwMutex, Ptr<SceKernelLwMutexWork> workarea) {
     return SCE_KERNEL_OK;
 }
 
-EXPORT(int, _sceKernelExitCallback) {
-    TRACY_FUNC(_sceKernelExitCallback);
-    return UNIMPLEMENTED();
+EXPORT(SceInt32, _sceKernelExitCallback, SceInt32 value) {
+    TRACY_FUNC(_sceKernelExitCallback, value);
+    // Ends the innermost callback or handler run, which returns value
+    CPUState &cpu = *emuenv.kernel.get_thread(thread_id)->cpu;
+    cpu.set_pc(cpu.return_pc);
+    return value;
 }
 
 EXPORT(SceInt32, _sceKernelGetCallbackInfo, SceUID callbackId, SceKernelCallbackInfo *pInfo) {
     TRACY_FUNC(_sceKernelGetCallbackInfo, callbackId, pInfo);
-    const CallbackPtr cb = emuenv.kernel.objects.find<Callback>(callbackId);
+    // The size is checked before the UID, and a NULL info after it
+    if (pInfo && pInfo->size > sizeof(*pInfo))
+        return RET_ERROR(SCE_KERNEL_ERROR_NO_MEMORY);
 
+    const CallbackPtr cb = emuenv.kernel.objects.find<Callback>(callbackId);
     if (!cb)
         return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_CALLBACK_ID);
 
     if (!pInfo)
-        return RET_ERROR(SCE_KERNEL_ERROR_ILLEGAL_ADDR); // TODO check result
-
-    if (pInfo->size > sizeof(*pInfo))
-        return RET_ERROR(SCE_KERNEL_ERROR_NO_MEMORY);
+        return RET_ERROR(SCE_KERNEL_ERROR_ILLEGAL_ADDR);
 
     SceKernelCallbackInfo info{};
     info.callbackId = callbackId;
@@ -1325,12 +1328,22 @@ EXPORT(int, sceKernelCloseTimer) {
     return STUBBED("References not implemented.");
 }
 
-EXPORT(SceUID, sceKernelCreateCallback, char *name, SceUInt32 attr, Ptr<SceKernelCallbackFunction> callbackFunc, Ptr<void> pCommon) {
+EXPORT(SceUID, sceKernelCreateCallback, Ptr<const char> name, SceUInt32 attr, Ptr<SceKernelCallbackFunction> callbackFunc, Ptr<void> pCommon) {
     TRACY_FUNC(sceKernelCreateCallback, name, attr, callbackFunc, pCommon);
-    if (attr || !callbackFunc.address())
+    if (!name)
+        return RET_ERROR(SCE_KERNEL_ERROR_ILLEGAL_ADDR);
+    if (!name.valid(emuenv.mem))
+        return RET_ERROR(SCE_KERNEL_ERROR_INVALID_MEMORY_ACCESS);
+    const char *const name_str = name.get(emuenv.mem);
+    // With the openable attribute, a name past the kept length is refused before the attribute
+    if ((attr & SCE_KERNEL_ATTR_OPENABLE) && strnlen(name_str, KERNELOBJECT_MAX_NAME_LENGTH + 1) > KERNELOBJECT_MAX_NAME_LENGTH)
+        return RET_ERROR(SCE_KERNEL_ERROR_UID_NAME_TOO_LONG);
+    if (attr)
         return RET_ERROR(SCE_KERNEL_ERROR_ILLEGAL_ATTR);
+    if (!is_valid_addr(emuenv.mem, callbackFunc.address() & ~1))
+        return RET_ERROR(SCE_KERNEL_ERROR_ILLEGAL_ADDR);
 
-    return emuenv.kernel.create_callback(emuenv.kernel.get_thread(thread_id), name, callbackFunc, pCommon);
+    return emuenv.kernel.objects.add(std::make_shared<Callback>(emuenv.kernel.get_thread(thread_id), name_str, callbackFunc, pCommon), emuenv.kernel.get_next_uid());
 }
 
 // Whether a game may create a thread with this priority, absolute or relative to the default one
@@ -1412,8 +1425,12 @@ EXPORT(int, sceKernelDelayThreadCB200, SceUInt delay) {
 
 EXPORT(int, sceKernelDeleteCallback, SceUID callbackId) {
     TRACY_FUNC(sceKernelDeleteCallback, callbackId);
-    if (!emuenv.kernel.delete_callback(callbackId, thread_id))
+    const CallbackPtr cb = emuenv.kernel.objects.find<Callback>(callbackId);
+    if (!cb || !cb->mark_for_delete())
         return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_CALLBACK_ID);
+    // A running callback keeps its UID until its outermost run ends, and that run removes it
+    if (!cb->running())
+        emuenv.kernel.objects.remove<Callback>(callbackId, thread_id);
     return 0;
 }
 
