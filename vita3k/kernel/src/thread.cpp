@@ -26,6 +26,7 @@
 #include <util/log.h>
 
 #include <algorithm>
+#include <bit>
 #include <cassert>
 #include <cstring>
 #include <memory>
@@ -47,6 +48,22 @@ static CPUContext initial_context(Address stack_top) {
     std::fill(ctx.cpu_registers.begin() + 2, ctx.cpu_registers.begin() + 13, 0xDEADBEEF);
     ctx.set_sp(stack_top);
     ctx.fpscr = SCE_KERNEL_THREAD_INITIAL_FPSCR;
+    return ctx;
+}
+
+// The registers a thread gets when the kernel resumes it from a save, after a wait or a callback.
+// They come from the save, except that d2 and d3 keep their current values and every d register
+// but d8 to d15 gets the fill value.
+static CPUContext resumed_context(const CPUContext &saved, const CPUContext &current) {
+    CPUContext ctx = saved;
+    // d2 and d3 are s4 to s7
+    std::copy_n(current.fpu_registers.begin() + 4, 4, ctx.fpu_registers.begin() + 4);
+    for (std::size_t d = 0; d < 32; d++) {
+        if (d == 2 || d == 3 || (d >= 8 && d <= 15))
+            continue;
+        ctx.fpu_registers[2 * d] = std::bit_cast<float>(SCE_KERNEL_VFP_REGISTER_FILL_LOW);
+        ctx.fpu_registers[2 * d + 1] = std::bit_cast<float>(SCE_KERNEL_VFP_REGISTER_FILL_HIGH);
+    }
     return ctx;
 }
 
@@ -304,8 +321,9 @@ uint32_t ThreadState::call_guest(Address fn, std::initializer_list<uint32_t> arg
     // thread there
     const std::optional<uint32_t> returned = run_guest(thread_lock, true);
 
-    // The caller and the callback should keep to the calling convention, but put everything back
-    cpu->load_context(previous_ctx);
+    // The caller and the callback should keep to the calling convention, but put everything back.
+    // A callback returns through the kernel, which resumes the caller from the save it took before.
+    cpu->load_context(callback ? resumed_context(previous_ctx, cpu->save_context()) : previous_ctx);
     cpu->set_tpidruro(previous_tpidruro);
     cpu->set_tpidrurw(previous_tpidrurw);
     if (callback)
@@ -491,6 +509,7 @@ SceInt32 ThreadState::wait_for_thread_end(const ThreadStatePtr &waiter, SceInt32
 SceInt32 ThreadState::wait(WaitTarget target, Deadline deadline) {
     std::unique_lock<std::mutex> lock(mutex);
     const auto woken = [&] { return wait_over(); };
+    const bool sleeps = !woken();
     wait_target = target;
     update_status(ThreadStatus::waiting);
     bool satisfied = true;
@@ -498,6 +517,11 @@ SceInt32 ThreadState::wait(WaitTarget target, Deadline deadline) {
         cv.wait(lock, woken);
     else
         satisfied = cv.wait_until(lock, deadline, woken);
+    // Only a wait that slept resumes from the save the kernel took when it went to sleep
+    if (sleeps) {
+        const CPUContext ctx = cpu->save_context();
+        cpu->load_context(resumed_context(ctx, ctx));
+    }
     // Before the call writes its result to the registers. A thread something holds goes on to its
     // holds, which keep it from its callbacks and its code.
     update_status(ThreadStatus::running);

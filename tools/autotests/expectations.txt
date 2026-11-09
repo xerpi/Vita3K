@@ -80,7 +80,7 @@ callback_return_in_waits        pass
 callback_return_pass            pass
 callback_stack                  pass
 callback_vfp_nested             pass
-callback_vfp_return             fail     # a kernel call gives the caller all its d registers back, the Vita's resume of a kernel save fills every one but d2, d3 and d8 to d15
+callback_vfp_return             pass
 callback_wait_requeue           pass
 cancel_calls                    pass
 cancel_calls_more               fail     # sceKernelWaitMultipleEvents
@@ -607,7 +607,7 @@ suspended_nonobject_waits       pass
 syscall_callee_saved            pass
 syscall_registers               fail     # r1 to r3 and r12 after a syscall
 syscall_result_modes            fail     # a kernel call leaves r1 to r3 and r12 as they were, the Vita sets them by the kind of result
-syscall_vfp_clobber             fail     # a delay or a timed-out semaphore wait keeps every d register, none read the NaN 0x7FF8DEAD7F80DEAD
+syscall_vfp_clobber             pass
 sysmodule                       fail     # system modules don't load without firmware
 system_font_blocks              crash    # opening the system font blocks by name
 system_info                     fail     # the active CPU mask, size checks and per-core counters
@@ -676,7 +676,7 @@ thread_lifecycle                fail     # starting with more arguments than the
 thread_limit_release            fail     # thread creates aren't refused at the Vita's limit, which gives 0x8002450D
 thread_limits                   fail     # no limit on the number of threads
 thread_names                    pass
-thread_nouse_vfp                fail     # a waiting thread keeps d16 across its wait
+thread_nouse_vfp                pass
 thread_null_name                pass
 thread_opt_fields               fail     # the thread option struct's fields aren't checked
 thread_opt_param                fail     # thread option struct size and attribute checks

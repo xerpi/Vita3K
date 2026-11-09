@@ -24,6 +24,7 @@
 #include <kernel/types.h>
 #include <packages/functions.h>
 
+#include <bit>
 #include <chrono>
 #include <thread>
 #include <utility>
@@ -632,11 +633,12 @@ EXPORT(int, _sceKernelGetThreadContextForVM, SceUID threadId, Ptr<SceKernelThrea
         static_assert(sizeof(infoVfp->reg) == sizeof(context.fpu_registers));
         if (in_kernel_call) {
             // Inside a syscall a Vita reports the FPSCR the kernel runs with, and only d8 to d15,
-            // which a call keeps. Every other d register reads this NaN.
-            constexpr uint32_t SCRUBBED[2] = { 0x7F80DEADU, 0x7FF8DEADU };
+            // which a call keeps. Every other d register reads the fill value.
             infoVfp->fpscr = SCE_KERNEL_THREAD_INITIAL_FPSCR;
-            for (size_t i = 0; i < std::size(infoVfp->reg); i += 2)
-                memcpy(&infoVfp->reg[i], SCRUBBED, sizeof(SCRUBBED));
+            for (size_t i = 0; i < std::size(infoVfp->reg); i += 2) {
+                infoVfp->reg[i] = std::bit_cast<float>(SCE_KERNEL_VFP_REGISTER_FILL_LOW);
+                infoVfp->reg[i + 1] = std::bit_cast<float>(SCE_KERNEL_VFP_REGISTER_FILL_HIGH);
+            }
             // d8 to d15 are s16 to s31
             memcpy(&infoVfp->reg[16], &context.fpu_registers[16], 16 * sizeof(infoVfp->reg[0]));
         } else {
