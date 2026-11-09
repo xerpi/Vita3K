@@ -100,3 +100,13 @@ void Callback::reset() {
     this->notification_arg = 0;
     this->notifier_id = 0;
 }
+
+ThreadEventHandler::ThreadEventHandler(SceUID target, SceUInt32 mask, Address handler, Address common)
+    : target(target)
+    , mask(mask)
+    , handler(handler)
+    , common(common) {}
+
+bool ThreadEventHandler::runs_for(SceUID thread_id, SceUInt32 type) const {
+    return !released && (mask & type) && (target == thread_id || target == SCE_KERNEL_THREAD_ID_PROCESS_ALL_ID);
+}

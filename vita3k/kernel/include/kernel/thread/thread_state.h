@@ -151,6 +151,10 @@ struct ThreadState final {
     // Marks a callback notified and wakes a wait with callbacks, under the callback's lock.
     void notify_callback();
 
+    // Thread event handlers
+    // Whether the thread runs its thread event handlers.
+    bool in_event_handler() const;
+
     // Holds: the debugger, the emulator pause and the ForVM suspend
     // Stops the thread for the debugger the next time it would run guest code, or lets it run again.
     // A pause or a ForVM suspend may still hold it after the debugger lets go.
@@ -220,6 +224,9 @@ private:
     bool finish_run(std::unique_lock<std::mutex> &lock);
     // Calls the guest's data abort handler with the abort context on the stack, without mutex held
     void dispatch_abort(Address fault_addr);
+    // Runs the thread's event handlers for type in registration order, releasing mutex through lock
+    // while they run
+    void run_event_handlers(std::unique_lock<std::mutex> &lock, SceUInt32 type);
 
     // Fixed when the thread is created
     KernelState &kernel;
@@ -240,6 +247,8 @@ private:
     Ending ending = Ending::none;
     // Run the thread start event once before guest code. Set by start().
     bool run_start_callback = false;
+    // The thread runs its thread event handlers. Set and cleared by run_event_handlers().
+    bool running_event_handlers = false;
 
     // Priority and affinity
     int priority;

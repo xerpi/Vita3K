@@ -19,6 +19,8 @@
 
 #include <kernel/kernel_object.h>
 #include <kernel/types.h>
+
+#include <atomic>
 #include <memory>
 #include <optional>
 #include <string>
@@ -84,3 +86,20 @@ private:
 };
 
 using CallbackPtr = std::shared_ptr<Callback>;
+
+// A registered thread event handler, run on the threads of target for the event types in mask
+class ThreadEventHandler final : public WithUidClass<KernelObject, UidClass::thread_event> {
+public:
+    ThreadEventHandler(SceUID target, SceUInt32 mask, Address handler, Address common);
+
+    // Whether the handler runs on the thread for an event of type
+    bool runs_for(SceUID thread_id, SceUInt32 type) const;
+
+    // A thread UID, or SCE_KERNEL_THREAD_ID_PROCESS_ALL_ID for every thread of the process
+    const SceUID target;
+    const SceUInt32 mask;
+    const Address handler;
+    const Address common;
+    // Set by a run that returned nonzero, which unregisters it. Its UID stays with its class.
+    std::atomic<bool> released = false;
+};
