@@ -947,6 +947,11 @@ static void display_entry_thread(EmuEnvState &emuenv) {
 static Ptr<void> gxmRunDeferredMemoryCallback(KernelState &kernel, const MemState &mem, std::mutex &global_lock, std::uint32_t &return_size, Ptr<SceGxmDeferredContextCallback> callback, Ptr<void> userdata,
     const std::uint32_t size, const SceUID thread_id) {
     const std::lock_guard<std::mutex> guard(global_lock);
+    // A context without the callback gets no memory
+    if (!callback) {
+        return_size = 0;
+        return Ptr<void>();
+    }
 
     const ThreadStatePtr thread = kernel.get_thread(thread_id);
     const Address final_size_addr = thread->cpu->stack_alloc(4);
@@ -4497,10 +4502,9 @@ EXPORT(int, sceGxmSetYuvProfile) {
 static Address alloc_callbacked(EmuEnvState &emuenv, SceUID thread_id, const SceGxmShaderPatcherParams &shaderPatcherParams, unsigned int size) {
     if (!shaderPatcherParams.hostAllocCallback) {
         LOG_ERROR("Empty hostAllocCallback");
+        return 0;
     }
-    const auto thread = emuenv.kernel.get_thread(thread_id);
-    auto result = thread->call_guest(shaderPatcherParams.hostAllocCallback.address(), { shaderPatcherParams.userData.address(), size });
-    return result;
+    return emuenv.kernel.get_thread(thread_id)->call_guest(shaderPatcherParams.hostAllocCallback.address(), { shaderPatcherParams.userData.address(), size });
 }
 
 template <typename T>
@@ -4523,6 +4527,7 @@ static Ptr<T> alloc_callbacked(EmuEnvState &emuenv, SceUID thread_id, SceGxmShad
 static void free_callbacked(EmuEnvState &emuenv, SceUID thread_id, SceGxmShaderPatcher *shaderPatcher, Address data) {
     if (!shaderPatcher->params.hostFreeCallback) {
         LOG_ERROR("Empty hostFreeCallback");
+        return;
     }
     const auto thread = emuenv.kernel.get_thread(thread_id);
     thread->call_guest(shaderPatcher->params.hostFreeCallback.address(), { shaderPatcher->params.userData.address(), data });
