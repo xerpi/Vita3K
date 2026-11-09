@@ -18,7 +18,7 @@
 #pragma once
 
 #include <cpu/common.h>
-#include <kernel/thread/wait_queue.h>
+#include <kernel/thread/wait.h>
 #include <kernel/types.h>
 #include <mem/block.h>
 #include <mem/ptr.h>
@@ -36,6 +36,7 @@ using ThreadStatePtr = std::shared_ptr<ThreadState>;
 struct KernelState;
 class Callback;
 using CallbackPtr = std::shared_ptr<Callback>;
+class ThreadEnd;
 
 // Values are what sceKernelGetThreadInfo reports
 enum class ThreadStatus : SceUInt32 {
@@ -114,11 +115,11 @@ struct ThreadState final {
     // Sends a signal to this thread. Fails if the previous one was not consumed yet.
     SceInt32 send_signal();
     // Blocks waiter until this thread becomes dormant, then writes its exit status to exit_status.
-    [[nodiscard]] SceInt32 wait_for_thread_end(const ThreadStatePtr &waiter, SceInt32 *exit_status, Deadline deadline, bool callbacks);
+    [[nodiscard]] SceInt32 wait_for_thread_end(const ThreadStatePtr &waiter, SceInt32 *exit_status, SceUInt32 *timeout, bool callbacks);
     // Waits on target until woken by wake(), the deadline passes, or the thread exits or is deleted,
     // which ends it with THREAD_STOPPED.
-    // With target.callbacks, a notified callback ends it with NOTIFY_CALLBACK, and the caller runs
-    // it with run_callbacks(). A stale wake can end it early, so callers must recheck their condition.
+    // With target.callbacks, a notified callback ends it with NOTIFY_CALLBACK and the caller runs it
+    // with run_callbacks(). A stale wake can end it early, so callers must recheck their condition.
     [[nodiscard]] SceInt32 wait(WaitTarget target, Deadline deadline);
     // Runs the notified callbacks for a wait that ended with NOTIFY_CALLBACK, with no lock held.
     // Returns THREAD_STOPPED if the thread exits or is deleted meanwhile.
@@ -189,11 +190,6 @@ private:
         remove,
     };
 
-    struct EndWaitEntry {
-        // Where to write the exit status, or null
-        SceInt32 *exit_status;
-    };
-
     // The private methods are called with mutex held, unless they say otherwise
     void update_status(ThreadStatus status);
     // The status the guest sees: SUSPENDED for a thread a ForVM suspend holds at its stop
@@ -212,11 +208,8 @@ private:
     bool runs() const { return status == ThreadStatus::running && !parked && !host_waiting; }
     // Asks the thread to end, keeping a stronger request already made
     void request_ending(Ending how) { set_ending(std::max(ending, how)); }
-    // Whether a notified callback ends the current wait. With mutex held.
-    bool callback_ends_wait() const { return wait_target.callbacks && callback_pending; }
-    // Whether the thread's current wait is over, by a wake, its end or a callback it runs, though
-    // the thread hasn't gone on yet. With mutex held.
-    bool wait_over() const { return exiting() || wake_pending || callback_ends_wait(); }
+    // Whether the thread's current wait has a result or the thread is ending. With mutex held.
+    bool wait_over() const { return exiting() || wait_result.has_value(); }
 
     // Runs guest code at one level, the thread's run or a call, with mutex held through lock, which
     // it releases around guest code and the handling of each exit. A call the kernel makes starts
@@ -255,8 +248,8 @@ private:
     // Waits
     // What the thread waits on while waiting, empty otherwise
     WaitTarget wait_target;
-    // Set by wake() and consumed by the next wait().
-    bool wake_pending = false;
+    // The result the next wait() takes, set by the first wake() or callback notify
+    std::optional<SceInt32> wait_result;
     // A sceKernelSendSignal is pending for this thread.
     bool signal_pending = false;
     // The vblank the thread's last display wait ended on
@@ -283,7 +276,6 @@ private:
     // Blocked in a host wait inside an export
     bool host_waiting = false;
 
-    // Threads blocked in sceKernelWaitThreadEnd on this one, with their own lock, taken after mutex
-    std::mutex end_waiters_mutex;
-    WaitQueue<EndWaitEntry> end_waiters;
+    // The end of the thread's runs, which sceKernelWaitThreadEnd waits for
+    const std::shared_ptr<ThreadEnd> end;
 };

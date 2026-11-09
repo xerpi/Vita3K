@@ -27,7 +27,7 @@
 #include <mutex>
 #include <optional>
 
-// Only declared here so ThreadState can hold a WaitQueue. The template bodies need the full type.
+// Only declared here. The template bodies need the full type where they are used.
 struct ThreadState;
 using ThreadStatePtr = std::shared_ptr<ThreadState>;
 
@@ -60,29 +60,6 @@ public:
         : by_priority(attr & SCE_KERNEL_ATTR_TH_PRIO) {}
     explicit WaitQueue(Order order)
         : by_priority(order == Order::priority) {}
-
-    // Blocks thread on target until a waker gives it a result, it is being deleted, or the deadline passes.
-    // thread must be the guest thread making this HLE call.
-    // With target.callbacks, the thread runs its notified callbacks while it waits.
-    [[nodiscard]] SceInt32 wait(std::unique_lock<std::mutex> &lock, const ThreadStatePtr &thread, WaitTarget target, Entry entry, Deadline deadline) {
-        Waiter waiter{ .thread = thread, .entry = std::move(entry) };
-        waiter.priority = waiter.thread->get_priority();
-        push(waiter);
-        while (true) {
-            lock.unlock();
-            SceInt32 r = waiter.thread->wait(target, deadline);
-            if (r == SCE_KERNEL_ERROR_NOTIFY_CALLBACK)
-                r = waiter.thread->run_callbacks();
-            lock.lock();
-            // A waker's result wins, it already handed over what the waiter asked for
-            if (waiter.result)
-                return *waiter.result;
-            if (r != SCE_KERNEL_OK) {
-                remove(waiter);
-                return r;
-            }
-        }
-    }
 
     // The waiters in queue order
     auto begin() const {

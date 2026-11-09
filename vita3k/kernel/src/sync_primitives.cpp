@@ -523,6 +523,39 @@ Mutex::Mutex(SceUInt32 attr, const char *name, SceInt32 init_count, ThreadStateP
     , lock_count(init_count)
     , owner(init_count > 0 && thread ? thread->id : 0) {}
 
+ThreadEnd::ThreadEnd(SceUID thread_id)
+    : WithUidClass(SCE_KERNEL_ATTR_TH_FIFO, "") {
+    uid = thread_id;
+}
+
+SceInt32 ThreadEnd::wait(const ThreadStatePtr &waiter, SceInt32 *exit_status, SceUInt32 *timeout, bool callbacks) {
+    auto guard = lock();
+    // An ended run gives its exit status at once, with the timeout as it was. No callback runs
+    // after the wait.
+    return wait_loop(waiters, guard, waiter, { SCE_KERNEL_WAITTYPE_WAITTHEND, uid, callbacks }, exit_status, timeout, CallbacksCheck::on_delete, [&](SceInt32 *out, SceInt32) -> std::optional<SceInt32> {
+        if (!this->exit_status)
+            return std::nullopt;
+        if (out)
+            *out = *this->exit_status;
+        return SCE_KERNEL_OK;
+    });
+}
+
+void ThreadEnd::ended(SceInt32 exit_status) {
+    const auto guard = lock();
+    this->exit_status = exit_status;
+    waiters.wake_if([&](auto &waiter) {
+        if (waiter.entry)
+            *waiter.entry = exit_status;
+        return true;
+    });
+}
+
+void ThreadEnd::started() {
+    const auto guard = lock();
+    exit_status.reset();
+}
+
 SceInt32 Mutex::check_create(const char *name, SceUInt32 attr, SceInt32 init_count, bool kernel) {
     if (const SceInt32 error = check_name(name, attr))
         return error;

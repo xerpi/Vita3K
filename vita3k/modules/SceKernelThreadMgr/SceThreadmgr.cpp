@@ -1137,47 +1137,48 @@ EXPORT(SceInt32, _sceKernelWaitSemaCB, SceUID semaId, SceInt32 needCount, SceUIn
     return result;
 }
 
+// Waits for a signal to thread, writing the time left back to timeout once the wait ends
+static int wait_signal(const ThreadStatePtr &thread, SceUInt32 *timeout, bool callbacks) {
+    SceUInt32 time_left = timeout ? *timeout : 0;
+    const SceInt32 r = thread->wait_for_signal(timeout ? &time_left : nullptr, callbacks);
+    if (timeout)
+        *timeout = time_left;
+    return r;
+}
+
 EXPORT(int, _sceKernelWaitSignal, uint32_t unknown, uint32_t delay, SceUInt32 *timeout) {
     TRACY_FUNC(_sceKernelWaitSignal, unknown, delay, timeout);
-    return emuenv.kernel.get_thread(thread_id)->wait_for_signal(timeout, false);
+    return wait_signal(emuenv.kernel.get_thread(thread_id), timeout, false);
 }
 
 EXPORT(int, _sceKernelWaitSignalCB, uint32_t unknown, uint32_t delay, SceUInt32 *timeout) {
     TRACY_FUNC(_sceKernelWaitSignalCB, unknown, delay, timeout);
-    const ThreadStatePtr thread = emuenv.kernel.get_thread(thread_id);
-    thread->process_callbacks();
-    return thread->wait_for_signal(timeout, true);
+    return wait_signal(emuenv.kernel.get_thread(thread_id), timeout, true);
 }
 
-// Waits for target to end, writing the time left back to timeout
-static int wait_thread_end(const ThreadStatePtr &waiter, const ThreadStatePtr &target, int *stat, SceUInt *timeout, bool callbacks) {
-    const Deadline deadline = deadline_from(timeout);
-    const SceInt32 r = target->wait_for_thread_end(waiter, stat, deadline, callbacks);
-    writeback_timeout(timeout, deadline);
+// Waits for thread thid to end, writing the time left back to timeout once the wait ends
+static int wait_thread_end(EmuEnvState &emuenv, const char *export_name, SceUID thread_id, SceUID thid, int *stat, SceUInt *timeout, bool callbacks) {
+    const ThreadStatePtr waiter = emuenv.kernel.get_thread(thread_id);
+    const ThreadStatePtr target = emuenv.kernel.get_thread(thid);
+    if (!target)
+        return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_THREAD_ID);
+    if (target == waiter)
+        return RET_ERROR(SCE_KERNEL_ERROR_ILLEGAL_THREAD_ID);
+    SceUInt32 time_left = timeout ? *timeout : 0;
+    const SceInt32 r = target->wait_for_thread_end(waiter, stat, timeout ? &time_left : nullptr, callbacks);
+    if (timeout)
+        *timeout = time_left;
     return r;
 }
 
 EXPORT(int, _sceKernelWaitThreadEnd, SceUID thid, int *stat, SceUInt *timeout) {
     TRACY_FUNC(_sceKernelWaitThreadEnd, thid, stat, timeout);
-    const ThreadStatePtr waiter = emuenv.kernel.get_thread(thread_id);
-    const ThreadStatePtr target = emuenv.kernel.get_thread(thid);
-    if (!target)
-        return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_THREAD_ID);
-    if (target == waiter)
-        return RET_ERROR(SCE_KERNEL_ERROR_ILLEGAL_THREAD_ID);
-    return wait_thread_end(waiter, target, stat, timeout, false);
+    return wait_thread_end(emuenv, export_name, thread_id, thid, stat, timeout, false);
 }
 
 EXPORT(int, _sceKernelWaitThreadEndCB, SceUID thid, int *stat, SceUInt *timeout) {
     TRACY_FUNC(_sceKernelWaitThreadEndCB, thid, stat, timeout);
-    const ThreadStatePtr waiter = emuenv.kernel.get_thread(thread_id);
-    const ThreadStatePtr target = emuenv.kernel.get_thread(thid);
-    if (!target)
-        return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_THREAD_ID);
-    if (target == waiter)
-        return RET_ERROR(SCE_KERNEL_ERROR_ILLEGAL_THREAD_ID);
-    waiter->process_callbacks();
-    return wait_thread_end(waiter, target, stat, timeout, true);
+    return wait_thread_end(emuenv, export_name, thread_id, thid, stat, timeout, true);
 }
 
 EXPORT(SceInt32, sceKernelCancelCallback, SceUID callbackId) {

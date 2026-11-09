@@ -18,7 +18,7 @@
 #pragma once
 
 #include <kernel/callback.h>
-#include <kernel/thread/wait_queue.h>
+#include <kernel/sync_primitives.h>
 #include <mem/ptr.h>
 #include <util/types.h>
 
@@ -32,8 +32,21 @@ enum SceDisplayPixelFormat {
     SCE_DISPLAY_PIXELFORMAT_A8B8G8R8 = 0x00000000U
 };
 
-struct VBlankWaitEntry {
-    uint64_t target_vcount;
+// The threads that wait for a vblank. It isn't in the object table.
+class VBlankWaiters final : public WithUidClass<SyncPrimitive, UidClass::simple_event> {
+public:
+    VBlankWaiters();
+
+    // Waits until vblank target_vcount started
+    SceInt32 wait(const ThreadStatePtr &thread, uint64_t target_vcount, bool callbacks);
+    // Starts vblank vcount, which ends the waits for it
+    void start(uint64_t vcount);
+
+private:
+    // The last vblank that started
+    uint64_t vcount = 0;
+    // The vblank each waiter waits for
+    WaitQueue<uint64_t> waiters;
 };
 
 struct DisplayFrameInfo {
@@ -69,7 +82,7 @@ struct DisplayState {
     std::atomic<bool> imgui_render{ true };
     std::atomic<bool> fullscreen{ false };
     std::atomic<std::uint64_t> vblank_count{ 0 };
-    WaitQueue<VBlankWaitEntry> vblank_waiters;
+    VBlankWaiters vblank_waiters;
     std::atomic<uint64_t> last_setframe_vblank_count = 0;
     std::map<SceUID, CallbackPtr> vblank_callbacks{};
 

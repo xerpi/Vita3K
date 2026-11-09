@@ -80,9 +80,7 @@ static void vblank_sync_thread(EmuEnvState &emuenv) {
             for (auto &[_, cb] : display.vblank_callbacks)
                 cb->direct_notify(0);
 
-            display.vblank_waiters.wake_if([&](auto &waiter) {
-                return waiter.entry.target_vcount <= display.vblank_count;
-            });
+            display.vblank_waiters.start(display.vblank_count);
         }
         const auto time_ms = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
         const auto time_left = TARGET_MICRO_PER_FRAME - (time_ms % TARGET_MICRO_PER_FRAME);
@@ -94,18 +92,31 @@ void start_sync_thread(EmuEnvState &emuenv) {
     emuenv.display.vblank_thread = std::make_unique<std::thread>(vblank_sync_thread, std::ref(emuenv));
 }
 
+VBlankWaiters::VBlankWaiters()
+    : WithUidClass(SCE_KERNEL_ATTR_TH_FIFO, "") {}
+
+SceInt32 VBlankWaiters::wait(const ThreadStatePtr &thread, uint64_t target_vcount, bool callbacks) {
+    auto guard = lock();
+    // The callbacks notified during a wait run before it returns
+    return wait_loop(waiters, guard, thread, { .type = SCE_KERNEL_WAITTYPE_EVENT, .callbacks = callbacks }, target_vcount, nullptr, CallbacksCheck::after_wait, [&](uint64_t target, SceInt32) -> std::optional<SceInt32> {
+        if (target <= vcount)
+            return SCE_KERNEL_OK;
+        return std::nullopt;
+    });
+}
+
+void VBlankWaiters::start(uint64_t vcount) {
+    const auto guard = lock();
+    this->vcount = vcount;
+    waiters.wake_if([&](auto &waiter) { return waiter.entry <= vcount; });
+}
+
 void wait_vblank(DisplayState &display, const ThreadStatePtr &wait_thread, const uint64_t target_vcount, const bool is_cb) {
     if (!wait_thread) {
         return;
     }
-
-    std::unique_lock<std::mutex> lock(display.mutex);
-
-    if (target_vcount <= display.vblank_count)
-        return;
-
     // Nothing runs after the wait, so a thread exiting during it needs no handling here
-    (void)display.vblank_waiters.wait(lock, wait_thread, { .type = SCE_KERNEL_WAITTYPE_EVENT, .callbacks = is_cb }, { target_vcount }, Deadline::max());
+    (void)display.vblank_waiters.wait(wait_thread, target_vcount, is_cb);
 }
 
 static void reset_swapchain_cycle(DisplayState &display, Address sync_object) {

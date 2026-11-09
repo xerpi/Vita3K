@@ -366,6 +366,26 @@ public:
 
 using MutexPtr = std::shared_ptr<Mutex>;
 
+// The end of a thread's runs, which its end waiters wait for. It isn't in the object table. Lock
+// order: the thread's mutex, then this lock, then a waiter's mutex.
+class ThreadEnd final : public WithUidClass<SyncPrimitive, UidClass::thread> {
+public:
+    explicit ThreadEnd(SceUID thread_id);
+
+    // Waits until the thread's run ended, then writes its exit status to exit_status
+    SceInt32 wait(const ThreadStatePtr &waiter, SceInt32 *exit_status, SceUInt32 *timeout, bool callbacks);
+    // Ends the run with exit_status, which every end waiter gets. Called by the thread.
+    void ended(SceInt32 exit_status);
+    // Starts a new run, whose end the next waits wait for. Called by the thread's start.
+    void started();
+
+private:
+    // The exit status of the last run, nothing while a run goes on
+    std::optional<SceInt32> exit_status = SCE_KERNEL_ERROR_DORMANT;
+    // Where each waiter wants the exit status, or null
+    WaitQueue<SceInt32 *> waiters;
+};
+
 class RWLock final : public WithUidClass<SyncPrimitive, UidClass::rw_lock> {
 public:
     RWLock(SceUInt32 attr, const char *name);
