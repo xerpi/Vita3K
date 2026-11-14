@@ -33,9 +33,10 @@ public:
     // Returns the error for a name the guest can't use, or 0.
     static SceInt32 check_name(const char *name, SceUInt32 attr);
 
-    const SceUInt32 attr;
+    // The attributes given at create, guarded by the lock. A message pipe rewrites its order bit.
+    SceUInt32 attr;
 
-    bool is_openable() const override { return attr & SCE_KERNEL_ATTR_OPENABLE; }
+    bool is_openable() const override { return openable; }
     // Locks the object, marks it deleted and runs end_waits()
     void on_delete(SceUID deleter) final;
 
@@ -69,6 +70,13 @@ protected:
     // Runs the callbacks notified during a wait that ended with result and returns the outcome.
     [[nodiscard]] SceInt32 finish_wait(std::unique_lock<std::mutex> &lock, ThreadState &thread, bool callbacks, SceInt32 result);
 
+    // Runs before thread is linked into the queue, with the lock held.
+    virtual void waiter_added(ThreadState &thread) {}
+    // Returns whether thread queues behind the head whatever its priority.
+    virtual bool queues_behind_head(const ThreadState &thread) const { return false; }
+    // Runs after thread left the queue, with the lock held.
+    virtual void waiter_removed(ThreadState &thread) {}
+
     // The queue methods are called with the lock held
     // Queues thread with request, which its wakers read.
     void queue(ThreadState &thread, const WaitRequest &request);
@@ -91,6 +99,7 @@ protected:
     IntrusiveList<ThreadState> waiters;
 
 private:
+    const bool openable;
     mutable std::mutex mutex;
     bool deleted = false;
 };
