@@ -244,6 +244,8 @@ private:
 
     // The private methods are called with thread_mutex held, unless they say otherwise
     void update_status(ThreadStatus status);
+    // Makes the thread gone for guest calls and gives its place in the thread limit back
+    void set_deleted();
     // The status the guest sees: SUSPENDED for a thread a ForVM suspend holds at its stop
     ThreadStatus shown_status() const;
     // Whether the thread is ending

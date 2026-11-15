@@ -97,10 +97,10 @@ EXPORT(int, ksceKernelCreateSimpleEvent) {
 }
 
 EXPORT(SceUID, ksceKernelCreateThread, const char *name, SceKernelThreadEntry entry, int initPriority, SceSize stackSize, SceUInt attr, int cpuAffinityMask, void *pOptParam) {
-    const ThreadStateRef thread = emuenv.kernel.create_thread(emuenv.mem, name, entry.cast<void>(), initPriority, cpuAffinityMask, stackSize, 0);
+    const auto thread = emuenv.kernel.create_thread(emuenv.mem, name, entry.cast<void>(), initPriority, cpuAffinityMask, stackSize, 0);
     if (!thread)
-        return RET_ERROR(SCE_KERNEL_ERROR_ERROR);
-    return thread->id;
+        return RET_ERROR(thread.error());
+    return (*thread)->id;
 }
 
 EXPORT(int, ksceKernelDeleteCallback) {

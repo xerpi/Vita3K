@@ -162,7 +162,9 @@ ThreadStateRef KernelState::get_thread(SceUID thread_id) {
     return thread;
 }
 
-ThreadStateRef KernelState::create_thread(MemState &mem, const char *name, Ptr<const void> entry_point, int init_priority, SceInt32 affinity_mask, int stack_size, SceUInt32 attr) {
+std::expected<ThreadStateRef, SceInt32> KernelState::create_thread(MemState &mem, const char *name, Ptr<const void> entry_point, int init_priority, SceInt32 affinity_mask, int stack_size, SceUInt32 attr) {
+    if (const SceInt32 error = thread_limit.add())
+        return std::unexpected(error);
     const SceUID id = get_next_uid();
     int core_num = corenum_allocator.new_corenum();
     if (core_num < 0) {
@@ -170,8 +172,10 @@ ThreadStateRef KernelState::create_thread(MemState &mem, const char *name, Ptr<c
         core_num = 0;
     }
     CPUStatePtr cpu = init_cpu(cpu_opt, id, static_cast<std::size_t>(core_num), mem);
-    if (!cpu)
-        return nullptr;
+    if (!cpu) {
+        thread_limit.remove();
+        return std::unexpected(SCE_KERNEL_ERROR_ERROR);
+    }
     // A guest function the kernel calls returns to the halt instruction, in Thumb mode
     cpu->return_pc = halt_instruction.get() | 1;
     cpu->set_log_code(debugger.watch_code);

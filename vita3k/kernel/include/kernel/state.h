@@ -35,6 +35,7 @@
 
 #include <atomic>
 #include <condition_variable>
+#include <expected>
 #include <functional>
 #include <map>
 #include <mutex>
@@ -114,10 +115,11 @@ struct KernelState {
     unsigned int tls_psize = 0;
     unsigned int tls_msize = 0;
 
-    // The counts of the objects guest calls made, which aren't openable and which are. They outlive
-    // the objects, which give their places back when destroyed.
+    // The counts of the objects guest calls made, which aren't openable and which are, and of the
+    // threads. They outlive the objects, which give their places back.
     ObjectLimit plain_object_limit{ SCE_KERNEL_PROCESS_PLAIN_OBJECTS_MAX };
     ObjectLimit openable_object_limit{ SCE_KERNEL_PROCESS_OPENABLE_OBJECTS_MAX };
+    ObjectLimit thread_limit{ SCE_KERNEL_PROCESS_THREADS_MAX };
     // Thread manager objects other than threads, by UID
     KernelObjects objects;
     // The objects the kernel made for itself, which no guest UID reaches
@@ -180,8 +182,8 @@ struct KernelState {
     void deinit(MemState &mem);
     void load_process_param(MemState &mem, Ptr<uint32_t> ptr);
     // Creates a dormant thread with these creation arguments, attr without
-    // SCE_KERNEL_THREAD_ATTR_USER, or returns null
-    ThreadStateRef create_thread(MemState &mem, const char *name, Ptr<const void> entry_point, int init_priority, SceInt32 affinity_mask, int stack_size, SceUInt32 attr);
+    // SCE_KERNEL_THREAD_ATTR_USER, or returns UID_RL_OVERFLOW or ERROR
+    std::expected<ThreadStateRef, SceInt32> create_thread(MemState &mem, const char *name, Ptr<const void> entry_point, int init_priority, SceInt32 affinity_mask, int stack_size, SceUInt32 attr);
 
     ThreadStateRef get_thread(SceUID thread_id);
 

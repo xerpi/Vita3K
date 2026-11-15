@@ -1501,10 +1501,10 @@ EXPORT(int, sceKernelCreateThreadForUser, const char *name, SceKernelThreadEntry
     if (init_priority == SCE_KERNEL_CURRENT_THREAD_PRIORITY)
         init_priority = emuenv.kernel.get_thread(thread_id)->get_priority();
 
-    const ThreadStateRef thread = emuenv.kernel.create_thread(emuenv.mem, name, entry.cast<void>(), init_priority, options->cpu_affinity_mask, options->stack_size, options->attr);
+    const auto thread = emuenv.kernel.create_thread(emuenv.mem, name, entry.cast<void>(), init_priority, options->cpu_affinity_mask, options->stack_size, options->attr);
     if (!thread)
-        return RET_ERROR(SCE_KERNEL_ERROR_ERROR);
-    return thread->id;
+        return RET_ERROR(thread.error());
+    return (*thread)->id;
 }
 
 static int delay_thread(KernelState &kernel, SceUID thread_id, SceUInt delay_us) {

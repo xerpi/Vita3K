@@ -165,7 +165,7 @@ void ThreadState::remove() {
     request_ending(Ending::remove);
     // A dormant thread is gone at once
     if (status == ThreadStatus::dormant)
-        update_status(ThreadStatus::deleted);
+        set_deleted();
     else if (status == ThreadStatus::running)
         cpu->request_stop();
 
@@ -179,7 +179,7 @@ SceInt32 ThreadState::remove_dormant() {
         return SCE_KERNEL_ERROR_NOT_DORMANT;
     // A dormant thread is gone at once, and the status change wakes its parked host thread to end
     request_ending(Ending::remove);
-    update_status(ThreadStatus::deleted);
+    set_deleted();
     return SCE_KERNEL_OK;
 }
 
@@ -250,7 +250,10 @@ bool ThreadState::finish_run(std::unique_lock<std::mutex> &lock) {
         // they are woken, so a start can't come in between.
         const auto end_guard = this->lock();
         lock.lock();
-        update_status(ending == Ending::exit ? ThreadStatus::dormant : ThreadStatus::deleted);
+        if (ending == Ending::exit)
+            update_status(ThreadStatus::dormant);
+        else
+            set_deleted();
         wake_waiters_if([&](auto &waiter) {
             if (waiter.wait_request().out_status)
                 *waiter.wait_request().out_status = static_cast<SceInt32>(returned_value);
@@ -415,6 +418,11 @@ uint32_t ThreadState::start_and_wait(SceSize args, const Ptr<void> argp) {
 void ThreadState::update_status(ThreadStatus status) {
     this->status = status;
     cv.notify_all();
+}
+
+void ThreadState::set_deleted() {
+    update_status(ThreadStatus::deleted);
+    kernel.thread_limit.remove();
 }
 
 SceInt32 ThreadState::delay_until(Deadline deadline, bool callbacks) {

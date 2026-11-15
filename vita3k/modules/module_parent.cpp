@@ -331,10 +331,12 @@ uint32_t start_module(EmuEnvState &emuenv, const SceKernelModuleInfo &module, Sc
         SceInt32 stack_size = SCE_KERNEL_STACK_SIZE_USER_MAIN;
         SceInt32 affinity = SCE_KERNEL_THREAD_CPU_AFFINITY_MASK_DEFAULT;
         // module_start is always called from new thread
-        const ThreadStateRef module_thread = emuenv.kernel.create_thread(emuenv.mem, module_name, module_start, priority, affinity, stack_size, 0);
+        const auto module_thread = emuenv.kernel.create_thread(emuenv.mem, module_name, module_start, priority, affinity, stack_size, 0);
+        if (!module_thread)
+            return module_thread.error();
 
-        const uint32_t ret = module_thread->start_and_wait(args, argp.cast<void>());
-        module_thread->remove();
+        const uint32_t ret = (*module_thread)->start_and_wait(args, argp.cast<void>());
+        (*module_thread)->remove();
 
         LOG_INFO("Module {} (at \"{}\") module_start returned {}", module_name, module.path, log_hex(ret));
         if (ret != SCE_KERNEL_START_SUCCESS)
@@ -355,10 +357,12 @@ uint32_t stop_module(EmuEnvState &emuenv, const SceKernelModuleInfo &module, Sce
         SceInt32 stack_size = SCE_KERNEL_STACK_SIZE_USER_MAIN;
         SceInt32 affinity = SCE_KERNEL_THREAD_CPU_AFFINITY_MASK_DEFAULT;
         // module_stop is always called from new thread
-        const ThreadStateRef module_thread = emuenv.kernel.create_thread(emuenv.mem, module_name, module_stop, priority, affinity, stack_size, 0);
+        const auto module_thread = emuenv.kernel.create_thread(emuenv.mem, module_name, module_stop, priority, affinity, stack_size, 0);
+        if (!module_thread)
+            return module_thread.error();
 
-        const uint32_t ret = module_thread->start_and_wait(args, argp.cast<void>());
-        module_thread->remove();
+        const uint32_t ret = (*module_thread)->start_and_wait(args, argp.cast<void>());
+        (*module_thread)->remove();
 
         LOG_INFO("Module {} (at \"{}\") module_stop returned {}", module_name, module.path, log_hex(ret));
         if (ret != SCE_KERNEL_STOP_SUCCESS)
