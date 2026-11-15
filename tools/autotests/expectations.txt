@@ -131,7 +131,7 @@ cond_delete_relock              fail     # a condition or a mutex deleted after 
 cond_error_time_left            pass
 cond_errors                     fail     # signal to a thread errors, create attributes
 cond_final_check_kinds          fail     # threads ignore their core and priority, so the waiter runs as soon as its wait ends, returns before the notify and runs the callback only at its check
-cond_info_after_mutex_delete    fail     # a condition's info still names its mutex after the mutex's delete
+cond_info_after_mutex_delete    pass
 cond_mutex_cancel_during_wait   pass
 cond_mutex_delete               pass
 cond_mutex_delete_order         skip     # threads ignore their core and priority, so the order in which the condition waiter and the mutex waiter run after the mutex delete ends both waits is host thread order

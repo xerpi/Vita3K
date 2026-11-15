@@ -1467,7 +1467,8 @@ SceInt32 HeavyCond::info(SceKernelCondInfo &info) const {
     info.condId = uid;
     std::ranges::copy(name, info.name);
     info.attr = attr;
-    info.mutexId = associated_mutex->uid;
+    // -1 once the mutex was deleted
+    info.mutexId = linked() ? associated_mutex->uid : -1;
     info.numWaitThreads = static_cast<SceUInt32>(waiters.size());
     return SCE_KERNEL_OK;
 }
