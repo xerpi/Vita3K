@@ -136,6 +136,16 @@ SceInt32 Waitable::wait(std::unique_lock<std::mutex> &lock, ThreadState &thread,
     }
     unqueue(thread, result);
     serve();
+    // A wait a process suspend ended is done again after the resume, with the time left
+    if (result == SCE_KERNEL_ERROR_THREAD_SUSPENDED) {
+        lock.unlock();
+        const SceInt32 r = thread.wait_for_resume();
+        lock.lock();
+        if (r != SCE_KERNEL_OK)
+            return r;
+        if (deleted)
+            return SCE_KERNEL_ERROR_WAIT_DELETE;
+    }
     return result;
 }
 
@@ -267,8 +277,11 @@ SceInt32 Event::wait(ThreadState &thread, SceUInt32 wait_pattern, SceUInt32 *res
         if (try_take(wait_pattern, result_pattern, user_data) == SCE_KERNEL_OK)
             return wait_result(result, result_pattern);
         result = Waitable::wait(guard, thread, type, { .pattern = wait_pattern, .out_pattern = result_pattern, .out_user_data = user_data }, deadline, timeout);
-        if (result != SCE_KERNEL_ERROR_NOTIFY_CALLBACK)
+        if (!waits_again(result))
             return wait_result(finish_wait(guard, thread, callbacks, result), result_pattern);
+        // A wait done again after a process suspend starts over like a new call
+        if (result == SCE_KERNEL_ERROR_THREAD_SUSPENDED)
+            result = SCE_KERNEL_OK;
     }
 }
 
@@ -500,6 +513,11 @@ bool TimerService::take_due(Timer &timer, uint64_t cutoff) {
     return true;
 }
 
+void TimerService::resume() {
+    const std::lock_guard<std::mutex> guard(mutex);
+    wake.notify_one();
+}
+
 void TimerService::unlink(Timer &timer) {
     if (!timer.linked())
         return;
@@ -512,7 +530,8 @@ void TimerService::unlink(Timer &timer) {
 void TimerService::run() {
     std::unique_lock<std::mutex> lock(mutex);
     while (!stopping) {
-        if (timers.empty()) {
+        // The deadlines are process times, so none passes while the process is suspended
+        if (timers.empty() || clock.suspended()) {
             wake.wait(lock);
             continue;
         }
@@ -840,7 +859,7 @@ SceInt32 Mutex::acquire(MemState &mem, ThreadState &thread, SceInt32 count, SceU
             break;
         }
         r = Waitable::wait(guard, thread, type, { .count = count }, deadline, timeout);
-        if (r != SCE_KERNEL_ERROR_NOTIFY_CALLBACK) {
+        if (!waits_again(r)) {
             r = finish_wait(guard, thread, callbacks, r);
             break;
         }
@@ -1075,7 +1094,7 @@ SceInt32 RWLock::acquire(ThreadState &thread, bool is_write, SceUInt32 *timeout,
             return SCE_KERNEL_OK;
         }
         const SceInt32 result = Waitable::wait(guard, thread, type, { .write = is_write }, deadline, timeout);
-        if (result != SCE_KERNEL_ERROR_NOTIFY_CALLBACK)
+        if (!waits_again(result))
             return finish_wait(guard, thread, callbacks, result);
     }
 }
@@ -1244,7 +1263,7 @@ SceInt32 Semaphore::wait(ThreadState &thread, SceInt32 need_count, SceUInt32 *ti
         if (try_take(thread, need_count))
             return SCE_KERNEL_OK;
         const SceInt32 result = Waitable::wait(guard, thread, type, { .count = need_count }, deadline, timeout);
-        if (result != SCE_KERNEL_ERROR_NOTIFY_CALLBACK)
+        if (!waits_again(result))
             return finish_wait(guard, thread, callbacks, result);
     }
 }
@@ -1357,7 +1376,7 @@ SceInt32 Condvar::wait(MemState &mem, ThreadState &thread, SceUInt32 *timeout, b
         if (r != SCE_KERNEL_OK)
             break;
         r = Waitable::wait(guard, thread, type, {}, deadline, timeout);
-        if (r != SCE_KERNEL_ERROR_NOTIFY_CALLBACK) {
+        if (!waits_again(r)) {
             // Only a delete runs the callbacks notified during the wait
             if (r == SCE_KERNEL_ERROR_WAIT_DELETE)
                 r = finish_wait(guard, thread, callbacks, r);
@@ -1568,7 +1587,7 @@ SceInt32 EventFlag::wait(ThreadState &thread, SceUInt32 pattern, SceUInt32 wait_
         if (out_bits)
             *out_bits = flags;
         r = Waitable::wait(guard, thread, type, request, deadline, timeout);
-        if (r != SCE_KERNEL_ERROR_NOTIFY_CALLBACK) {
+        if (!waits_again(r)) {
             r = finish_wait(guard, thread, callbacks, r);
             break;
         }
@@ -2017,7 +2036,7 @@ SceInt32 MsgPipe::receive(ThreadState &thread, MemState &mem, SceUInt32 wait_mod
         if (held == 0)
             pattern &= ~SCE_KERNEL_EVENT_DATA_EXIST;
         const SceInt32 result = Waitable::wait(guard, thread, type, request, deadline, timeout);
-        if (result != SCE_KERNEL_ERROR_NOTIFY_CALLBACK)
+        if (!waits_again(result))
             return finish_wait(guard, thread, callbacks, transfer_result(result, receiver, false));
     }
 }
@@ -2060,7 +2079,7 @@ SceInt32 MsgPipe::send(ThreadState &thread, MemState &mem, SceUInt32 wait_mode, 
         if (done)
             return finish_wait(guard, thread, callbacks, transfer_result(SCE_KERNEL_OK, sender, true));
         const SceInt32 result = Waitable::wait(guard, thread, type, request, deadline, timeout);
-        if (result != SCE_KERNEL_ERROR_NOTIFY_CALLBACK)
+        if (!waits_again(result))
             return finish_wait(guard, thread, callbacks, transfer_result(result, sender, true));
     }
 }

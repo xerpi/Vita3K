@@ -252,6 +252,7 @@ void KernelState::set_threads_paused(bool paused) {
         return;
     // Set before the threads see it, so a thread that checks its holds meanwhile already sees it
     threads_paused = paused;
+    update_process_suspend();
     for (auto &[_, thread] : threads)
         thread->pause_changed();
 }
@@ -259,8 +260,22 @@ void KernelState::set_threads_paused(bool paused) {
 void KernelState::set_threads_suspended(bool suspended) {
     const std::lock_guard<std::mutex> lock(mutex);
     threads_suspended = suspended;
+    update_process_suspend();
     for (auto &[_, thread] : threads)
         thread->set_suspended(suspended);
+}
+
+void KernelState::update_process_suspend() {
+    const bool suspend = threads_paused || threads_suspended;
+    if (suspend == clock.suspended())
+        return;
+    // The timers count in process time, so they freeze with the clock
+    if (suspend) {
+        clock.suspend();
+        return;
+    }
+    clock.resume();
+    timers.resume();
 }
 
 void KernelState::deinit(MemState &mem) {

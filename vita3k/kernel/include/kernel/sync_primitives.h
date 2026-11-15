@@ -194,6 +194,8 @@ public:
     void arm(Timer &timer, uint64_t deadline);
     void disarm(Timer &timer);
     bool take_due(Timer &timer, uint64_t cutoff);
+    // Fires the timers again once the process resumes
+    void resume();
 
 private:
     void run();

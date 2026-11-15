@@ -48,6 +48,25 @@ public:
         running = true;
     }
 
+    bool suspended() const {
+        const std::lock_guard<std::mutex> guard(lock);
+        return !running;
+    }
+
+    // Freezes the process time for a process suspend
+    void suspend() {
+        const std::lock_guard<std::mutex> guard(lock);
+        running = false;
+        base = system_now() - base;
+    }
+
+    // Lets the process time go on from where it froze
+    void resume() {
+        const std::lock_guard<std::mutex> guard(lock);
+        running = true;
+        base = system_now() - base;
+    }
+
 private:
     mutable std::mutex lock;
     // The system time the process time counts from while running, the frozen time while suspended

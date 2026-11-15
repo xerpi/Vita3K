@@ -178,10 +178,11 @@ struct KernelState {
 
     // Whether the emulator pause holds every thread. Threads read it without mutex, under their own lock.
     bool is_threads_paused() const { return threads_paused; }
-    // Pauses every thread, and the threads created until the pause ends, or lets them run again
+    // Pauses every thread, and the threads created until the pause ends, or lets them run again.
+    // A pause suspends the process.
     void set_threads_paused(bool paused);
     // Stops every thread for the debugger, and the threads created until it lets them go, or lets
-    // them run again
+    // them run again. A stop suspends the process.
     void set_threads_suspended(bool suspended);
 
     // Adds handler to the objects and the list under a new UID and returns the UID
@@ -208,6 +209,8 @@ private:
     std::atomic<uint32_t> next_uid{ 1 };
     std::atomic<bool> threads_paused{ false };
     bool threads_suspended = false;
+    // Suspends the process while the pause or the debugger holds it, or resumes it. With mutex held.
+    void update_process_suspend();
     // The process is exiting, so a thread still being created ends as well
     bool process_exiting = false;
 

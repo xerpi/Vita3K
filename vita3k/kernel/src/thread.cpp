@@ -430,6 +430,8 @@ SceInt32 ThreadState::delay_until(Deadline deadline, bool callbacks) {
         r = wait({ .type = wait_type(SCE_KERNEL_WAITTYPE_DELAY, callbacks) }, deadline);
         if (r == SCE_KERNEL_ERROR_NOTIFY_CALLBACK)
             r = run_callbacks();
+        else if (r == SCE_KERNEL_ERROR_THREAD_SUSPENDED)
+            r = wait_for_resume();
     }
     // Reaching the deadline is the expected outcome of a delay
     return r == SCE_KERNEL_ERROR_WAIT_TIMEOUT ? SCE_KERNEL_OK : r;
@@ -452,6 +454,8 @@ SceInt32 ThreadState::wait_for_signal(SceUInt32 *timeout, bool callbacks) {
         writeback_timeout(kernel.clock, timeout, deadline);
         if (r == SCE_KERNEL_ERROR_NOTIFY_CALLBACK)
             r = run_callbacks();
+        else if (r == SCE_KERNEL_ERROR_THREAD_SUSPENDED)
+            r = wait_for_resume();
     }
     return r;
 }
@@ -487,6 +491,10 @@ void ThreadState::set_ending(Ending how) {
 
 bool ThreadState::held() const {
     return !exiting() && (debugger_hold || vm_suspend_count > 0 || kernel.is_threads_paused());
+}
+
+bool ThreadState::suspend_holds() const {
+    return held() && kernel.clock.suspended();
 }
 
 void ThreadState::stop_for_holds(std::unique_lock<std::mutex> &lock) {
@@ -546,7 +554,7 @@ SceInt32 ThreadState::wait_for_thread_end(ThreadState &waiter, SceInt32 *exit_st
             }
         }
         const SceInt32 result = Waitable::wait(guard, waiter, type, { .out_status = exit_status }, deadline, timeout);
-        if (result != SCE_KERNEL_ERROR_NOTIFY_CALLBACK)
+        if (!waits_again(result))
             return result;
     }
 }
@@ -560,7 +568,7 @@ SceInt32 ThreadState::wait(WaitTarget target, Deadline deadline) {
 }
 
 SceInt32 ThreadState::sleep(std::unique_lock<std::mutex> &lock, WaitTarget target, Deadline deadline) {
-    const auto woken = [&] { return wait_over(); };
+    const auto woken = [&] { return wait_over() || (deadline != NO_DEADLINE && suspend_holds()); };
     wait_target = target;
     update_status(ThreadStatus::waiting);
     if (deadline == NO_DEADLINE)
@@ -574,7 +582,18 @@ SceInt32 ThreadState::sleep(std::unique_lock<std::mutex> &lock, WaitTarget targe
     const std::optional<SceInt32> result = std::exchange(wait_result, std::nullopt);
     if (exiting())
         return SCE_KERNEL_ERROR_THREAD_STOPPED;
-    return result.value_or(SCE_KERNEL_ERROR_WAIT_TIMEOUT);
+    // Only a timed wait gets here without a result
+    return result.value_or(suspend_holds() ? SCE_KERNEL_ERROR_THREAD_SUSPENDED : SCE_KERNEL_ERROR_WAIT_TIMEOUT);
+}
+
+SceInt32 ThreadState::wait_for_resume() {
+    std::unique_lock<std::mutex> lock(thread_mutex);
+    // Parked like before guest code, and a ForVM suspend left after the resume lets the wait go on
+    parked = true;
+    cv.notify_all();
+    cv.wait(lock, [&] { return !suspend_holds(); });
+    parked = false;
+    return exiting() ? SCE_KERNEL_ERROR_THREAD_STOPPED : SCE_KERNEL_OK;
 }
 
 SceInt32 ThreadState::run_callbacks() {

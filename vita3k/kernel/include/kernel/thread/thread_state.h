@@ -154,6 +154,9 @@ public:
     // Runs the notified callbacks for a wait that ended with NOTIFY_CALLBACK, with no lock held.
     // Returns THREAD_STOPPED if the thread exits or is deleted meanwhile.
     [[nodiscard]] SceInt32 run_callbacks();
+    // Holds the thread after a timed wait that a process suspend ended with THREAD_SUSPENDED, until
+    // the resume. Returns THREAD_STOPPED if the thread exits or is deleted meanwhile.
+    [[nodiscard]] SceInt32 wait_for_resume();
     // Wakes this thread from wait().
     void wake();
     // A host call that blocks the thread inside an export, like an audio output, during which the
@@ -256,6 +259,8 @@ private:
     // Whether something holds the thread before its guest code: the debugger, the emulator pause or
     // a ForVM suspend
     bool held() const;
+    // Whether a process suspend holds the thread, which ends its timed waits
+    bool suspend_holds() const;
     // Waits with thread_mutex held through lock until nothing holds the thread, parked meanwhile
     void stop_for_holds(std::unique_lock<std::mutex> &lock);
     // Whether the thread may run guest code now, or kernel code that changes its registers
@@ -265,7 +270,8 @@ private:
     // Whether the thread's current wait has a result or the thread is ending. With thread_mutex held.
     bool wait_over() const { return exiting() || wait_result.has_value(); }
     // Sleeps on target until wake(), a callback notify during the sleep if target has the callback bit, the
-    // deadline, or the thread's exit or delete (THREAD_STOPPED), with thread_mutex held through lock.
+    // deadline, a process suspend that holds the thread for a timed wait (THREAD_SUSPENDED), or the
+    // thread's exit or delete (THREAD_STOPPED), with thread_mutex held through lock.
     [[nodiscard]] SceInt32 sleep(std::unique_lock<std::mutex> &lock, WaitTarget target, Deadline deadline);
 
     // Runs guest code at one level, the thread's run or a call, with thread_mutex held through lock, which

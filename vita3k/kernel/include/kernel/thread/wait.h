@@ -66,6 +66,11 @@ constexpr SceUInt32 wait_type(SceUInt32 type, bool callbacks) {
     return callbacks ? type | SCE_KERNEL_WAITTYPE_CB_BIT : type;
 }
 
+// Whether a wait that ended with result is done again, after its callbacks or after a process suspend
+constexpr bool waits_again(SceInt32 result) {
+    return result == SCE_KERNEL_ERROR_NOTIFY_CALLBACK || result == SCE_KERNEL_ERROR_THREAD_SUSPENDED;
+}
+
 // Converts a guest timeout in microseconds into a deadline. A null timeout waits forever.
 inline Deadline deadline_from(const ProcessClock &clock, const SceUInt32 *timeout) {
     if (!timeout)
