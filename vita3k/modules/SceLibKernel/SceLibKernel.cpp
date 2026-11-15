@@ -1433,18 +1433,18 @@ EXPORT(int, sceKernelGetProcessTime, SceUInt64 *time) {
     TRACY_FUNC(sceKernelGetProcessTime, time);
     if (!time)
         return RET_ERROR(SCE_KERNEL_ERROR_INVALID_MEMORY_ACCESS);
-    *time = rtc_get_ticks(emuenv.kernel.base_tick.tick) - emuenv.kernel.start_tick;
+    *time = emuenv.kernel.clock.now();
     return 0;
 }
 
 EXPORT(SceUInt32, sceKernelGetProcessTimeLow) {
     TRACY_FUNC(sceKernelGetProcessTimeLow);
-    return static_cast<SceUInt32>(rtc_get_ticks(emuenv.kernel.base_tick.tick) - emuenv.kernel.start_tick);
+    return static_cast<SceUInt32>(emuenv.kernel.clock.now());
 }
 
 EXPORT(SceUInt64, sceKernelGetProcessTimeWide) {
     TRACY_FUNC(sceKernelGetProcessTimeWide);
-    return rtc_get_ticks(emuenv.kernel.base_tick.tick) - emuenv.kernel.start_tick;
+    return emuenv.kernel.clock.now();
 }
 
 EXPORT(int, sceKernelGetRWLockInfo, SceUID rwlockId, SceKernelRWLockInfo *info) {
@@ -1537,7 +1537,7 @@ EXPORT(int, sceKernelGetTimerBase, SceUID timer_handle, SceKernelSysClock *time)
     if (!timer || timer->get_base(base) != SCE_KERNEL_OK)
         return SCE_KERNEL_ERROR_UNKNOWN_TIMER_ID;
 
-    *time = base ? emuenv.kernel.process_time_at(base) : 0;
+    *time = base;
 
     return 0;
 }

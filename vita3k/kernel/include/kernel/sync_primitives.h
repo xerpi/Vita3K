@@ -143,14 +143,13 @@ public:
     std::expected<uint64_t, SceInt32> set_time(uint64_t new_time);
     // Sets time to how much time the timer counted, or returns UNKNOWN_TIMER_ID if it was deleted.
     SceInt32 get_time(uint64_t &time) const;
-    // Sets time to the clock time the count runs from, 0 while the timer is stopped, or returns
+    // Sets time to the process time the count runs from, 0 while the timer is stopped, or returns
     // UNKNOWN_TIMER_ID if it was deleted.
     SceInt32 get_base(uint64_t &time) const;
     // Sets time to how much time the armed event has left, or returns EVENT_NOT_SET with no event
     // armed or UNKNOWN_TIMER_ID if it was deleted.
     SceInt32 remaining_time(uint64_t &time);
-    // Fills info with what the timer's info reports, with the clock time the count runs from as the
-    // base of a running timer, or returns UNKNOWN_TIMER_ID if it was deleted.
+    // Fills info with what the timer's info reports, or returns UNKNOWN_TIMER_ID if it was deleted.
     SceInt32 timer_info(SceKernelTimerInfo &info);
 
 private:
@@ -170,7 +169,7 @@ private:
     bool armed = false;
     bool is_repeat = false;
     bool is_pulse = false;
-    // The clock time the count runs from while the timer is started, 0 if it never started
+    // The process time the count runs from while the timer is started, 0 if it never started
     uint64_t base = 0;
     // The count while the timer is stopped
     uint64_t stopped_count = 0;
@@ -181,12 +180,15 @@ private:
 
 using TimerRef = Ref<Timer>;
 
-// Armed timers in deadline order, fired by one host thread.
+// Armed timers in deadline order, fired by one host thread. The deadlines are process times.
 class TimerService {
 public:
+    explicit TimerService(const ProcessClock &clock);
     ~TimerService();
     void start();
     void stop();
+
+    const ProcessClock &clock;
 
     // Called with the timer lock held. The service lock comes after it.
     void arm(Timer &timer, uint64_t deadline);

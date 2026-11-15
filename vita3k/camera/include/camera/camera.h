@@ -345,7 +345,7 @@ public:
     uint64_t tick_diff_us = 0; // Difference between emuenv ticks and SDL ticks in microseconds
     int get_attribute(CameraAttributes attribute);
     int set_attribute(CameraAttributes attribute, int value);
-    int open(SceCameraInfo *info, uint64_t base_tick, uint64_t start_tick);
+    int open(SceCameraInfo *info, uint64_t process_time);
     int close();
     int start();
     int stop();

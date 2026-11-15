@@ -17,11 +17,15 @@
 
 #pragma once
 
+#include <kernel/process_clock.h>
 #include <kernel/types.h>
 
-#include <chrono>
+#include <limits>
 
-using Deadline = std::chrono::steady_clock::time_point;
+// The process time a wait ends at
+using Deadline = uint64_t;
+// The deadline of a wait without a timeout
+constexpr Deadline NO_DEADLINE = std::numeric_limits<Deadline>::max();
 
 // What a waiting thread is blocked on, as sceKernelGetThreadInfo reports it.
 struct WaitTarget {
@@ -63,21 +67,16 @@ constexpr SceUInt32 wait_type(SceUInt32 type, bool callbacks) {
 }
 
 // Converts a guest timeout in microseconds into a deadline. A null timeout waits forever.
-inline Deadline deadline_from(const SceUInt32 *timeout) {
+inline Deadline deadline_from(const ProcessClock &clock, const SceUInt32 *timeout) {
     if (!timeout)
-        return Deadline::max();
-    return std::chrono::steady_clock::now() + std::chrono::microseconds(*timeout);
+        return NO_DEADLINE;
+    return clock.now() + *timeout;
 }
 
-// Returns the microseconds left before the deadline, 0 once it passed.
-inline SceUInt32 time_left_until(Deadline deadline) {
-    const auto left = std::chrono::duration_cast<std::chrono::microseconds>(deadline - std::chrono::steady_clock::now()).count();
-    return left > 0 ? static_cast<SceUInt32>(left) : 0;
-}
-
-// Writes the time left before the deadline back to a guest timeout.
-inline void writeback_timeout(SceUInt32 *timeout, Deadline deadline) {
-    if (!timeout || deadline == Deadline::max())
+// Writes the time left before the deadline back to a guest timeout, 0 once it passed.
+inline void writeback_timeout(const ProcessClock &clock, SceUInt32 *timeout, Deadline deadline) {
+    if (!timeout || deadline == NO_DEADLINE)
         return;
-    *timeout = time_left_until(deadline);
+    const uint64_t now = clock.now();
+    *timeout = deadline > now ? static_cast<SceUInt32>(deadline - now) : 0;
 }

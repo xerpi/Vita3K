@@ -33,12 +33,6 @@
 #include <util/tracy.h>
 TRACY_MODULE_NAME(SceThreadmgr);
 
-inline static uint64_t get_current_time() {
-    return std::chrono::duration_cast<std::chrono::microseconds>(
-        std::chrono::high_resolution_clock::now().time_since_epoch())
-        .count();
-}
-
 // Copies the start of full to info, as many bytes as the size the game set in info asks for, with
 // the size of the whole struct in its size field. A size past the struct must be refused before.
 template <typename T>
@@ -804,9 +798,6 @@ EXPORT(SceInt32, _sceKernelGetTimerInfo, SceUID timer_handle, Ptr<SceKernelTimer
     if (info->size > sizeof(*info))
         return RET_ERROR(SCE_KERNEL_ERROR_NO_MEMORY);
 
-    // A running timer's base is the process time it counts from
-    if (full.active)
-        full.baseTime = emuenv.kernel.process_time_at(full.baseTime);
     write_info(info, full);
 
     return SCE_KERNEL_OK;
@@ -1465,8 +1456,7 @@ static int delay_thread(KernelState &kernel, SceUID thread_id, SceUInt delay_us)
     // Shorter delays last 200 microseconds
     delay_us = std::max(delay_us, 200u);
     const ThreadStateRef thread = kernel.get_thread(thread_id);
-    const Deadline deadline = std::chrono::steady_clock::now() + std::chrono::microseconds(delay_us);
-    return thread->delay_until(deadline, false);
+    return thread->delay_until(kernel.clock.now() + delay_us, false);
 }
 
 static int delay_thread_cb(KernelState &kernel, SceUID thread_id, SceUInt delay_us) {
@@ -1476,7 +1466,7 @@ static int delay_thread_cb(KernelState &kernel, SceUID thread_id, SceUInt delay_
 
     delay_us = std::max(delay_us, 200u);
     // Time spent in callbacks counts toward the delay
-    const Deadline deadline = std::chrono::steady_clock::now() + std::chrono::microseconds(delay_us);
+    const Deadline deadline = kernel.clock.now() + delay_us;
     const ThreadStateRef thread = kernel.get_thread(thread_id);
     return thread->delay_until(deadline, true);
 }
@@ -1632,7 +1622,7 @@ EXPORT(int, sceKernelGetProcessId) {
 
 EXPORT(uint64_t, sceKernelGetSystemTimeWide) {
     TRACY_FUNC(sceKernelGetSystemTimeWide);
-    return get_current_time();
+    return ProcessClock::system_now();
 }
 
 EXPORT(SceInt32, sceKernelGetThreadCpuAffinityMask, SceUID thid) {
@@ -1678,7 +1668,7 @@ EXPORT(uint64_t, sceKernelGetTimerBaseWide, SceUID timer_handle) {
         return std::numeric_limits<uint64_t>::max();
     }
 
-    return base ? emuenv.kernel.process_time_at(base) : 0;
+    return base;
 }
 
 EXPORT(uint64_t, sceKernelGetTimerTimeWide, SceUID timer_handle) {

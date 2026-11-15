@@ -417,6 +417,10 @@ void ThreadState::update_status(ThreadStatus status) {
     cv.notify_all();
 }
 
+const ProcessClock &ThreadState::clock() const {
+    return kernel.clock;
+}
+
 SceInt32 ThreadState::delay_until(Deadline deadline, bool callbacks) {
     SceInt32 r = callbacks ? run_callbacks() : SCE_KERNEL_OK;
     // A callback pending again after the first pass ends the delay at once
@@ -436,7 +440,7 @@ SceInt32 ThreadState::wait_for_signal(SceUInt32 *timeout, bool callbacks) {
         const std::lock_guard<std::mutex> lock(thread_mutex);
         return std::exchange(signal_pending, false);
     };
-    const Deadline deadline = deadline_from(timeout);
+    const Deadline deadline = deadline_from(kernel.clock, timeout);
     SceInt32 r = callbacks ? run_callbacks() : SCE_KERNEL_OK;
     // A signal sent before ends the wait at once, with the timeout as it was
     while (r == SCE_KERNEL_OK && !take_signal()) {
@@ -445,7 +449,7 @@ SceInt32 ThreadState::wait_for_signal(SceUInt32 *timeout, bool callbacks) {
             std::unique_lock<std::mutex> lock(thread_mutex);
             r = sleep(lock, { wait_type(SCE_KERNEL_WAITTYPE_SIGNAL, callbacks), SCE_KERNEL_SIGNAL_WAIT_ID }, deadline);
         }
-        writeback_timeout(timeout, deadline);
+        writeback_timeout(kernel.clock, timeout, deadline);
         if (r == SCE_KERNEL_ERROR_NOTIFY_CALLBACK)
             r = run_callbacks();
     }
@@ -529,7 +533,7 @@ SceInt32 ThreadState::wait_for_thread_end(ThreadState &waiter, SceInt32 *exit_st
     // An ended run gives its exit status at once with the timeout as it was. No callback runs after
     // the wait, and a thread is never deleted from the object table.
     const SceUInt32 type = wait_type(SCE_KERNEL_WAITTYPE_WAITTHEND, callbacks);
-    const Deadline deadline = deadline_from(timeout);
+    const Deadline deadline = deadline_from(kernel.clock, timeout);
     while (true) {
         if (const SceInt32 r = run_wait_callbacks(guard, waiter, callbacks))
             return r;
@@ -550,7 +554,7 @@ SceInt32 ThreadState::wait_for_thread_end(ThreadState &waiter, SceInt32 *exit_st
 SceInt32 ThreadState::wait(WaitTarget target, Deadline deadline) {
     std::unique_lock<std::mutex> lock(thread_mutex);
     // A callback already pending ends a wait with callbacks at once, unless the deadline passed
-    if (!wait_result && (target.type & SCE_KERNEL_WAITTYPE_CB_BIT) && callback_pending && std::chrono::steady_clock::now() < deadline)
+    if (!wait_result && (target.type & SCE_KERNEL_WAITTYPE_CB_BIT) && callback_pending && kernel.clock.now() < deadline)
         wait_result = SCE_KERNEL_ERROR_NOTIFY_CALLBACK;
     return sleep(lock, target, deadline);
 }
@@ -559,10 +563,10 @@ SceInt32 ThreadState::sleep(std::unique_lock<std::mutex> &lock, WaitTarget targe
     const auto woken = [&] { return wait_over(); };
     wait_target = target;
     update_status(ThreadStatus::waiting);
-    if (deadline == Deadline::max())
+    if (deadline == NO_DEADLINE)
         cv.wait(lock, woken);
     else
-        cv.wait_until(lock, deadline, woken);
+        cv.wait_until(lock, std::chrono::steady_clock::time_point(std::chrono::microseconds(kernel.clock.to_system(deadline))), woken);
     // Before the call writes its result to the registers. A thread something holds goes on to its
     // holds, which keep it from its callbacks and its code.
     update_status(ThreadStatus::running);

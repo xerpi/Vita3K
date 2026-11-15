@@ -20,7 +20,6 @@
 #include <array>
 #include <camera/camera.h>
 #include <camera/state.h>
-#include <rtc/rtc.h>
 #include <stb_image.h>
 #include <util/log.h>
 
@@ -224,8 +223,8 @@ int Camera::set_attribute(CameraAttributes attribute, int value) {
     return 0;
 }
 
-int Camera::open(SceCameraInfo *info, uint64_t base_tick, uint64_t start_tick) {
-    tick_diff_us = rtc_get_ticks(base_tick) - start_tick - (SDL_GetTicksNS() / SDL_NS_PER_US);
+int Camera::open(SceCameraInfo *info, uint64_t process_time) {
+    tick_diff_us = process_time - (SDL_GetTicksNS() / SDL_NS_PER_US);
     this->is_opened = true;
     this->info = {};
     memcpy(&(this->info), info, std::min<size_t>(sizeof(SceCameraInfo), info->size));

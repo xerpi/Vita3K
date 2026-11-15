@@ -136,6 +136,8 @@ public:
     SceInt32 change_affinity_mask(SceInt32 new_affinity_mask);
 
     // Waits
+    // The clock of the thread's process, which its waits count with
+    const ProcessClock &clock() const;
     // Blocks this thread until the deadline passes.
     [[nodiscard]] SceInt32 delay_until(Deadline deadline, bool callbacks);
     // Blocks this thread until a signal is sent to it or the timeout passes, writing the time left back.

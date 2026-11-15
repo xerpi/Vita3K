@@ -95,9 +95,9 @@ KernelState::KernelState()
 }
 
 bool KernelState::init(MemState &mem, const CallImportFunc &call_import, bool cpu_opt) {
+    clock.start();
     timers.start();
     corenum_allocator.set_max_core_count(MAX_CORE_COUNT);
-    start_tick = rtc_get_ticks(rtc_base_ticks());
     base_tick = { rtc_base_ticks() };
     this->call_import = call_import;
     this->cpu_opt = cpu_opt;
@@ -142,11 +142,6 @@ void KernelState::invalidate_jit_cache(Address start, size_t length) {
     for (const auto &[_, thread] : threads) {
         thread->cpu->invalidate_jit_cache(start, length);
     }
-}
-
-uint64_t KernelState::process_time_at(uint64_t clock_time) const {
-    // The process started at the host clock time start_tick - base_tick.tick
-    return clock_time - (start_tick - base_tick.tick);
 }
 
 ThreadStateRef KernelState::get_thread(SceUID thread_id) {

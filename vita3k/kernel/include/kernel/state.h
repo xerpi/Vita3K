@@ -21,6 +21,7 @@
 #include <kernel/callback.h>
 #include <kernel/debugger.h>
 #include <kernel/object_store.h>
+#include <kernel/process_clock.h>
 #include <kernel/sync_primitives.h>
 #include <kernel/types.h>
 #include <mem/allocator.h>
@@ -145,10 +146,7 @@ struct KernelState {
 
     ObjectStore obj_store;
 
-    uint64_t start_tick;
     SceRtcTick base_tick;
-    // Returns the process time at a time of the host clock that timers count with
-    uint64_t process_time_at(uint64_t clock_time) const;
     Ptr<SceProcessParam> process_param;
     Ptr<void> client_vtable = Ptr<void>(0);
     Ptr<Address> shellsvc_client = Ptr<Address>(0);
@@ -214,6 +212,7 @@ private:
     bool process_exiting = false;
 
 public:
+    ProcessClock clock;
     // Declared last so the service stops before the tables are destroyed.
-    TimerService timers;
+    TimerService timers{ clock };
 };

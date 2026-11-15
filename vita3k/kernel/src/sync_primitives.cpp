@@ -109,8 +109,8 @@ SceInt32 Waitable::run_wait_callbacks(std::unique_lock<std::mutex> &lock, Thread
 
 SceInt32 Waitable::wait(std::unique_lock<std::mutex> &lock, ThreadState &thread, SceUInt32 type, const WaitRequest &request, Deadline deadline, SceUInt32 *timeout) {
     const bool callbacks = type & SCE_KERNEL_WAITTYPE_CB_BIT;
-    if (std::chrono::steady_clock::now() >= deadline) {
-        writeback_timeout(timeout, deadline);
+    if (thread.clock().now() >= deadline) {
+        writeback_timeout(thread.clock(), timeout, deadline);
         return SCE_KERNEL_ERROR_WAIT_TIMEOUT;
     }
     // A callback already pending leaves the timeout as it was
@@ -125,7 +125,7 @@ SceInt32 Waitable::wait(std::unique_lock<std::mutex> &lock, ThreadState &thread,
         result = thread.wait(target, deadline);
         lock.lock();
     } while (!thread.ender_result && result == SCE_KERNEL_OK);
-    writeback_timeout(timeout, deadline);
+    writeback_timeout(thread.clock(), timeout, deadline);
     // A waker's result wins, it already handed over what the waiter waits for, unless the thread is
     // ending. Read once, since a wait in the callbacks below may reuse it.
     if (const std::optional<SceInt32> ended = thread.ender_result; ended && result != SCE_KERNEL_ERROR_THREAD_STOPPED) {
@@ -258,7 +258,7 @@ SceInt32 Event::wait(ThreadState &thread, SceUInt32 wait_pattern, SceUInt32 *res
 
     // A wait for pattern 0 matches nothing, so it lasts until its timeout, a cancel or a delete
     const SceUInt32 type = wait_type(SCE_KERNEL_WAITTYPE_EVENT, callbacks);
-    const Deadline deadline = deadline_from(timeout);
+    const Deadline deadline = deadline_from(thread.clock(), timeout);
     SceInt32 result = SCE_KERNEL_OK;
     while (true) {
         if (const SceInt32 r = run_wait_callbacks(guard, thread, callbacks))
@@ -437,12 +437,6 @@ SceInt32 Event::info(SceKernelEventInfo &info) {
 // * Timer *
 // *********
 
-inline uint64_t timer_clock() {
-    return std::chrono::duration_cast<std::chrono::microseconds>(
-        std::chrono::high_resolution_clock::now().time_since_epoch())
-        .count();
-}
-
 Timer::Timer(TimerService &timers, SceUInt32 attr, const char *name, SceUID creator)
     : WithUidClass(attr, name, 0, system_event_user_data(creator))
     , timers(timers) {}
@@ -451,6 +445,9 @@ Timer::Timer(TimerService &timers, SceUInt32 attr, const char *name, SceUID crea
 constexpr uint64_t TIMER_EVENT_FLOOR = 200;
 // Longest single wait of the worker, so a far deadline is waited for in steps
 constexpr uint64_t TIMER_MAX_WAIT = 1000000;
+
+TimerService::TimerService(const ProcessClock &clock)
+    : clock(clock) {}
 
 TimerService::~TimerService() {
     stop();
@@ -520,14 +517,14 @@ void TimerService::run() {
             continue;
         }
         // The next batch starts at the first deadline, but never sooner than the floor from now
-        const uint64_t now = timer_clock();
+        const uint64_t now = clock.now();
         const uint64_t first = timers.begin()->deadline;
         const uint64_t wait = first > now ? std::min(first - now, TIMER_MAX_WAIT) : 0;
         if (wake.wait_for(lock, std::chrono::microseconds(std::max(wait, TIMER_EVENT_FLOOR))) != std::cv_status::timeout)
             continue;
         // Fires the timers due by this time in list order. A repeat armed again in front of the
         // cursor fires in the next batch, and a stop ends the batch.
-        const uint64_t cutoff = timer_clock();
+        const uint64_t cutoff = clock.now();
         for (auto it = timers.begin(); it != timers.end() && it->deadline <= cutoff && !stopping; it = cursor) {
             cursor = std::next(it);
             {
@@ -576,7 +573,7 @@ SceInt32 Timer::set_event(SceUID type, SceKernelSysClock interval, SceInt32 repe
     schedule = count() + interval;
     // A stopped timer queues the event when it starts
     if (is_started)
-        timers.arm(*this, timer_clock() + interval);
+        timers.arm(*this, timers.clock.now() + interval);
     else
         timers.disarm(*this);
 
@@ -594,7 +591,7 @@ SceInt32 Timer::start() {
     // The count goes on from where it stopped, and an armed event is due after the time it has left,
     // at once if it already fired
     is_started = true;
-    const uint64_t now = timer_clock();
+    const uint64_t now = timers.clock.now();
     base = now - stopped_count;
     if (armed)
         timers.arm(*this, now + (schedule > stopped_count ? schedule - stopped_count : 0));
@@ -624,7 +621,7 @@ std::expected<uint64_t, SceInt32> Timer::set_time(uint64_t new_time) {
 
     const uint64_t old_count = count();
     if (is_started) {
-        const uint64_t now = timer_clock();
+        const uint64_t now = timers.clock.now();
         base = now - new_time;
         // If the new time is before the armed event's time, the event is due when the count reaches
         // it again. Otherwise it stays due when it was.
@@ -637,7 +634,7 @@ std::expected<uint64_t, SceInt32> Timer::set_time(uint64_t new_time) {
 }
 
 uint64_t Timer::count() const {
-    return is_started ? timer_clock() - base : stopped_count;
+    return is_started ? timers.clock.now() - base : stopped_count;
 }
 
 SceInt32 Timer::get_time(uint64_t &time) const {
@@ -830,7 +827,7 @@ SceInt32 Mutex::acquire(MemState &mem, ThreadState &thread, SceInt32 count, SceU
         return try_take(mem, thread, count);
 
     const SceUInt32 type = wait_type(lightweight() ? SCE_KERNEL_WAITTYPE_LW_MUTEX : SCE_KERNEL_WAITTYPE_MUTEX, callbacks);
-    const Deadline deadline = deadline_from(timeout);
+    const Deadline deadline = deadline_from(thread.clock(), timeout);
     SceInt32 r;
     while (true) {
         r = run_wait_callbacks(guard, thread, callbacks);
@@ -873,7 +870,7 @@ SceInt32 Mutex::relock(MemState &mem, ThreadState &thread, bool callbacks) {
             r = try_take(mem, thread, 1);
             break;
         }
-        r = Waitable::wait(guard, thread, type, { .count = 1 }, Deadline::max(), nullptr);
+        r = Waitable::wait(guard, thread, type, { .count = 1 }, NO_DEADLINE, nullptr);
         if (r != SCE_KERNEL_ERROR_NOTIFY_CALLBACK) {
             // Only a delete runs the callbacks notified during the wait
             if (r == SCE_KERNEL_ERROR_WAIT_DELETE)
@@ -1065,7 +1062,7 @@ SceInt32 RWLock::acquire(ThreadState &thread, bool is_write, SceUInt32 *timeout,
         return try_take(thread, is_write);
 
     const SceUInt32 type = wait_type(SCE_KERNEL_WAITTYPE_RW_LOCK, callbacks);
-    const Deadline deadline = deadline_from(timeout);
+    const Deadline deadline = deadline_from(thread.clock(), timeout);
     while (true) {
         if (const SceInt32 r = run_wait_callbacks(guard, thread, callbacks))
             return r;
@@ -1240,7 +1237,7 @@ SceInt32 Semaphore::wait(ThreadState &thread, SceInt32 need_count, SceUInt32 *ti
         return SCE_KERNEL_ERROR_ILLEGAL_COUNT;
 
     const SceUInt32 type = wait_type(SCE_KERNEL_WAITTYPE_SEMAPHORE, callbacks);
-    const Deadline deadline = deadline_from(timeout);
+    const Deadline deadline = deadline_from(thread.clock(), timeout);
     while (true) {
         if (const SceInt32 r = run_wait_callbacks(guard, thread, callbacks))
             return r;
@@ -1353,7 +1350,7 @@ SceInt32 Condvar::wait(MemState &mem, ThreadState &thread, SceUInt32 *timeout, b
 
     // Condition waits have nothing to take, they only wait for a signal
     const SceUInt32 type = wait_type(lightweight() ? SCE_KERNEL_WAITTYPE_LW_COND_SIGNAL : SCE_KERNEL_WAITTYPE_COND_SIGNAL, callbacks);
-    const Deadline deadline = deadline_from(timeout);
+    const Deadline deadline = deadline_from(thread.clock(), timeout);
     SceInt32 r;
     while (true) {
         r = run_wait_callbacks(guard, thread, callbacks);
@@ -1559,7 +1556,7 @@ SceInt32 EventFlag::wait(ThreadState &thread, SceUInt32 pattern, SceUInt32 wait_
         set_holder(thread);
     const SceUInt32 type = wait_type(SCE_KERNEL_WAITTYPE_EVENTFLAG, callbacks);
     const WaitRequest request{ .pattern = pattern, .mode = wait_mode, .out_pattern = out_bits };
-    const Deadline deadline = deadline_from(timeout);
+    const Deadline deadline = deadline_from(thread.clock(), timeout);
     SceInt32 r;
     while (true) {
         r = run_wait_callbacks(guard, thread, callbacks);
@@ -2005,7 +2002,7 @@ SceInt32 MsgPipe::receive(ThreadState &thread, MemState &mem, SceUInt32 wait_mod
 
     const WaitRequest request{ .receiver = &receiver };
     const SceUInt32 type = wait_type(SCE_KERNEL_WAITTYPE_MSG_PIPE, callbacks);
-    const Deadline deadline = deadline_from(timeout);
+    const Deadline deadline = deadline_from(thread.clock(), timeout);
     while (true) {
         if (const SceInt32 r = run_wait_callbacks(guard, thread, callbacks))
             return transfer_result(r, receiver, false);
@@ -2051,7 +2048,7 @@ SceInt32 MsgPipe::send(ThreadState &thread, MemState &mem, SceUInt32 wait_mode, 
 
     const WaitRequest request{ .sender = &sender };
     const SceUInt32 type = wait_type(SCE_KERNEL_WAITTYPE_MSG_PIPE, callbacks);
-    const Deadline deadline = deadline_from(timeout);
+    const Deadline deadline = deadline_from(thread.clock(), timeout);
     while (true) {
         if (const SceInt32 r = run_wait_callbacks(guard, thread, callbacks))
             return transfer_result(r, sender, true);

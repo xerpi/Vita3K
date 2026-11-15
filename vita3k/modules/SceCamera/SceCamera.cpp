@@ -124,7 +124,7 @@ EXPORT(int, sceCameraOpen, SceCameraDevice devnum, SceCameraInfo *pInfo) {
         camera.update_config(emuenv.cfg.front_camera_type, emuenv.cfg.front_camera_id, emuenv.cfg.front_camera_image, emuenv.cfg.front_camera_color);
     else
         camera.update_config(emuenv.cfg.back_camera_type, emuenv.cfg.back_camera_id, emuenv.cfg.back_camera_image, emuenv.cfg.back_camera_color);
-    auto res = camera.open(pInfo, emuenv.kernel.base_tick.tick, emuenv.kernel.start_tick);
+    auto res = camera.open(pInfo, emuenv.kernel.clock.now());
 
     return res;
 }

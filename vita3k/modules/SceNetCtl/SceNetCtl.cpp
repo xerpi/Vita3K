@@ -312,9 +312,9 @@ static void adhoc_thread(EmuEnvState &emuenv, int thread_id) {
         // Interval for sending our peer info to the network set to 1 second, expressed in microseconds
         constexpr uint64_t SEND_INTERVAL_USEC = 1'000'000;
 
-        uint64_t lastSendTicks = rtc_get_ticks(emuenv.kernel.base_tick.tick) - emuenv.kernel.start_tick - SEND_INTERVAL_USEC;
+        uint64_t lastSendTicks = emuenv.kernel.clock.now() - SEND_INTERVAL_USEC;
         while (emuenv.netctl.adhocCondVarReady.load()) {
-            const uint64_t currentTicks = rtc_get_ticks(emuenv.kernel.base_tick.tick) - emuenv.kernel.start_tick;
+            const uint64_t currentTicks = emuenv.kernel.clock.now();
             std::erase_if(emuenv.netctl.adhocPeers, [&](const SceNetCtlAdhocPeerInfo &peer) {
                 return currentTicks - peer.lastRecv > TIMEOUT_USEC;
             });

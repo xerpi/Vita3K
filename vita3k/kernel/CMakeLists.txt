@@ -6,6 +6,7 @@ set(SOURCE_LIST
 	include/kernel/sync_primitives.h
 	include/kernel/relocation.h
 	include/kernel/object_store.h
+	include/kernel/process_clock.h
 	include/kernel/debugger.h
 	include/kernel/load_self.h
 	include/kernel/callback.h
