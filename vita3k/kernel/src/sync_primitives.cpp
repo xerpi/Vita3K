@@ -890,7 +890,7 @@ SceInt32 Mutex::relock(MemState &mem, ThreadState &thread, bool callbacks) {
             break;
         }
         r = Waitable::wait(guard, thread, type, { .count = 1 }, NO_DEADLINE, nullptr);
-        if (r != SCE_KERNEL_ERROR_NOTIFY_CALLBACK) {
+        if (!waits_again(r)) {
             // Only a delete runs the callbacks notified during the wait
             if (r == SCE_KERNEL_ERROR_WAIT_DELETE)
                 r = finish_wait(guard, thread, callbacks, r);

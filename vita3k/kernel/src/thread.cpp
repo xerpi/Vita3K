@@ -568,7 +568,7 @@ SceInt32 ThreadState::wait(WaitTarget target, Deadline deadline) {
 }
 
 SceInt32 ThreadState::sleep(std::unique_lock<std::mutex> &lock, WaitTarget target, Deadline deadline) {
-    const auto woken = [&] { return wait_over() || (deadline != NO_DEADLINE && suspend_holds()); };
+    const auto woken = [&] { return wait_over() || suspend_holds(); };
     wait_target = target;
     update_status(ThreadStatus::waiting);
     if (deadline == NO_DEADLINE)
@@ -582,7 +582,6 @@ SceInt32 ThreadState::sleep(std::unique_lock<std::mutex> &lock, WaitTarget targe
     const std::optional<SceInt32> result = std::exchange(wait_result, std::nullopt);
     if (exiting())
         return SCE_KERNEL_ERROR_THREAD_STOPPED;
-    // Only a timed wait gets here without a result
     return result.value_or(suspend_holds() ? SCE_KERNEL_ERROR_THREAD_SUSPENDED : SCE_KERNEL_ERROR_WAIT_TIMEOUT);
 }
 
