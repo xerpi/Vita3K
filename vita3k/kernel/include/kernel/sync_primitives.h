@@ -527,9 +527,11 @@ struct MsgPipeReceiver : MsgPipeTransfer {
 class MsgPipe final : public WithUidClass<Event, UidClass::msg_pipe> {
     friend class Ref<MsgPipe>;
 
-    MsgPipe(SceUInt32 attr, const char *name, SceSize buf_size, SceUID creator);
+    MsgPipe(KernelState &owner, SceUInt32 attr, const char *name, SceSize capacity, SceUID creator);
 
 public:
+    ~MsgPipe() override;
+
     // Returns the error a create with these arguments gets, or SCE_KERNEL_OK
     static SceInt32 check_create(const char *name, SceUInt32 type, SceUInt32 attr, SceSize buf_size);
 
@@ -573,6 +575,8 @@ private:
     // Returns whether a new call with request goes ahead of the calls already waiting on its side
     bool goes_first(const WaitRequest &request, int priority);
 
+    // The process that counts the pipe's buffer bytes
+    KernelState &owner;
     // Guarded by the lock. The ring of capacity bytes holds held bytes from read_pos, and a send
     // writes at write_pos.
     SceSize capacity;

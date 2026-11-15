@@ -35,6 +35,7 @@
 #include <io/types.h>
 #include <kernel/types.h>
 #include <rtc/rtc.h>
+#include <util/align.h>
 #include <util/log.h>
 #include <util/tracy.h>
 
@@ -1258,7 +1259,11 @@ EXPORT(int, sceKernelCreateMsgPipe, const char *name, uint32_t type, uint32_t at
     if (const SceInt32 error = MsgPipe::check_create(name, type, attr, bufSize))
         return RET_ERROR(error);
 
-    const auto msgpipe = Ref<MsgPipe>::make(attr, name, bufSize, thread_id);
+    // A pipe's buffer is a whole number of 4 KiB pages
+    const SceSize capacity = align(bufSize, 0x1000);
+    if (const SceInt32 error = emuenv.kernel.add_msg_pipe_buffer(capacity))
+        return RET_ERROR(error);
+    const auto msgpipe = Ref<MsgPipe>::make(emuenv.kernel, attr, name, capacity, thread_id);
     return emuenv.kernel.objects.add(msgpipe, emuenv.kernel.get_next_uid());
 }
 

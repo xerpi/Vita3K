@@ -107,6 +107,10 @@
 
 #define SCE_KERNEL_MSG_PIPE_TYPE_USER_MAIN 0x00000040U
 
+// The most message pipe buffer bytes a process built for 3.10 or later may hold
+#define SCE_KERNEL_MSG_PIPE_BUFFER_TOTAL_MAX 0x2000000U
+#define SCE_KERNEL_MSG_PIPE_BUFFER_TOTAL_MAX_SDK_VERSION 0x03100000U
+
 // The bits that order the threads waiting on a message pipe, separately for senders and receivers
 #define SCE_KERNEL_MSG_PIPE_ATTR_TH_MASK 0x0000000FU
 #define SCE_KERNEL_MSG_PIPE_ATTR_TH_PRIO_S 0x00000001U

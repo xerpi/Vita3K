@@ -406,7 +406,7 @@ msgpipe_async_piece_error       fail     # DONT_WAIT FULL sends return their err
 msgpipe_async_wakes_receiver    fail     # a DONT_WAIT FULL send finishes at once like a try and writes its size
 msgpipe_async_wrong_uid         fail     # a DONT_WAIT FULL send checks the UID before it returns
 msgpipe_auto_reset_data_exist   fail     # sceKernelWaitMultipleEvents
-msgpipe_buffer_total            fail     # no cap on a process's total message pipe buffer bytes
+msgpipe_buffer_total            pass
 msgpipe_callback_partial        pass
 msgpipe_callback_rejoin_order   pass
 msgpipe_cancel_data_exist       pass

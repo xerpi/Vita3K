@@ -19,7 +19,6 @@
 #include <kernel/sync_primitives.h>
 
 #include <kernel/types.h>
-#include <util/align.h>
 #include <util/log.h>
 
 #include <algorithm>
@@ -1681,11 +1680,15 @@ SceInt32 EventFlag::info(SceKernelEventFlagInfo &info) const {
 // * Msg Pipe  *
 // *************
 
-MsgPipe::MsgPipe(SceUInt32 attr, const char *name, SceSize buf_size, SceUID creator)
+MsgPipe::MsgPipe(KernelState &owner, SceUInt32 attr, const char *name, SceSize capacity, SceUID creator)
     : WithUidClass(attr, name, 0, system_event_user_data(creator))
-    // A pipe's buffer is a whole number of 4 KiB pages
-    , capacity(align(buf_size, 0x1000))
+    , owner(owner)
+    , capacity(capacity)
     , buffer(std::make_unique<std::byte[]>(capacity)) {}
+
+MsgPipe::~MsgPipe() {
+    owner.remove_msg_pipe_buffer(capacity);
+}
 
 SceInt32 MsgPipe::check_create(const char *name, SceUInt32 type, SceUInt32 attr, SceSize buf_size) {
     if (const SceInt32 error = check_name(name, attr))

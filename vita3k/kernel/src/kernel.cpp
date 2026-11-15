@@ -119,9 +119,24 @@ void KernelState::load_process_param(MemState &mem, Ptr<uint32_t> ptr) {
         return;
     }
     process_param = ptr.cast<SceProcessParam>();
+    if (param->magic == '2PSP')
+        sdk_version = param->fw_version;
     // VAR_NID(__sce_libcparam, 0xDF084DFA)
     // no memory leak because we don't allocate memory for this variable intially
     export_nids[0xDF084DFA] = process_param.get(mem)->sce_libc_param.address();
+}
+
+SceInt32 KernelState::add_msg_pipe_buffer(SceSize bytes) {
+    const std::lock_guard<std::mutex> lock(process_counters_mutex);
+    if (sdk_version >= SCE_KERNEL_MSG_PIPE_BUFFER_TOTAL_MAX_SDK_VERSION && bytes > SCE_KERNEL_MSG_PIPE_BUFFER_TOTAL_MAX - msg_pipe_buffer_bytes)
+        return SCE_KERNEL_ERROR_ILLEGAL_SIZE;
+    msg_pipe_buffer_bytes += bytes;
+    return SCE_KERNEL_OK;
+}
+
+void KernelState::remove_msg_pipe_buffer(SceSize bytes) {
+    const std::lock_guard<std::mutex> lock(process_counters_mutex);
+    msg_pipe_buffer_bytes -= bytes;
 }
 
 void KernelState::set_memory_watch(bool enabled) {
@@ -308,6 +323,7 @@ void KernelState::deinit(MemState &mem) {
     halt_instruction = nullptr;
 
     process_param = nullptr;
+    sdk_version = 0;
     client_vtable = Ptr<void>(0);
     shellsvc_client = Ptr<Address>(0);
     libc_dso_handle_main = Ptr<void>(0);

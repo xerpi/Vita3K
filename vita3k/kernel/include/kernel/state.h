@@ -114,6 +114,11 @@ struct KernelState {
     unsigned int tls_psize = 0;
     unsigned int tls_msize = 0;
 
+    // Guards the process's object counters
+    std::mutex process_counters_mutex;
+    // The bytes of the process's message pipe buffers
+    SceSize msg_pipe_buffer_bytes = 0;
+
     // Thread manager objects other than threads, by UID
     KernelObjects objects;
     // The objects the kernel made for itself, which no guest UID reaches
@@ -150,6 +155,8 @@ struct KernelState {
     // Returns the process time at a time of the host clock that timers count with
     uint64_t process_time_at(uint64_t clock_time) const;
     Ptr<SceProcessParam> process_param;
+    // The build version the main module declares, or 0
+    SceUInt32 sdk_version = 0;
     Ptr<void> client_vtable = Ptr<void>(0);
     Ptr<Address> shellsvc_client = Ptr<Address>(0);
     Ptr<void> libc_dso_handle_main = Ptr<void>(0);
@@ -170,6 +177,9 @@ struct KernelState {
     bool init(MemState &mem, const CallImportFunc &call_import, bool cpu_opt);
     void deinit(MemState &mem);
     void load_process_param(MemState &mem, Ptr<uint32_t> ptr);
+    // Counts bytes more of message pipe buffers, or returns ILLEGAL_SIZE if that passes the cap
+    SceInt32 add_msg_pipe_buffer(SceSize bytes);
+    void remove_msg_pipe_buffer(SceSize bytes);
     // Creates a dormant thread with these creation arguments, attr without
     // SCE_KERNEL_THREAD_ATTR_USER, or returns null
     ThreadStateRef create_thread(MemState &mem, const char *name, Ptr<const void> entry_point, int init_priority, SceInt32 affinity_mask, int stack_size, SceUInt32 attr);
