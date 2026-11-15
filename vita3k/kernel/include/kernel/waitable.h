@@ -52,6 +52,8 @@ protected:
             guard.unlock();
         return guard;
     }
+    // Whether the object was deleted, with the lock held.
+    bool is_deleted() const { return deleted; }
 
     // Runs the pending callbacks of a wait with callbacks and returns why it must end, or 0.
     [[nodiscard]] SceInt32 run_wait_callbacks(std::unique_lock<std::mutex> &lock, ThreadState &thread, bool callbacks);
