@@ -1420,10 +1420,10 @@ SceInt32 Condvar::wait(MemState &mem, ThreadState &thread, SceUInt32 *timeout, b
     const SceInt32 result = associated_mutex->relock(mem, thread, callbacks);
     if (timed_out && result == SCE_KERNEL_OK)
         return SCE_KERNEL_ERROR_WAIT_TIMEOUT;
-    // Report a wait ended by the mutex with the mutex error codes, also when the mutex was deleted
-    // before the wait went back to it. On a Vita a lightweight mutex deleted then leaves the waiter
-    // blocked instead, which isn't copied.
-    if (result == SCE_KERNEL_ERROR_WAIT_DELETE || result == SCE_KERNEL_ERROR_UNKNOWN_MUTEX_ID || result == SCE_KERNEL_ERROR_UNKNOWN_LW_MUTEX_ID)
+    // A mutex deleted during the relock gives the mutex delete error. One deleted before it gives
+    // the unknown mutex error. On a Vita a lightweight mutex deleted then leaves the waiter blocked
+    // instead, which isn't copied.
+    if (result == SCE_KERNEL_ERROR_WAIT_DELETE)
         return lightweight() ? SCE_KERNEL_ERROR_WAIT_DELETE_LW_MUTEX : SCE_KERNEL_ERROR_WAIT_DELETE_MUTEX;
     // only heavy mutexes can be canceled
     if (result == SCE_KERNEL_ERROR_WAIT_CANCEL)
