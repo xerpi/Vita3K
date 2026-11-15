@@ -42,6 +42,8 @@ public:
 
 protected:
     Waitable(SceUInt32 attr, const char *name);
+    // A waitable whose fields the lock of lock_owner guards, which must outlive it
+    Waitable(SceUInt32 attr, const char *name, Waitable &lock_owner);
 
     // Locks the object's fields for its own methods, with an empty lock once it was deleted
     [[nodiscard]] std::unique_lock<std::mutex> lock() const {
@@ -96,6 +98,8 @@ protected:
 
 private:
     const bool openable;
-    mutable std::mutex mutex;
+    std::mutex own_mutex;
+    // own_mutex, or the lock of the waitable it shares
+    std::mutex &mutex;
     bool deleted = false;
 };

@@ -240,6 +240,8 @@ private:
 
 using SemaphoreRef = Ref<Semaphore>;
 
+class Condvar;
+
 class Mutex : public Waitable, public IntrusiveLink<Mutex> {
 public:
     const SceInt32 init_count;
@@ -259,6 +261,9 @@ public:
     SceInt32 cancel(ThreadState &thread, SceInt32 new_count, SceUInt32 *num_wait_threads);
     // Gives a heavy mutex to its next waiter if thread, which is ending, still owns it.
     void release_if_owned_by(ThreadState &thread);
+    // Links a new condition variable on the mutex, or returns the unknown mutex error if the mutex
+    // was deleted.
+    SceInt32 add_condition(Condvar &condition);
 
 protected:
     Mutex(SceUInt32 attr, const char *name, SceInt32 init_count, ThreadStateRef thread, int ceiling, Ptr<SceKernelLwMutexWork> workarea = {});
@@ -276,8 +281,16 @@ protected:
     SceUID owner;
 
 private:
+    friend class Condvar;
+
     // The owner of a heavy mutex, which lists it, or null
     ThreadState *owner_thread = nullptr;
+    // The condition variables created on the mutex, until either is deleted, borrowed. They share
+    // the mutex's lock, which guards the list.
+    IntrusiveList<Condvar> conditions;
+
+    // release() for a caller that holds the lock
+    SceInt32 release_locked(MemState &mem, ThreadState &thread, SceInt32 unlock_count);
 
     void end_waits(SceUID deleter) override;
     bool lightweight() const { return get_uid_class() == UidClass::lw_mutex; }
@@ -419,7 +432,8 @@ private:
 
 using EventFlagRef = Ref<EventFlag>;
 
-class Condvar : public Waitable {
+// A condition variable, which shares the lock of its mutex
+class Condvar : public Waitable, public IntrusiveLink<Condvar> {
 public:
     struct SignalTarget {
         enum class Type {
@@ -445,11 +459,17 @@ public:
     // Returns how many threads wait on the condition variable, 0 once it was deleted.
     SceUInt32 num_waiters() const;
 
+    ~Condvar();
+
 protected:
     Condvar(SceUInt32 attr, const char *name, MutexRef associated_mutex);
 
 private:
+    friend class Mutex;
+
     void end_waits(SceUID deleter) override;
+    // Ends the waits on the condition variable when its mutex is deleted. The lock must be held.
+    void end_mutex_waits();
     bool lightweight() const { return get_uid_class() == UidClass::lw_cond; }
 };
 
