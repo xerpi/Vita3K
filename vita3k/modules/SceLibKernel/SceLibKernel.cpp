@@ -1257,8 +1257,12 @@ EXPORT(int, sceKernelCreateMsgPipe, const char *name, uint32_t type, uint32_t at
     TRACY_FUNC(sceKernelCreateMsgPipe, name, type, attr, bufSize, opt);
     if (const SceInt32 error = MsgPipe::check_create(name, type, attr, bufSize))
         return RET_ERROR(error);
+    ObjectLimit &limit = emuenv.kernel.object_limit(attr);
+    if (const SceInt32 error = limit.add())
+        return RET_ERROR(error);
 
     const auto msgpipe = Ref<MsgPipe>::make(attr, name, bufSize, thread_id);
+    msgpipe->limit = &limit;
     return emuenv.kernel.objects.add(msgpipe, emuenv.kernel.get_next_uid());
 }
 

@@ -135,8 +135,12 @@ EXPORT(int, __sceKernelCreateLwMutex, Ptr<SceKernelLwMutexWork> workarea, const 
     const int init_count = opt.get(emuenv.mem)->init_count;
     if (const SceInt32 error = Mutex::check_create(name, attr, init_count, nullptr, false))
         return RET_ERROR(error);
+    ObjectLimit &limit = emuenv.kernel.object_limit(attr);
+    if (const SceInt32 error = limit.add())
+        return RET_ERROR(error);
 
     const auto mutex = Ref<LwMutex>::make(attr, name, init_count, emuenv.kernel.get_thread(thread_id), SCE_KERNEL_LOWEST_PRIORITY_KERNEL, workarea);
+    mutex->limit = &limit;
     const SceUID uid = emuenv.kernel.objects.add(mutex, emuenv.kernel.get_next_uid());
     SceKernelLwMutexWork *workarea_mem = workarea.get(emuenv.mem);
     *workarea_mem = {};
@@ -242,11 +246,17 @@ EXPORT(SceUID, _sceKernelCreateCond, const char *pName, SceUInt32 attr, SceUID m
     TRACY_FUNC(_sceKernelCreateCond, pName, attr, mutexId, pOptParam);
     if (const SceInt32 error = Waitable::check_name(pName, attr))
         return RET_ERROR(error);
+    ObjectLimit &limit = emuenv.kernel.object_limit(attr);
+    if (const SceInt32 error = limit.add())
+        return RET_ERROR(error);
     const MutexRef mutex = emuenv.kernel.objects.find<HeavyMutex>(mutexId);
-    if (!mutex)
+    if (!mutex) {
+        limit.remove();
         return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_MUTEX_ID);
+    }
 
     const auto condvar = Ref<HeavyCond>::make(attr, pName, mutex);
+    condvar->limit = &limit;
     return emuenv.kernel.objects.add(condvar, emuenv.kernel.get_next_uid());
 }
 
@@ -254,8 +264,12 @@ EXPORT(SceUID, _sceKernelCreateEventFlag, const char *pName, SceUInt32 attr, Sce
     TRACY_FUNC(_sceKernelCreateEventFlag, pName, attr, initPattern, pOptParam);
     if (const SceInt32 error = EventFlag::check_create(pName, attr))
         return RET_ERROR(error);
+    ObjectLimit &limit = emuenv.kernel.object_limit(attr);
+    if (const SceInt32 error = limit.add())
+        return RET_ERROR(error);
 
     const auto event = Ref<EventFlag>::make(attr, pName, initPattern);
+    event->limit = &limit;
     return emuenv.kernel.objects.add(event, emuenv.kernel.get_next_uid());
 }
 
@@ -271,8 +285,12 @@ EXPORT(int, _sceKernelCreateLwCond, Ptr<SceKernelLwCondWork> workarea, const cha
     const MutexRef mutex = emuenv.kernel.objects.find<LwMutex>(assoc_mutex_uid);
     if (!mutex)
         return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_LW_MUTEX_ID);
+    ObjectLimit &limit = emuenv.kernel.object_limit(attr);
+    if (const SceInt32 error = limit.add())
+        return RET_ERROR(error);
 
     const auto condvar = Ref<LwCond>::make(attr, name, mutex, workarea);
+    condvar->limit = &limit;
     SceKernelLwCondWork *work = workarea.get(emuenv.mem);
     *work = {};
     work->uid = emuenv.kernel.objects.add(condvar, emuenv.kernel.get_next_uid());
@@ -311,8 +329,12 @@ EXPORT(int, _sceKernelCreateMutex, const char *name, SceUInt attr, int init_coun
         if (ceiling < 0 || (init_count > 0 && ceiling > thread->get_priority()))
             return RET_ERROR(SCE_KERNEL_ERROR_ILLEGAL_PRIORITY);
     }
+    ObjectLimit &limit = emuenv.kernel.object_limit(attr);
+    if (const SceInt32 error = limit.add())
+        return RET_ERROR(error);
 
     const auto mutex = Ref<HeavyMutex>::make(attr, name, init_count, thread, ceiling);
+    mutex->limit = &limit;
     return emuenv.kernel.objects.add(mutex, emuenv.kernel.get_next_uid());
 }
 
@@ -320,8 +342,12 @@ EXPORT(SceUID, _sceKernelCreateRWLock, const char *name, SceUInt32 attr, SceKern
     TRACY_FUNC(_sceKernelCreateRWLock, name, attr, opt_param);
     if (const SceInt32 error = RWLock::check_create(name, attr))
         return RET_ERROR(error);
+    ObjectLimit &limit = emuenv.kernel.object_limit(attr);
+    if (const SceInt32 error = limit.add())
+        return RET_ERROR(error);
 
     const auto rwlock = Ref<RWLock>::make(attr, name);
+    rwlock->limit = &limit;
     return emuenv.kernel.objects.add(rwlock, emuenv.kernel.get_next_uid());
 }
 
@@ -330,8 +356,12 @@ EXPORT(int, _sceKernelCreateSema, const char *name, SceUInt attr, int initVal, P
     const SceInt32 max_val = opt.get(emuenv.mem)->maxVal;
     if (const SceInt32 error = Semaphore::check_create(name, attr, initVal, max_val))
         return RET_ERROR(error);
+    ObjectLimit &limit = emuenv.kernel.object_limit(attr);
+    if (const SceInt32 error = limit.add())
+        return RET_ERROR(error);
 
     const auto semaphore = Ref<Semaphore>::make(attr, name, initVal, max_val);
+    semaphore->limit = &limit;
     return emuenv.kernel.objects.add(semaphore, emuenv.kernel.get_next_uid());
 }
 
@@ -344,8 +374,12 @@ EXPORT(SceUID, _sceKernelCreateSimpleEvent, const char *name, SceUInt32 attr, Sc
     TRACY_FUNC(_sceKernelCreateSimpleEvent, name, attr, init_pattern, pOptParam);
     if (const SceInt32 error = SimpleEvent::check_create(name, attr, init_pattern))
         return RET_ERROR(error);
+    ObjectLimit &limit = emuenv.kernel.object_limit(attr);
+    if (const SceInt32 error = limit.add())
+        return RET_ERROR(error);
 
     const auto event = Ref<SimpleEvent>::make(attr, name, init_pattern, thread_id);
+    event->limit = &limit;
     return emuenv.kernel.objects.add(event, emuenv.kernel.get_next_uid());
 }
 
@@ -353,8 +387,12 @@ EXPORT(int, _sceKernelCreateTimer, const char *name, SceUInt32 attr, const uint3
     TRACY_FUNC(_sceKernelCreateTimer, name, attr, opt_params);
     if (const SceInt32 error = Waitable::check_name(name, attr))
         return RET_ERROR(error);
+    ObjectLimit &limit = emuenv.kernel.object_limit(attr);
+    if (const SceInt32 error = limit.add())
+        return RET_ERROR(error);
 
     const auto timer = Ref<Timer>::make(emuenv.kernel.timers, attr, name, thread_id);
+    timer->limit = &limit;
     return emuenv.kernel.objects.add(timer, emuenv.kernel.get_next_uid());
 }
 
@@ -973,7 +1011,13 @@ EXPORT(SceUID, _sceKernelRegisterThreadEventHandler, Ptr<const char> name, SceUI
         return RET_ERROR(SCE_KERNEL_ERROR_INVALID_ARGUMENT);
     if (!is_valid_addr(emuenv.mem, opt->handler.address() & ~1))
         return RET_ERROR(SCE_KERNEL_ERROR_ILLEGAL_ADDR);
-    return emuenv.kernel.register_thread_event_handler(Ref<ThreadEventHandler>::make(name_copy, target, mask, opt->handler.address(), opt->common));
+    ObjectLimit &limit = emuenv.kernel.plain_object_limit;
+    if (const SceInt32 error = limit.add())
+        return RET_ERROR(error);
+
+    const auto handler = Ref<ThreadEventHandler>::make(name_copy, target, mask, opt->handler.address(), opt->common);
+    handler->limit = &limit;
+    return emuenv.kernel.register_thread_event_handler(handler);
 }
 
 EXPORT(int, _sceKernelSendMsgPipeVector) {
@@ -1419,8 +1463,13 @@ EXPORT(SceUID, sceKernelCreateCallback, Ptr<const char> name, SceUInt32 attr, Pt
         return RET_ERROR(SCE_KERNEL_ERROR_ILLEGAL_ATTR);
     if (!is_valid_addr(emuenv.mem, callbackFunc.address() & ~1))
         return RET_ERROR(SCE_KERNEL_ERROR_ILLEGAL_ADDR);
+    ObjectLimit &limit = emuenv.kernel.object_limit(attr);
+    if (const SceInt32 error = limit.add())
+        return RET_ERROR(error);
 
-    return emuenv.kernel.get_thread(thread_id)->add_callback(Ref<Callback>::make(thread_id, name_copy, callbackFunc, pCommon));
+    const auto callback = Ref<Callback>::make(thread_id, name_copy, callbackFunc, pCommon);
+    callback->limit = &limit;
+    return emuenv.kernel.get_thread(thread_id)->add_callback(callback);
 }
 
 // Whether a game may create a thread with this priority, absolute or relative to the default one

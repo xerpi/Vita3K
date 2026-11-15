@@ -49,7 +49,7 @@ callback_inner_nonobject_waits  pass
 callback_inner_same_object      pass
 callback_inner_same_pipe        pass
 callback_inner_wait             pass
-callback_limit                  fail     # no per process object limit
+callback_limit                  pass
 callback_names                  pass
 callback_nesting                pass
 callback_nesting_depth          pass
@@ -313,7 +313,7 @@ lw_mutex                        pass
 lw_mutex_contention_stress      pass
 lw_mutex_create_check_order     fail     # lightweight mutex creates check their attributes, option size and work area in another order and with other errors
 lw_mutex_errors                 pass
-lw_mutex_object_limit           fail     # no per process object limit
+lw_mutex_object_limit           pass
 lw_mutex_semantics              pass
 lw_mutex_user_paths             fail     # the lightweight mutex user paths: try lock checks, an unlock after a delete, bad UID words, the info size check
 lw_openable_attr_rejected       fail     # lightweight conditions and mutexes take the attribute 0x80
@@ -364,7 +364,7 @@ memblock_info_sizes             fail     # the info calls don't check their stru
 memblock_kind_sizes             fail     # thread stacks don't count in the free sizes
 memblock_many                   fail     # blocks take only their own size and all of it comes back
 memblock_neighbors              fail     # skips itself as blocks are never next to each other, a find over two blocks gives the first
-memblock_object_limit           fail     # no object limit on semaphores, the Vita gives 0x8002450D at its limit
+memblock_object_limit           fail     # no limit on the opens of one object, which the Vita stops with 0x8002450C
 memblock_open                   fail     # every flag is taken, and an open gives the original block at its address instead of a new mapping
 memblock_open_count             fail     # an open returns its original's UID
 memblock_open_failed_free       fail     # opens of CDRAM and uncached blocks and opens with flags 0 aren't refused
@@ -490,8 +490,8 @@ nonblocking_wait_preempt        fail     # threads ignore their core and priorit
 nonobject_wait_priority_change  fail     # threads ignore their priority, so a woken thread below the main thread runs at once
 nonopenable_name_long_each_kind pass
 nonwaiting_calls_no_yield       fail     # a non-waiting mutex lock or unlock yields to the other thread, the Vita doesn't
-object_limit_source             fail     # no per process object limit
-object_limits                   fail     # no per process object limit
+object_limit_source             pass
+object_limits                   pass
 open                            pass
 open_close_kinds                fail     # an open returns the creating UID, close does nothing
 open_name_rules                 fail     # openable names, NAME_TOO_LONG at 32 characters

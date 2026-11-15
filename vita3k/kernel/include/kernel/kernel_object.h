@@ -48,6 +48,33 @@ enum class UidClass : SceUInt32 {
 
 class KernelObject;
 
+// A count of the objects of one kind a process holds, up to a limit
+class ObjectLimit {
+public:
+    explicit ObjectLimit(SceUInt32 max)
+        : max(max) {}
+
+    // Counts one more object, or returns SCE_KERNEL_ERROR_UID_RL_OVERFLOW if the process holds max
+    SceInt32 add() {
+        const std::lock_guard<std::mutex> lock(mutex);
+        if (count >= max)
+            return SCE_KERNEL_ERROR_UID_RL_OVERFLOW;
+        ++count;
+        return SCE_KERNEL_OK;
+    }
+
+    void remove() {
+        const std::lock_guard<std::mutex> lock(mutex);
+        assert(count > 0);
+        --count;
+    }
+
+private:
+    std::mutex mutex;
+    SceUInt32 count = 0;
+    const SceUInt32 max;
+};
+
 // A kernel object type with a single class, given by its static uid_class.
 template <typename T>
 concept KernelObjectClass = std::derived_from<T, KernelObject> && std::is_final_v<T> && requires {
@@ -72,10 +99,17 @@ public:
 
     SceUID uid{};
     char name[SCE_UID_NAMELEN + 1] = {};
+    // The process limit the object holds a place in until it is destroyed, or null
+    ObjectLimit *limit = nullptr;
 
 protected:
     explicit KernelObject(const char *name) {
         std::ranges::copy(std::string_view(name, strnlen(name, SCE_UID_NAMELEN)), this->name);
+    }
+
+    ~KernelObject() override {
+        if (limit)
+            limit->remove();
     }
 };
 

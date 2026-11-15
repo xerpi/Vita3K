@@ -107,6 +107,10 @@
 
 #define SCE_KERNEL_MSG_PIPE_TYPE_USER_MAIN 0x00000040U
 
+// The most objects a process may hold that aren't openable, and that are
+#define SCE_KERNEL_PROCESS_PLAIN_OBJECTS_MAX 0x800U
+#define SCE_KERNEL_PROCESS_OPENABLE_OBJECTS_MAX 0x100U
+
 // The bits that order the threads waiting on a message pipe, separately for senders and receivers
 #define SCE_KERNEL_MSG_PIPE_ATTR_TH_MASK 0x0000000FU
 #define SCE_KERNEL_MSG_PIPE_ATTR_TH_PRIO_S 0x00000001U

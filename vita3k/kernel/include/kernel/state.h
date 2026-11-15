@@ -114,6 +114,10 @@ struct KernelState {
     unsigned int tls_psize = 0;
     unsigned int tls_msize = 0;
 
+    // The counts of the objects guest calls made, which aren't openable and which are. They outlive
+    // the objects, which give their places back when destroyed.
+    ObjectLimit plain_object_limit{ SCE_KERNEL_PROCESS_PLAIN_OBJECTS_MAX };
+    ObjectLimit openable_object_limit{ SCE_KERNEL_PROCESS_OPENABLE_OBJECTS_MAX };
     // Thread manager objects other than threads, by UID
     KernelObjects objects;
     // The objects the kernel made for itself, which no guest UID reaches
@@ -165,6 +169,11 @@ struct KernelState {
     // set
     SceUID get_next_uid() {
         return static_cast<SceUID>(0x40000000 | next_uid++ << 1 | 1);
+    }
+
+    // Returns the limit a guest create of an object with attr counts against
+    ObjectLimit &object_limit(SceUInt32 attr) {
+        return attr & SCE_KERNEL_ATTR_OPENABLE ? openable_object_limit : plain_object_limit;
     }
 
     bool init(MemState &mem, const CallImportFunc &call_import, bool cpu_opt);
