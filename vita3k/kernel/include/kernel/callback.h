@@ -44,6 +44,9 @@ public:
     const Ptr<SceKernelCallbackFunction> cb_func; // Function to execute when the callback should run
     const Ptr<void> userdata; // User-provided data - passed as pCommon
 
+    // Records a notify with arg from notifier_id, with the owner's mutex held
+    void note(SceInt32 arg, SceUID notifier_id);
+
 private:
     friend struct ThreadState;
 

@@ -55,34 +55,47 @@ void Waitable::wake_one(ThreadState &thread, Waitable *queue, SceInt32 result) {
     if (queue) {
         queue->waiters.remove(thread);
         thread.waited = nullptr;
-        thread.ender_result = result;
-        queue->wait_ended(thread, result);
     }
-    thread.end_wait(result);
+    // The result is stored before the class's hook runs
+    thread.wait_result = result;
+    if (queue)
+        queue->wait_ended(thread, result);
+    thread.wait_target = {};
+    thread.update_status(ThreadStatus::ready);
 }
 
 std::size_t Waitable::wake_all(SceInt32 result) {
     return wake_all_if([](ThreadState &) { return true; }, result);
 }
 
-void Waitable::queue(ThreadState &thread, SceUInt32 type, const WaitRequest &request) {
+SceInt32 Waitable::queue(ThreadState &thread, SceUInt32 type, const WaitRequest &request, Deadline deadline, SceUInt32 *timeout) {
     assert(!thread.linked());
     const std::lock_guard<std::mutex> thread_lock(thread.thread_mutex);
+    // The thread's end comes first, then a deadline already gone, then a pending callback
+    if (thread.exiting())
+        return SCE_KERNEL_ERROR_THREAD_STOPPED;
+    // A deadline already gone doesn't queue and leaves no time
+    if (std::chrono::steady_clock::now() >= deadline) {
+        writeback_timeout(timeout, deadline);
+        return SCE_KERNEL_ERROR_WAIT_TIMEOUT;
+    }
+    // A callback already pending leaves the timeout as it was
+    if ((type & SCE_KERNEL_WAITTYPE_CB_BIT) && thread.callback_pending)
+        return SCE_KERNEL_ERROR_NOTIFY_CALLBACK;
+    // Only a wait that queues adds its side counts, so a refused one has none to undo. The hook reads
+    // the priority the thread queues with.
     thread.request = request;
-    thread.ender_result.reset();
-    // The hook reads the priority the thread queues with
     thread.queued_priority = thread.priority;
     waiter_added(thread);
-    // A new wait starts with no result, so a wake left over from an earlier one can't end it. The
-    // thread shows the wait from here, and its link and its target change together.
+    // The thread shows the wait from here, and its link and its target change together
     thread.wait_target = { type, uid };
-    thread.wait_result.reset();
     thread.waited = Ref<Waitable>::from(*this);
     thread.update_status(ThreadStatus::waiting);
     if (attr & SCE_KERNEL_ATTR_TH_PRIO)
         insert_waiter_by_priority(thread);
     else
         waiters.push_back(thread);
+    return SCE_KERNEL_OK;
 }
 
 void Waitable::insert_waiter_by_priority(ThreadState &thread) {
@@ -105,26 +118,16 @@ void Waitable::requeue(ThreadState &thread) {
     }
 }
 
-void Waitable::unqueue(ThreadState &thread, SceInt32 result) {
-    const std::lock_guard<std::mutex> thread_lock(thread.thread_mutex);
-    if (!thread.linked())
-        return;
-    waiters.remove(thread);
-    thread.waited = nullptr;
-    thread.wait_target = {};
-    wait_ended(thread, result);
-}
-
 Waitable::Waitable(SceUInt32 attr, const char *name)
     : WithClass(name)
     , attr(attr)
     , openable(attr & SCE_KERNEL_ATTR_OPENABLE) {}
 
 void Waitable::on_delete(SceUID deleter) {
-    const std::lock_guard<std::mutex> guard(mutex);
+    std::unique_lock<std::mutex> guard(mutex);
     assert(!deleted);
     deleted = true;
-    end_waits(deleter);
+    end_waits(deleter, guard);
 }
 
 SceInt32 Waitable::run_wait_callbacks(std::unique_lock<std::mutex> &lock, ThreadState &thread, bool callbacks) {
@@ -140,33 +143,17 @@ SceInt32 Waitable::run_wait_callbacks(std::unique_lock<std::mutex> &lock, Thread
 }
 
 SceInt32 Waitable::wait(std::unique_lock<std::mutex> &lock, ThreadState &thread, SceUInt32 type, const WaitRequest &request, Deadline deadline, SceUInt32 *timeout) {
-    const bool callbacks = type & SCE_KERNEL_WAITTYPE_CB_BIT;
-    if (std::chrono::steady_clock::now() >= deadline) {
-        writeback_timeout(timeout, deadline);
-        return SCE_KERNEL_ERROR_WAIT_TIMEOUT;
-    }
-    // A callback already pending leaves the timeout as it was
-    if (callbacks && thread.has_pending_callbacks())
-        return SCE_KERNEL_ERROR_NOTIFY_CALLBACK;
-    queue(thread, type, request);
+    if (const SceInt32 refused = queue(thread, type, request, deadline, timeout))
+        return refused;
+    lock.unlock();
     SceInt32 result;
-    // Ignore stray wakeups, like one left over from an earlier wait
-    do {
-        lock.unlock();
-        result = thread.wait(deadline);
-        lock.lock();
-    } while (!thread.ender_result && result == SCE_KERNEL_OK);
-    writeback_timeout(timeout, deadline);
-    // A waker's result wins, it already handed over what the waiter waits for, unless the thread is
-    // ending. Read once, since a wait in the callbacks below may reuse it.
-    if (const std::optional<SceInt32> ended = thread.ender_result; ended && result != SCE_KERNEL_ERROR_THREAD_STOPPED) {
-        // The callback that ended the sleep runs before the waker's result is returned
-        if (result == SCE_KERNEL_ERROR_NOTIFY_CALLBACK && run_wait_callbacks(lock, thread, callbacks) == SCE_KERNEL_ERROR_THREAD_STOPPED)
-            return SCE_KERNEL_ERROR_THREAD_STOPPED;
-        return *ended;
+    {
+        // Whoever ends the wait takes the thread off the queue and serves the others
+        std::unique_lock<std::mutex> thread_lock(thread.thread_mutex);
+        result = thread.sleep(thread_lock, deadline);
     }
-    unqueue(thread, result);
-    serve();
+    lock.lock();
+    writeback_timeout(timeout, deadline);
     return result;
 }
 
@@ -214,10 +201,10 @@ SceInt32 SimpleEvent::check_create(const char *name, SceUInt32 attr, SceUInt32 i
     return SCE_KERNEL_OK;
 }
 
-void Event::end_waits(SceUID deleter) {
+void Event::end_waits(SceUID deleter, std::unique_lock<std::mutex> &guard) {
     // The waits for the delete event get it with the deleting thread's user data, then the others end
     fire(SCE_KERNEL_EVENT_DELETE, system_event_user_data(deleter), true);
-    notify_callbacks(SCE_KERNEL_EVENT_DELETE);
+    notify_event_callbacks(guard, SCE_KERNEL_EVENT_DELETE);
     wake_all(SCE_KERNEL_ERROR_WAIT_DELETE);
 }
 
@@ -255,16 +242,53 @@ SceInt32 Event::unregister_callbacks() {
     return SCE_KERNEL_OK;
 }
 
-void Event::notify_callbacks(SceInt32 arg) {
+void Event::notify_event_callbacks(std::unique_lock<std::mutex> &guard, SceInt32 arg) {
+    // The owners waiting with callbacks on other objects, whose waits end once the event is let go,
+    // since its lock can't come before theirs
+    RefForwardList<ThreadState> wakes;
     for (auto it = registrations.begin(); it != registrations.end();) {
-        CallbackRegistration &registration = *it;
-        ++it;
+        CallbackRegistration &registration = *it++;
         Callback &callback = *registration.callback;
-        // A callback whose owner is gone, or that was closed, is dropped
         const ThreadStateRef owner = registration.kernel.get_thread(callback.thread_id);
-        if (!owner || !owner->notify_callback(callback, arg, registration.notify_id))
+        std::unique_lock<std::mutex> lock;
+        if (owner)
+            lock = std::unique_lock<std::mutex>(owner->thread_mutex);
+        // A callback whose owner is gone, or that was closed, is dropped
+        if (!owner || !callback.linked()) {
             registrations.remove(registration);
+            continue;
+        }
+        callback.note(arg, registration.notify_id);
+        owner->callback_pending = true;
+        // An owner that doesn't wait with callbacks only keeps the notification
+        if (!(owner->status == ThreadStatus::waiting && (owner->wait_target.type & SCE_KERNEL_WAITTYPE_CB_BIT)))
+            continue;
+        // A wait on this event ends with the walk's lock and no serve, and a wait on nothing needs none
+        Waitable *const object = owner->waited.get();
+        if (!object || object == this) {
+            Waitable::wake_one(*owner, object, SCE_KERNEL_ERROR_NOTIFY_CALLBACK);
+            continue;
+        }
+        // An owner already in a walk's list, this one's or another's, gets its wait ended by that walk
+        if (IntrusiveForwardList<ThreadState>::linked(*owner))
+            continue;
+        wakes.push_front(owner);
     }
+    if (wakes.empty())
+        return;
+    guard.unlock();
+    while (!wakes.empty()) {
+        // Taken off with the owner's lock held, since other walks read its link with it held
+        std::unique_lock<std::mutex> lock(wakes.front().thread_mutex);
+        const ThreadStateRef owner = wakes.pop_front();
+        // Read in the step, since the wait may end while no lock is held, and a new wait with
+        // callbacks begins only once the callbacks ran
+        owner->change_wait(lock, [&](Waitable *queue) {
+            if (owner->status == ThreadStatus::waiting && (owner->wait_target.type & SCE_KERNEL_WAITTYPE_CB_BIT) && owner->callback_pending)
+                Waitable::wake_one(*owner, queue, SCE_KERNEL_ERROR_NOTIFY_CALLBACK);
+        });
+    }
+    guard.lock();
 }
 
 SceInt32 Event::try_take(SceUInt32 wait_pattern, SceUInt32 *result_pattern, SceUInt64 *user_data) {
@@ -335,7 +359,7 @@ SceInt32 Event::set_or_pulse(SceUInt32 set_pattern, SceUInt64 user_data, bool is
 }
 
 SceInt32 Event::set_or_pulse_and_notify(SceUInt32 set_pattern, SceUInt64 user_data, bool is_set, SceInt32 notify_arg) {
-    const auto guard = lock();
+    auto guard = lock();
     if (!guard)
         return SCE_KERNEL_ERROR_UNKNOWN_EVENT_ID;
     if (set_pattern & ~SCE_KERNEL_EVENT_USER_DEFINED_MASK)
@@ -345,25 +369,25 @@ SceInt32 Event::set_or_pulse_and_notify(SceUInt32 set_pattern, SceUInt64 user_da
 
     // The waiters get the bits before the callbacks are notified
     fire(set_pattern, user_data, is_set);
-    notify_callbacks(notify_arg);
+    notify_event_callbacks(guard, notify_arg);
     return SCE_KERNEL_OK;
 }
 
 void SimpleEvent::pulse_and_notify(SceUInt32 pattern, SceInt32 notify_arg) {
-    const auto guard = lock();
+    auto guard = lock();
     if (!guard)
         return;
     fire(pattern, 0, false);
-    notify_callbacks(notify_arg);
+    notify_event_callbacks(guard, notify_arg);
 }
 
 SceInt32 Event::set_system_event(SceUInt32 event, SceUInt64 user_data) {
-    const auto guard = lock();
+    auto guard = lock();
     if (!guard)
         return SCE_KERNEL_ERROR_UNKNOWN_EVENT_ID;
     fire(event, user_data, true);
     // The callbacks get the event's bit as the argument
-    notify_callbacks(event);
+    notify_event_callbacks(guard, event);
     return SCE_KERNEL_OK;
 }
 
@@ -584,23 +608,23 @@ void TimerService::run() {
 }
 
 void Timer::expire(uint64_t cutoff) {
-    const auto guard = lock();
+    auto guard = lock();
     // A delete, stop, cancel or new event since the service took the timer can leave nothing due
     if (!guard || !timers.take_due(*this, cutoff))
         return;
     fire(SCE_KERNEL_EVENT_TIMER, 0, !is_pulse);
-    notify_callbacks(0);
     // A one shot event stays armed, so a start or a set time arms it again
-    if (!is_repeat)
-        return;
-    const uint64_t next = deadline + std::max(event_interval, TIMER_EVENT_FLOOR);
-    schedule = next - base;
-    timers.arm(*this, next);
+    if (is_repeat) {
+        const uint64_t next = deadline + std::max(event_interval, TIMER_EVENT_FLOOR);
+        schedule = next - base;
+        timers.arm(*this, next);
+    }
+    notify_event_callbacks(guard, 0);
 }
 
-void Timer::end_waits(SceUID deleter) {
+void Timer::end_waits(SceUID deleter, std::unique_lock<std::mutex> &guard) {
     timers.disarm(*this);
-    Event::end_waits(deleter);
+    Event::end_waits(deleter, guard);
 }
 
 SceInt32 Timer::set_event(SceUID type, SceKernelSysClock interval, SceInt32 repeats) {
@@ -786,7 +810,7 @@ SceInt32 Mutex::check_count(SceInt32 count) const {
     return SCE_KERNEL_OK;
 }
 
-void Mutex::end_waits(SceUID) {
+void Mutex::end_waits(SceUID, std::unique_lock<std::mutex> &) {
     wake_all(SCE_KERNEL_ERROR_WAIT_DELETE);
     clear_owner();
 }
@@ -1074,7 +1098,7 @@ SceInt32 RWLock::check_create(const char *name, SceUInt32 attr) {
     return SCE_KERNEL_OK;
 }
 
-void RWLock::end_waits(SceUID) {
+void RWLock::end_waits(SceUID, std::unique_lock<std::mutex> &) {
     wake_all(SCE_KERNEL_ERROR_WAIT_DELETE);
     clear_write_owner();
 }
@@ -1294,7 +1318,7 @@ SceInt32 Semaphore::check_create(const char *name, SceUInt32 attr, SceInt32 init
     return SCE_KERNEL_OK;
 }
 
-void Semaphore::end_waits(SceUID) {
+void Semaphore::end_waits(SceUID, std::unique_lock<std::mutex> &) {
     wake_all(SCE_KERNEL_ERROR_WAIT_DELETE);
 }
 
@@ -1410,7 +1434,7 @@ SceInt32 Condvar::check_create(const char *name, SceUInt32 attr) {
     return SCE_KERNEL_OK;
 }
 
-void Condvar::end_waits(SceUID) {
+void Condvar::end_waits(SceUID, std::unique_lock<std::mutex> &) {
     // wait() maps this to the condition's own delete error
     wake_all(SCE_KERNEL_ERROR_WAIT_DELETE);
 }
@@ -1552,7 +1576,7 @@ SceInt32 EventFlag::check_mode(SceUInt32 wait_mode) {
     return SCE_KERNEL_OK;
 }
 
-void EventFlag::end_waits(SceUID) {
+void EventFlag::end_waits(SceUID, std::unique_lock<std::mutex> &) {
     wake_all(SCE_KERNEL_ERROR_WAIT_DELETE);
     clear_holder();
     holds = 0;
@@ -1777,14 +1801,14 @@ SceInt32 MsgPipe::check_create(const char *name, SceUInt32 type, SceUInt32 attr,
     return SCE_KERNEL_OK;
 }
 
-void MsgPipe::end_waits(SceUID deleter) {
+void MsgPipe::end_waits(SceUID deleter, std::unique_lock<std::mutex> &guard) {
     write_pos = 0;
     read_pos = 0;
     held = 0;
     waiting_side = Side::none;
     side_count = 0;
     head_partial = false;
-    Event::end_waits(deleter);
+    Event::end_waits(deleter, guard);
 }
 
 void MsgPipe::waiter_added(ThreadState &thread) {
@@ -1831,7 +1855,7 @@ void MsgPipe::wait_ended(ThreadState &thread, SceInt32) {
         waiting_side = Side::none;
 }
 
-SceInt32 MsgPipe::transfer_result(SceInt32 result, const MsgPipeTransfer &transfer, bool sending) {
+SceInt32 MsgPipe::transfer_result(std::unique_lock<std::mutex> &guard, SceInt32 result, const MsgPipeTransfer &transfer, bool sending) {
     if (result == SCE_KERNEL_ERROR_THREAD_STOPPED)
         return result;
     const SceUInt32 moved = transfer.total - transfer.left;
@@ -1846,7 +1870,7 @@ SceInt32 MsgPipe::transfer_result(SceInt32 result, const MsgPipeTransfer &transf
         const SceUInt64 data = static_cast<SceUInt32>(result)
             | (static_cast<SceUInt64>(result < 0 ? ~0U : moved) << 32);
         fire(bits, data, true);
-        notify_callbacks(bits);
+        notify_event_callbacks(guard, bits);
     }
     return result;
 }
@@ -2083,20 +2107,20 @@ SceInt32 MsgPipe::receive(ThreadState &thread, MemState &mem, SceUInt32 wait_mod
     const Deadline deadline = deadline_from(timeout);
     while (true) {
         if (const SceInt32 r = run_wait_callbacks(guard, thread, callbacks))
-            return transfer_result(r, receiver, false);
+            return transfer_result(guard, r, receiver, false);
         // Don't take anything while other receivers are ahead in the queue. The size is written
         // after every attempt.
         const bool done = goes_first(request, thread.get_priority()) && take(receiver);
         receiver.report();
         // The callbacks notified meanwhile run also after a receive that got its bytes
         if (done)
-            return finish_wait(guard, thread, callbacks, transfer_result(SCE_KERNEL_OK, receiver, false));
+            return finish_wait(guard, thread, callbacks, transfer_result(guard, SCE_KERNEL_OK, receiver, false));
         // A receive that took the last bytes and waits for more leaves no data to report
         if (held == 0)
             pattern &= ~SCE_KERNEL_EVENT_DATA_EXIST;
         const SceInt32 result = Waitable::wait(guard, thread, type, request, deadline, timeout);
         if (result != SCE_KERNEL_ERROR_NOTIFY_CALLBACK)
-            return finish_wait(guard, thread, callbacks, transfer_result(result, receiver, false));
+            return finish_wait(guard, thread, callbacks, transfer_result(guard, result, receiver, false));
     }
 }
 
@@ -2126,22 +2150,22 @@ SceInt32 MsgPipe::send(ThreadState &thread, MemState &mem, SceUInt32 wait_mode, 
     const Deadline deadline = deadline_from(timeout);
     while (true) {
         if (const SceInt32 r = run_wait_callbacks(guard, thread, callbacks))
-            return transfer_result(r, sender, true);
+            return transfer_result(guard, r, sender, true);
         // Don't send anything while other senders are ahead in the queue. The size is written
         // after every attempt.
         const bool done = goes_first(request, thread.get_priority()) && give(sender);
         sender.report();
         // The callbacks notified meanwhile run also after a send that moved its bytes
         if (done)
-            return finish_wait(guard, thread, callbacks, transfer_result(SCE_KERNEL_OK, sender, true));
+            return finish_wait(guard, thread, callbacks, transfer_result(guard, SCE_KERNEL_OK, sender, true));
         const SceInt32 result = Waitable::wait(guard, thread, type, request, deadline, timeout);
         if (result != SCE_KERNEL_ERROR_NOTIFY_CALLBACK)
-            return finish_wait(guard, thread, callbacks, transfer_result(result, sender, true));
+            return finish_wait(guard, thread, callbacks, transfer_result(guard, result, sender, true));
     }
 }
 
 SceInt32 MsgPipe::try_receive(ThreadState &thread, MemState &mem, SceUInt32 wait_mode, std::span<const MsgPipeVector> pieces, SceSize *size) {
-    const auto guard = lock();
+    auto guard = lock();
     if (!guard)
         return SCE_KERNEL_ERROR_UNKNOWN_MSG_PIPE_ID;
     const std::expected<SceSize, SceInt32> total = check_pieces(pieces);
@@ -2151,12 +2175,12 @@ SceInt32 MsgPipe::try_receive(ThreadState &thread, MemState &mem, SceUInt32 wait
     // Behind the receivers already waiting, or short of bytes for all of a FULL receive, it fails
     // without writing a size
     if (!goes_first({ .receiver = &receiver }, thread.get_priority()) || (receiver.full && receiver.total > available()))
-        return transfer_result(SCE_KERNEL_ERROR_MSG_PIPE_EMPTY, receiver, false);
-    return transfer_result(take(receiver) ? SCE_KERNEL_OK : SCE_KERNEL_ERROR_MSG_PIPE_EMPTY, receiver, false);
+        return transfer_result(guard, SCE_KERNEL_ERROR_MSG_PIPE_EMPTY, receiver, false);
+    return transfer_result(guard, take(receiver) ? SCE_KERNEL_OK : SCE_KERNEL_ERROR_MSG_PIPE_EMPTY, receiver, false);
 }
 
 SceInt32 MsgPipe::try_send(ThreadState &thread, MemState &mem, SceUInt32 wait_mode, std::span<const MsgPipeVector> pieces, SceSize *size) {
-    const auto guard = lock();
+    auto guard = lock();
     if (!guard)
         return SCE_KERNEL_ERROR_UNKNOWN_MSG_PIPE_ID;
     const std::expected<SceSize, SceInt32> total = check_pieces(pieces);
@@ -2166,8 +2190,8 @@ SceInt32 MsgPipe::try_send(ThreadState &thread, MemState &mem, SceUInt32 wait_mo
     // Behind the senders already waiting, or short of room for all of a FULL send, it fails without
     // writing a size
     if (!goes_first({ .sender = &sender }, thread.get_priority()) || (sender.full && sender.total > capacity - held))
-        return transfer_result(SCE_KERNEL_ERROR_MSG_PIPE_FULL, sender, true);
-    return transfer_result(give(sender) ? SCE_KERNEL_OK : SCE_KERNEL_ERROR_MSG_PIPE_FULL, sender, true);
+        return transfer_result(guard, SCE_KERNEL_ERROR_MSG_PIPE_FULL, sender, true);
+    return transfer_result(guard, give(sender) ? SCE_KERNEL_OK : SCE_KERNEL_ERROR_MSG_PIPE_FULL, sender, true);
 }
 
 SceInt32 MsgPipe::cancel(SceUInt32 *num_send_wait_threads, SceUInt32 *num_receive_wait_threads) {
