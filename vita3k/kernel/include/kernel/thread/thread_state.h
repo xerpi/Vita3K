@@ -158,8 +158,6 @@ public:
     // Runs the notified callbacks for a wait that ended with NOTIFY_CALLBACK, with no lock held.
     // Returns THREAD_STOPPED if the thread exits or is deleted meanwhile.
     [[nodiscard]] SceInt32 run_callbacks();
-    // Ends this thread's queued wait, so it shows no target and wait() returns.
-    void wake();
     // A host call that blocks the thread inside an export, like an audio output, during which the
     // thread counts as stopped. It shows WAITING on shown while it lives, or stays RUNNING without
     // a target.
@@ -197,6 +195,8 @@ public:
     // What the thread holds, which its end gives back. Called with the object's lock held.
     void add_held(Ref<EventFlag> flag);
     void remove_held(EventFlag &flag);
+    // remove_held() for an end of this thread's own wait, with thread_mutex held
+    void unlist_held(EventFlag &flag);
     void add_held(Ref<Mutex> mutex);
     void remove_held(Mutex &mutex);
     void add_held(Ref<RWLock> rwlock);
@@ -279,13 +279,20 @@ private:
     void request_ending(Ending how) { set_ending(std::max(ending, how)); }
     // Whether the thread's current wait has a result or the thread is ending. With thread_mutex held.
     bool wait_over() const { return exiting() || wait_result.has_value(); }
-    // wake() with thread_mutex held.
-    void end_wait();
+    // Ends the thread's wait with result, so it shows no target and wait() returns, with thread_mutex
+    // held. The first result counts.
+    void end_wait(SceInt32 result);
     // Sets the priority and its copy in TLS, with thread_mutex held.
     void set_priority(int new_priority);
+    // Runs step on the object the thread is queued on, or on null when it is queued on none, with
+    // thread_mutex held through lock and no object's lock held. Returns with lock dropped. The caller
+    // changes the thread first, so a wait begun while no lock is held sees the change at its start.
+    // The step checks again what it changes, since the same object may be waited on again.
+    template <typename Step>
+    void change_wait(std::unique_lock<std::mutex> &lock, Step step);
     // wait() with thread_mutex held through lock.
     [[nodiscard]] SceInt32 wait(std::unique_lock<std::mutex> &lock, Deadline deadline);
-    // Sleeps until wake(), a callback notify during the sleep if wait_target has the callback bit, the
+    // Sleeps until end_wait(), a callback notify during the sleep if wait_target has the callback bit, the
     // deadline, or the thread's exit or delete (THREAD_STOPPED), with thread_mutex held through lock.
     [[nodiscard]] SceInt32 sleep(std::unique_lock<std::mutex> &lock, Deadline deadline);
 
@@ -347,7 +354,9 @@ private:
     // What the thread waits on, empty otherwise. A queue sets it, and the waker or the wait's own end
     // clears it. A wait that queues on nothing sets and clears it itself.
     WaitTarget wait_target;
-    // The result the next wait() returns, set by the first wake() or callback notify
+    // The object whose queue the thread is linked in, set and cleared with the link
+    Ref<Waitable> waited;
+    // The result the next wait() returns, set by the first end_wait() or callback notify
     std::optional<SceInt32> wait_result;
     // A sceKernelSendSignal is pending for this thread.
     bool signal_pending = false;
@@ -392,7 +401,7 @@ ThreadState *Waitable::find_waiter(std::predicate<ThreadState &> auto pick) {
     return nullptr;
 }
 
-std::size_t Waitable::wake_waiters_if(std::predicate<ThreadState &> auto pick, SceInt32 result) {
+std::size_t Waitable::wake_all_if(std::predicate<ThreadState &> auto pick, SceInt32 result) {
     std::size_t woken = 0;
     for (auto it = waiters.begin(); it != waiters.end();) {
         ThreadState &thread = *it++;
@@ -402,4 +411,28 @@ std::size_t Waitable::wake_waiters_if(std::predicate<ThreadState &> auto pick, S
         ++woken;
     }
     return woken;
+}
+
+template <typename Step>
+void Waitable::change_wait(ThreadState &thread, std::unique_lock<std::mutex> &thread_lock, Step step) {
+    thread_lock.unlock();
+    const std::unique_lock<std::mutex> guard(mutex);
+    thread_lock.lock();
+    // A wait that ended meanwhile is done, and one begun since saw the change at its start
+    if (thread.waited.get() == this)
+        step(this);
+    // Serving wakes other threads, so the thread's lock goes first
+    thread_lock.unlock();
+    // A deleted object has nothing to give
+    if (!deleted)
+        serve();
+}
+
+template <typename Step>
+void ThreadState::change_wait(std::unique_lock<std::mutex> &lock, Step step) {
+    if (const Ref<Waitable> object = waited)
+        return object->change_wait(*this, lock, step);
+    // A delay or no wait has no object
+    step(nullptr);
+    lock.unlock();
 }
