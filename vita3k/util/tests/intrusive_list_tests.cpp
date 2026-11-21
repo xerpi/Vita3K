@@ -175,6 +175,7 @@ TEST(RefForwardList, HoldsReferences) {
         // The list keeps the objects alive
         EXPECT_EQ(destroyed, 0);
 
+        EXPECT_EQ(list.front().value, 2);
         Ref<Counted> first = list.pop_front();
         EXPECT_EQ(first->value, 2);
         EXPECT_FALSE(IntrusiveForwardList<Counted>::linked(*first));

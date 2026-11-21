@@ -250,6 +250,11 @@ public:
         return list.empty();
     }
 
+    // The first object, which the list keeps alive while it is on it
+    T &front() {
+        return list.front();
+    }
+
     // Links object at the front and takes its reference over
     void push_front(Ref<T> object) {
         list.push_front(*object.release_ownership());
