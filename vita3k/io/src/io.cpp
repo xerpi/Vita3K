@@ -340,6 +340,12 @@ static int host_open_error(const int error) {
     }
 }
 
+// An open needs an access mode, and APPEND and TRUNC need write access
+static bool open_access_refused(const int flags) {
+    const int access = flags & SCE_O_RDWR;
+    return access == 0 || (access == SCE_O_RDONLY && (flags & (SCE_O_APPEND | SCE_O_TRUNC)));
+}
+
 SceUID open_file(IOState &io, const char *path, const int flags, const fs::path &vita_fs_path, const char *export_name) {
     auto device = device::get_device(path);
     auto device_for_icase = device;
@@ -380,6 +386,9 @@ SceUID open_file(IOState &io, const char *path, const int flags, const fs::path 
         return IO_ERROR(SCE_ERROR_ERRNO_ENOENT);
     }
 
+    if ((flags & (SCE_O_APPEND | SCE_O_TRUNC)) == (SCE_O_APPEND | SCE_O_TRUNC))
+        return IO_ERROR(SCE_ERROR_ERRNO_EINVAL);
+
     // Do not allow any new files if they do not have a write flag.
     if (!fs::exists(system_path)) {
         if (!(flags & SCE_O_CREAT)) {
@@ -405,11 +414,22 @@ SceUID open_file(IOState &io, const char *path, const int flags, const fs::path 
                 return IO_ERROR(SCE_ERROR_ERRNO_ENOENT);
             }
         } else {
+            if (open_access_refused(flags))
+                return IO_ERROR(SCE_ERROR_ERRNO_EINVAL);
             if (!fs::exists(system_path.parent_path())) {
                 fs::create_directories(system_path.parent_path());
             }
             std::ofstream file(system_path);
         }
+    }
+    if (open_access_refused(flags))
+        return IO_ERROR(SCE_ERROR_ERRNO_EINVAL);
+    // TRUNC empties the file before it opens
+    if (flags & SCE_O_TRUNC) {
+        std::error_code error;
+        fs::resize_file(system_path, 0, error);
+        if (error)
+            LOG_WARN("Failed to truncate file {} (target path: {}): {}", system_path, path, error.message());
     }
 
     const auto normalized_path = device::construct_normalized_path(device, translated_path);
